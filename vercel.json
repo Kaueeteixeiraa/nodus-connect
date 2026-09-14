@@ -1,0 +1,14 @@
+{
+  "buildCommand": "pnpm build",
+  "outputDirectory": "dist/desktop",
+  "rewrites": [
+    {
+      "source": "/health",
+      "destination": "/api/relay"
+    },
+    {
+      "source": "/v1/(.*)",
+      "destination": "/api/relay"
+    }
+  ]
+}

@@ -1,0 +1,98 @@
+{
+  "name": "nodus-connect",
+  "version": "0.4.0",
+  "description": "Acesso remoto seguro, rapido e gratuito.",
+  "author": "Nodus Connect",
+  "private": true,
+  "type": "module",
+  "main": "apps/desktop/electron/main.cjs",
+  "packageManager": "pnpm@11.16.0",
+  "scripts": {
+    "icons": "node scripts/generate-icons.mjs",
+    "native:capture": "node scripts/build-native-capture.mjs",
+    "native:service": "node scripts/build-native-service.mjs",
+    "dev:desktop": "vite --config apps/desktop/vite.config.ts",
+    "dev:coordination": "tsx services/coordination/src/server.ts",
+    "start:relay": "tsx services/coordination/src/server.ts",
+    "desktop:dev": "node scripts/desktop-runner.mjs dev",
+    "desktop:start": "node scripts/desktop-runner.mjs start",
+    "desktop:pack": "pnpm icons && pnpm native:capture && pnpm build && electron-builder --win --x64 --dir",
+    "desktop:build": "pnpm icons && pnpm native:capture && pnpm build && electron-builder --win --x64",
+    "installer:build": "pnpm icons && pnpm native:capture && pnpm native:service && pnpm build && electron-builder --win --x64 --dir --config installer-builder.json && node scripts/make-installer.mjs",
+    "build": "tsc --noEmit && vite build --config apps/desktop/vite.config.ts",
+    "test": "vitest run",
+    "firebase:login": "npx firebase-tools login",
+    "firebase:deploy:rules": "npx firebase-tools deploy --only firestore:rules"
+  },
+  "dependencies": {
+    "@vitejs/plugin-react": "^5.0.0",
+    "firebase": "^12.17.1",
+    "lucide-react": "^1.43.0",
+    "react": "^19.1.1",
+    "react-dom": "^19.1.1",
+    "vite": "^7.1.1",
+    "ws": "^8.21.3"
+  },
+  "devDependencies": {
+    "@types/node": "^24.2.1",
+    "@types/react": "^19.1.9",
+    "@types/react-dom": "^19.1.7",
+    "@types/ws": "^8.18.1",
+    "electron": "^43.3.0",
+    "electron-builder": "^26.0.12",
+    "tsx": "^4.20.3",
+    "typescript": "^5.9.2",
+    "vitest": "^3.2.4"
+  },
+  "build": {
+    "appId": "com.nodus.connect",
+    "productName": "Nodus Connect",
+    "directories": {
+      "output": "outputs/desktop"
+    },
+    "files": [
+      "dist/desktop/**/*",
+      "apps/desktop/electron/**/*",
+      "native/bin/**/*",
+      "build/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "native/bin",
+        "to": "native",
+        "filter": [
+          "nodus-capture-status.exe",
+          "nodus-service.exe"
+        ]
+      }
+    ],
+    "win": {
+      "artifactName": "Nodus-Connect-Setup-${version}.${ext}",
+      "icon": "build/icon.ico",
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "nsis": {
+      "installerIcon": "build/icon.ico",
+      "uninstallerIcon": "build/icon.ico",
+      "installerHeaderIcon": "build/icon.ico",
+      "installerHeader": "build/installer-header.bmp",
+      "installerSidebar": "build/installer-sidebar.bmp",
+      "uninstallerSidebar": "build/installer-sidebar.bmp",
+      "include": "build/installer.nsh",
+      "runAfterFinish": false,
+      "oneClick": false,
+      "perMachine": true,
+      "allowToChangeInstallationDirectory": false,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true
+    }
+  }
+}

@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Nodus Connect</title>
+    <style>
+      :root { color-scheme: dark; font-family: Manrope, Segoe UI, Arial, sans-serif; background:#050811; color:#f4f8ff; }
+      * { box-sizing: border-box; }
+      body { margin:0; min-height:100vh; display:grid; place-items:center; padding:28px; background:
+        linear-gradient(rgba(72,142,215,.07) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(72,142,215,.07) 1px, transparent 1px),
+        radial-gradient(circle at 75% 35%, rgba(19,140,255,.26), transparent 34%),
+        #050811; background-size:72px 72px,72px 72px,auto,auto; }
+      main { width:min(460px,100%); padding:32px; border:1px solid rgba(80,160,255,.3); border-radius:18px; background:rgba(7,13,25,.9); box-shadow:0 30px 90px rgba(0,0,0,.42); }
+      .mark { width:52px; height:52px; display:grid; place-items:center; border:1px solid #58b7ff; color:#25e6ff; font-weight:900; font-size:24px; transform:rotate(45deg); margin-bottom:22px; }
+      .mark span { transform:rotate(-45deg); }
+      .eyebrow { margin:0 0 10px; color:#6ec5ff; font-size:12px; font-weight:900; letter-spacing:.14em; text-transform:uppercase; }
+      h1 { margin:0 0 10px; font-size:30px; }
+      p { margin:0 0 22px; color:#9fb0c7; line-height:1.5; }
+      button { width:100%; min-height:48px; border:0; border-radius:10px; color:white; background:linear-gradient(135deg,#25e6ff,#138cff); font:900 15px Manrope,Segoe UI,sans-serif; cursor:pointer; }
+      button:disabled { opacity:.55; cursor:default; }
+      .status { margin:18px 0 0; color:#25e6ff; font-weight:800; }
+      .error { color:#ff9aac; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <div class="mark"><span>N</span></div>
+      <p class="eyebrow">Nodus Connect</p>
+      <h1>Entre com Google</h1>
+      <p>Escolha sua conta para liberar o acesso ao Nodus neste computador.</p>
+      <button id="login" type="button">Entrar com Google</button>
+      <p id="status" class="status">Login protegido pelo Firebase.</p>
+    </main>
+    <script type="module">
+      import { initializeApp } from "https://www.gstatic.com/firebasejs/12.17.1/firebase-app.js";
+      import { getAuth, GoogleAuthProvider, signInWithPopup } from "https://www.gstatic.com/firebasejs/12.17.1/firebase-auth.js";
+
+      const params = new URLSearchParams(location.search);
+      const returnTo = params.get("return_to");
+      const state = params.get("state");
+      const status = document.getElementById("status");
+      const login = document.getElementById("login");
+      const auth = getAuth(initializeApp({
+        apiKey: "AIzaSyAN-UMMvnJlNFZ-hiiRvJHuCFzPPVmdR-c",
+        authDomain: "nodus-connect-kau-2026.firebaseapp.com",
+        projectId: "nodus-connect-kau-2026",
+        storageBucket: "nodus-connect-kau-2026.firebasestorage.app",
+        messagingSenderId: "550984197983",
+        appId: "1:550984197983:web:ee806c8cb40adba3d4f8ea",
+      }));
+
+      function validReturn(url) {
+        return /^http:\/\/127\.0\.0\.1:\d+\/google-web-result$/.test(url || "");
+      }
+
+      function done(extra) {
+        const url = new URL(returnTo);
+        url.searchParams.set("state", state);
+        Object.entries(extra).forEach(([key, value]) => value && url.searchParams.set(key, value));
+        location.href = url.toString();
+      }
+
+      function fail(message) {
+        status.textContent = message || "Nao foi possivel entrar com Google.";
+        status.className = "status error";
+        login.disabled = false;
+        if (validReturn(returnTo) && state) done({ error: "google", message: status.textContent });
+      }
+
+      login.addEventListener("click", async () => {
+        if (!validReturn(returnTo) || !state) return fail("Entrada indisponivel.");
+        login.disabled = true;
+        status.textContent = "Abrindo sua conta Google...";
+        try {
+          const provider = new GoogleAuthProvider();
+          provider.setCustomParameters({ prompt: "select_account" });
+          const result = await signInWithPopup(auth, provider);
+          const credential = GoogleAuthProvider.credentialFromResult(result);
+          status.textContent = "Conta confirmada. Voltando ao Nodus...";
+          done({
+            firebase_id_token: await result.user.getIdToken(),
+            google_id_token: credential?.idToken || "",
+            access_token: credential?.accessToken || "",
+          });
+        } catch (error) {
+          fail(error?.message || "Conta nao reconhecida.");
+        }
+      });
+    </script>
+  </body>
+</html>

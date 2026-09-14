@@ -1,0 +1,45 @@
+{
+  "appId": "com.nodus.connect.installer",
+  "productName": "Nodus Connect Setup",
+  "extraMetadata": {
+    "name": "nodus-connect-setup",
+    "main": "apps/installer/main.cjs",
+    "dependencies": {}
+  },
+  "directories": {
+    "output": "outputs/installer"
+  },
+  "afterPack": "scripts/prune-electron-output.cjs",
+  "files": [
+    "apps/installer/**/*",
+    "apps/desktop/electron/**/*",
+    "dist/desktop/**/*",
+    "build/icon.ico",
+    "build/icon.svg",
+    "package.json",
+    "!node_modules/**/*",
+    "!**/node_modules/**/*"
+  ],
+  "extraResources": [
+    {
+      "from": "native/bin",
+      "to": "native",
+      "filter": ["nodus-capture-status.exe", "nodus-service.exe"]
+    }
+  ],
+  "win": {
+    "artifactName": "Nodus-Connect-Installer-${version}.${ext}",
+    "icon": "build/icon.ico",
+    "target": [
+      {
+        "target": "portable",
+        "arch": [
+          "x64"
+        ]
+      }
+    ]
+  },
+  "portable": {
+    "artifactName": "Nodus-Connect-Installer-${version}.${ext}"
+  }
+}

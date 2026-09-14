@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; media-src 'self' blob:; connect-src 'self' https: wss:;" />
+    <title>Nodus Connect</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        min-width: 320px;
+        min-height: 100vh;
+        background:
+          radial-gradient(circle at 72% 28%, rgba(1, 92, 199, 0.22), transparent 34%),
+          radial-gradient(circle at 24% 76%, rgba(0, 216, 255, 0.08), transparent 28%),
+          #050811;
+        color: #f4f8ff;
+        font-family: "Segoe UI", system-ui, sans-serif;
+      }
+
+      .boot-screen {
+        display: grid;
+        min-height: 100vh;
+        place-items: center;
+      }
+
+      .boot-card {
+        display: grid;
+        gap: 10px;
+        width: min(420px, calc(100% - 48px));
+        padding: 28px;
+        border: 1px solid rgba(156, 187, 226, 0.13);
+        border-radius: 16px;
+        background: rgba(9, 15, 26, 0.78);
+        box-shadow: 0 30px 80px rgba(0, 0, 0, 0.35);
+      }
+
+      .boot-card strong {
+        font-size: 22px;
+      }
+
+      .boot-card span {
+        color: #9aa9bc;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="root">
+      <main class="boot-screen">
+        <div class="boot-card">
+          <strong>Nodus Connect</strong>
+          <span>Carregando aplicativo...</span>
+        </div>
+      </main>
+    </div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

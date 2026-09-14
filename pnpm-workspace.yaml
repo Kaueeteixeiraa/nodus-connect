@@ -1,0 +1,5 @@
+allowBuilds:
+  '@firebase/util': true
+  electron-winstaller: true
+  esbuild: true
+  protobufjs: true

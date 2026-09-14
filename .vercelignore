@@ -1,0 +1,9 @@
+outputs
+work
+dist
+build/*.ico
+build/nodus-payload.zip
+node_modules
+.vercel
+*.log
+*.tmp
