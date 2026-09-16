@@ -112,6 +112,7 @@ import {
 } from "./core/storage";
 import { createFileCryptoSession, decryptFileChunk, deriveFileCryptoKey, encryptFileChunk, type FileCryptoSession } from "./core/file-crypto";
 import { CapturePool, type CaptureLease, type PooledCapture } from "./core/capture-pool";
+import { advanceStage, recommendedStage, STAGE_LIMITS, type AdaptiveStage, type QualitySample } from "./core/adaptive-quality";
 
 type ServiceState = "connecting" | "online" | "offline" | "error";
 type WindowsServiceStatus = { installed: boolean; running: boolean };
@@ -148,11 +149,17 @@ type SessionMetrics = {
   sentFps: number;
   receivedFps: number;
   decodedFps: number;
+  renderFps: number;
+  renderDroppedFrames: number;
   latencyMs: number;
   route: "direct" | "relay" | "unknown";
   quality: "high" | "balanced" | "economy";
   codec: string;
   packetLossPct: number;
+  jitterMs: number;
+  availableKbps: number;
+  captureWidth: number;
+  captureHeight: number;
   encodeMs: number;
   decodeMs: number;
   droppedFrames: number;
@@ -172,7 +179,7 @@ type RemoteInputMessage =
   | { type: "screen-options"; displays: CaptureSource[] }
   | { type: "admin-request" }
   | { type: "admin-status"; status: "approved" | "denied" | "unavailable" };
-type CaptureSource = { id: string; name: string; displayId: string };
+type CaptureSource = { id: string; name: string; displayId: string; width: number; height: number };
 type FileTransferRecord = {
   id: string;
   sessionId: string;
@@ -268,17 +275,18 @@ export function App() {
     encodeTime: number;
     decodeTime: number;
     dropped: number;
+    lost: number;
+    receivedPackets: number;
     at: number;
   }>());
   const qualityTierRef = useRef(new Map<string, string>());
-  const performanceScaleRef = useRef(new Map<string, number>());
+  const adaptiveStateRef = useRef(new Map<string, { stage: AdaptiveStage; stableSamples: number }>());
   const requestedResolutionsRef = useRef(new Map<string, RemoteResolution>());
   const requestedQualitiesRef = useRef(new Map<string, LocalSettings["connectionQuality"]>());
   const requestedFpsRef = useRef(new Map<string, RemoteFrameRate>());
   const capturePoolRef = useRef(new CapturePool());
   const captureQueueRef = useRef<Promise<void>>(Promise.resolve());
   const captureCleanupRef = useRef(new Map<string, () => void>());
-  const capturePerformanceRef = useRef(new Map<string, { setReduced: CaptureLease["setReduced"]; reduced: boolean; slow: number; stable: number; encoderReduced: boolean; encoderSlow: number; encoderStable: number }>());
   const recordingRef = useRef(new Map<string, { recorder: MediaRecorder; chunks: BlobPart[] }>());
   const autoAcceptingRef = useRef(new Set<string>());
   const processedSignalsRef = useRef(new Set<string>());
@@ -286,6 +294,7 @@ export function App() {
   const outgoingRequestRef = useRef<SessionRequestRecord | null>(null);
   const sessionsRef = useRef<SessionRuntime[]>([]);
   const remoteVideoRef = useRef<HTMLVideoElement | null>(null);
+  const renderStatsRef = useRef(new Map<string, { fps: number; dropped: number }>());
   const activeRuntime = useMemo(
     () => sessionRuntimes.find((item) => item.session.sessionId === selectedSessionId) ?? sessionRuntimes[0] ?? null,
     [selectedSessionId, sessionRuntimes],
@@ -595,8 +604,30 @@ export function App() {
     });
     video.addEventListener("loadedmetadata", play);
     play();
-    return () => video.removeEventListener("loadedmetadata", play);
-  }, [remoteStream]);
+    const sessionId = activeSession?.sessionId;
+    let callback = 0;
+    let started = performance.now();
+    let frames = 0;
+    let dropped = 0;
+    let lastPresented = 0;
+    const onFrame: VideoFrameRequestCallback = (now, metadata) => {
+      frames++;
+      if (lastPresented) dropped += Math.max(0, metadata.presentedFrames - lastPresented - 1);
+      lastPresented = metadata.presentedFrames;
+      if (sessionId && now - started >= 1000) {
+        renderStatsRef.current.set(sessionId, { fps: Math.round(frames * 1000 / (now - started)), dropped });
+        started = now;
+        frames = 0;
+        dropped = 0;
+      }
+      callback = video.requestVideoFrameCallback(onFrame);
+    };
+    if (sessionId && remoteStream && video.requestVideoFrameCallback) callback = video.requestVideoFrameCallback(onFrame);
+    return () => {
+      video.removeEventListener("loadedmetadata", play);
+      if (callback) video.cancelVideoFrameCallback(callback);
+    };
+  }, [remoteStream, activeSession?.sessionId]);
 
   useEffect(() => {
     if (!captureSources.length) return;
@@ -777,7 +808,6 @@ export function App() {
     const stream = captureLease.stream;
     captureCleanupRef.current.get(request.sessionId)?.();
     captureCleanupRef.current.set(request.sessionId, captureLease.release);
-    capturePerformanceRef.current.set(request.sessionId, { setReduced: captureLease.setReduced, reduced: false, slow: 0, stable: 0, encoderReduced: false, encoderSlow: 0, encoderStable: 0 });
     const remoteNodusId = request.requesterNodusId;
     const peer = createPeer(request.sessionId, identity.nodusId, remoteNodusId, "host", getEffectiveIceServers());
     const permissions = request.grantedPermissions ?? allowedPermissions(request, settings);
@@ -968,8 +998,10 @@ export function App() {
   function startQualityMonitoring(sessionId: string, peer: RTCPeerConnection, role: RemoteSession["role"]) {
     const current = qualityTimersRef.current.get(sessionId);
     if (current) window.clearInterval(current);
+    let inspecting = false;
     const inspect = async () => {
-      if (peer.connectionState === "closed") return;
+      if (peer.connectionState === "closed" || inspecting) return;
+      inspecting = true;
       try {
         const reports = await peer.getStats();
         let bytes = 0;
@@ -982,7 +1014,11 @@ export function App() {
         let encodeTime = 0;
         let decodeTime = 0;
         let dropped = 0;
+        let captureWidth = 0;
+        let captureHeight = 0;
         let latencyMs = 0;
+        let jitterMs = 0;
+        let availableKbps = 0;
         let lost = 0;
         let received = 0;
         let route: SessionMetrics["route"] = "unknown";
@@ -993,7 +1029,7 @@ export function App() {
         let decoder = "";
         const codecs = new Map<string, string>();
         const candidates = new Map<string, string>();
-        let selectedPair: { localCandidateId?: string; remoteCandidateId?: string; currentRoundTripTime?: number } | undefined;
+        let selectedPair: { localCandidateId?: string; remoteCandidateId?: string; currentRoundTripTime?: number; availableOutgoingBitrate?: number } | undefined;
         for (const report of reports.values()) {
           const item = report as RTCStats & Record<string, number | string | boolean | undefined>;
           if (item.type === "codec") codecs.set(item.id, String(item.mimeType || "").split("/").pop()?.toUpperCase() || "");
@@ -1003,6 +1039,7 @@ export function App() {
               localCandidateId: String(item.localCandidateId || ""),
               remoteCandidateId: String(item.remoteCandidateId || ""),
               currentRoundTripTime: Number(item.currentRoundTripTime || 0),
+              availableOutgoingBitrate: Number(item.availableOutgoingBitrate || 0),
             };
           }
           if (item.type === "inbound-rtp" && item.kind === "video" && role === "viewer") {
@@ -1014,6 +1051,7 @@ export function App() {
             decoder = String(item.decoderImplementation || decoder);
             lost += Number(item.packetsLost || 0);
             received += Number(item.packetsReceived || 0);
+            jitterMs = Math.max(jitterMs, Number(item.jitter || 0) * 1000);
             codecId = String(item.codecId || codecId);
           }
           if (item.type === "outbound-rtp" && item.kind === "video" && role === "host") {
@@ -1028,15 +1066,19 @@ export function App() {
           if (item.type === "remote-inbound-rtp" && item.kind === "video" && role === "host") {
             lost += Number(item.packetsLost || 0);
             received += Number(item.packetsReceived || 0);
+            jitterMs = Math.max(jitterMs, Number(item.jitter || 0) * 1000);
           }
           if (item.type === "media-source" && item.kind === "video" && role === "host") {
             captured += Number(item.frames || 0);
             captureRate = Math.max(captureRate, Number(item.framesPerSecond || 0));
+            captureWidth = Math.max(captureWidth, Number(item.width || 0));
+            captureHeight = Math.max(captureHeight, Number(item.height || 0));
           }
         }
         codec = codecs.get(codecId) || "";
         if (selectedPair) {
           latencyMs = Math.round(Number(selectedPair.currentRoundTripTime || 0) * 1000);
+          availableKbps = Math.round(Number(selectedPair.availableOutgoingBitrate || 0) / 1000);
           route = candidates.get(String(selectedPair.localCandidateId)) === "relay" || candidates.get(String(selectedPair.remoteCandidateId)) === "relay" ? "relay" : "direct";
         }
         const now = performance.now();
@@ -1052,85 +1094,68 @@ export function App() {
         const decodeMs = previous && decoded > previous.decoded ? Math.round(((decodeTime - previous.decodeTime) * 1000 / (decoded - previous.decoded)) * 10) / 10 : 0;
         const droppedFrames = previous ? Math.max(0, dropped - previous.dropped) : 0;
         const fps = role === "host" ? encodedFps || sentFps || captureFps : decodedFps || receivedFps;
-        statsRef.current.set(sessionId, { bytes, captured, encoded, sent, received: receivedFrames, decoded, encodeTime, decodeTime, dropped, at: now });
-        const capturePerformance = capturePerformanceRef.current.get(sessionId);
-        if (role === "host" && previous && capturePerformance && (requestedFpsRef.current.get(sessionId) ?? settings.maxFps) >= 60) {
-          const targetFps = requestedFpsRef.current.get(sessionId) ?? settings.maxFps;
-          const floor = Math.round(targetFps * 0.82);
-          const stable = Math.round(targetFps * 0.95);
-          const activePicture = captureFps >= 10 || bitrateKbps >= 200 || limitation === "cpu";
-          capturePerformance.slow = activePicture && captureFps < floor ? capturePerformance.slow + 1 : 0;
-          capturePerformance.stable = captureFps >= stable && encodedFps >= stable ? capturePerformance.stable + 1 : 0;
-          if (!capturePerformance.reduced && capturePerformance.slow >= 2 && capturePerformance.setReduced(true)) {
-            capturePerformance.reduced = true;
-            capturePerformance.stable = 0;
-            logMediaDiagnostic(`capture-adapt id=${sessionId} mode=performance`);
-          } else if (capturePerformance.reduced && capturePerformance.stable >= 20) {
-            capturePerformance.setReduced(false);
-            capturePerformance.reduced = false;
-            capturePerformance.slow = 0;
-            logMediaDiagnostic(`capture-adapt id=${sessionId} mode=quality`);
-          }
-          const encoderSlow = activePicture && captureFps >= floor && encodedFps < floor && (limitation === "cpu" || encodeMs >= 1000 / targetFps * 0.8);
-          capturePerformance.encoderSlow = encoderSlow ? capturePerformance.encoderSlow + 1 : 0;
-          capturePerformance.encoderStable = encodedFps >= stable ? capturePerformance.encoderStable + 1 : 0;
-          if (!capturePerformance.encoderReduced && capturePerformance.encoderSlow >= 2) {
-            capturePerformance.encoderReduced = true;
-            capturePerformance.encoderStable = 0;
-            performanceScaleRef.current.set(sessionId, 1.5);
-          } else if (capturePerformance.encoderReduced && capturePerformance.encoderStable >= 20) {
-            capturePerformance.encoderReduced = false;
-            capturePerformance.encoderSlow = 0;
-            performanceScaleRef.current.delete(sessionId);
-          }
-        }
-        const loss = lost / Math.max(1, lost + received);
-        const quality = await applyAdaptiveQuality(sessionId, peer, role, latencyMs, loss, limitation);
-        const metrics = { bitrateKbps, fps, captureFps, encodedFps, sentFps, receivedFps, decodedFps, latencyMs, route, quality, codec, packetLossPct: Math.round(loss * 1000) / 10, encodeMs, decodeMs, droppedFrames, limitation, encoder, decoder };
+        const lostDelta = Math.max(0, lost - (previous?.lost ?? lost));
+        const receivedDelta = Math.max(0, received - (previous?.receivedPackets ?? received));
+        const lossPct = lostDelta / Math.max(1, lostDelta + receivedDelta) * 100;
+        statsRef.current.set(sessionId, { bytes, captured, encoded, sent, received: receivedFrames, decoded, encodeTime, decodeTime, dropped, lost, receivedPackets: received, at: now });
+        const targetFps = requestedFpsRef.current.get(sessionId) ?? settings.maxFps;
+        const sample: QualitySample = {
+          rttMs: latencyMs, jitterMs, lossPct, availableKbps, bitrateKbps, captureFps, encodedFps, encodeMs, targetFps,
+          activePicture: captureFps >= 10 || bitrateKbps >= 200 || limitation === "cpu", limitation,
+        };
+        const quality = await applyAdaptiveQuality(sessionId, peer, role, sample);
+        const render = renderStatsRef.current.get(sessionId);
+        const metrics = { bitrateKbps, fps, captureFps, encodedFps, sentFps, receivedFps, decodedFps, renderFps: render?.fps ?? 0, renderDroppedFrames: render?.dropped ?? 0, latencyMs, route, quality, codec, packetLossPct: Math.round(lossPct * 10) / 10, jitterMs: Math.round(jitterMs), availableKbps, captureWidth, captureHeight, encodeMs, decodeMs, droppedFrames, limitation, encoder, decoder };
         logMediaDiagnostic(`media-stats id=${sessionId} role=${role} capture=${captureFps} encoded=${encodedFps} sent=${sentFps} received=${receivedFps} decoded=${decodedFps} bitrate=${bitrateKbps} encodeMs=${encodeMs} dropped=${droppedFrames} limit=${limitation} encoder=${encoder || "pending"}`);
+        window.nodusDesktop?.writePerformance?.(JSON.stringify({ at: new Date().toISOString(), sessionId, role, ...metrics })).catch(() => undefined);
         updateRuntime(sessionId, { metrics });
-      } catch {}
+      } catch {} finally { inspecting = false; }
     };
     inspect();
-    qualityTimersRef.current.set(sessionId, window.setInterval(inspect, 2500));
+    qualityTimersRef.current.set(sessionId, window.setInterval(inspect, 1000));
   }
 
   async function applyAdaptiveQuality(
     sessionId: string,
     peer: RTCPeerConnection,
     role: RemoteSession["role"],
-    latencyMs: number,
-    loss: number,
-    limitation = "none",
+    sample: QualitySample,
   ): Promise<SessionMetrics["quality"]> {
     const requestedQuality = requestedQualitiesRef.current.get(sessionId) ?? settings.connectionQuality;
     const requestedFps = requestedFpsRef.current.get(sessionId) ?? settings.maxFps;
-    let quality: SessionMetrics["quality"] = requestedQuality === "auto"
-      ? latencyMs > 300 || loss > 0.08 ? "economy" : latencyMs > 160 || loss > 0.03 || limitation === "bandwidth" ? "balanced" : "high"
-      : requestedQuality;
-    if (role !== "host") return quality;
+    if (role !== "host") return requestedQuality === "economy" ? "economy" : requestedQuality === "high" ? "high" : "balanced";
     const sender = peer.getSenders().find((item) => item.track?.kind === "video");
-    if (!sender) return quality;
-    const limits = quality === "economy"
-      ? { bitrate: 2_500_000, fps: Math.min(60, requestedFps), scale: 2 }
-      : quality === "balanced"
-        ? { bitrate: 10_000_000, fps: Math.min(60, requestedFps), scale: 1 }
-        : { bitrate: requestedFps > 60 ? 24_000_000 : 14_000_000, fps: requestedFps, scale: 1 };
+    if (!sender) return "balanced";
+    const minimum = requestedQuality === "economy" ? 2 : requestedQuality === "balanced" ? 1 : 0;
+    const current = adaptiveStateRef.current.get(sessionId) ?? { stage: minimum as AdaptiveStage, stableSamples: 0 };
+    const target = Math.max(minimum, recommendedStage(sample)) as AdaptiveStage;
+    const next = advanceStage(current.stage, target, current.stableSamples);
+    adaptiveStateRef.current.set(sessionId, next);
+    const limits = STAGE_LIMITS[next.stage];
+    const quality: SessionMetrics["quality"] = next.stage >= 3 ? "economy" : next.stage >= 1 ? "balanced" : "high";
     const requestedResolution = requestedResolutionsRef.current.get(sessionId);
     const [targetWidth, targetHeight] = (requestedResolution ?? settings.preferredResolution).split("x").map(Number);
     const source = sender.track?.getSettings();
-    const requestedScale = Math.max(1, (source?.width ?? targetWidth) / targetWidth, (source?.height ?? targetHeight) / targetHeight);
-    const scale = Math.max(limits.scale, requestedScale, performanceScaleRef.current.get(sessionId) ?? 1);
-    const tier = `${quality}:${scale}`;
+    const scale = Math.max(1, (source?.width ?? targetWidth) / targetWidth, (source?.height ?? targetHeight) / Math.min(targetHeight, limits.height));
+    const fps = next.stage === 0 ? requestedFps : Math.min(requestedFps, limits.fps);
+    const desiredBitrate = next.stage === 0 && requestedFps > 60 ? 24_000_000 : limits.bitrate;
+    const bandwidthBound = sample.activePicture && sample.availableKbps > 0 && sample.bitrateKbps >= sample.availableKbps * 0.7;
+    const bitrate = sample.availableKbps > 0 && (bandwidthBound || sample.limitation === "bandwidth")
+      ? Math.min(desiredBitrate, Math.max(300_000, Math.round(sample.availableKbps * 850)))
+      : desiredBitrate;
+    const roundedBitrate = Math.max(300_000, Math.round(bitrate / 250_000) * 250_000);
+    const tier = `${next.stage}:${scale.toFixed(2)}:${fps}:${roundedBitrate}`;
     if (qualityTierRef.current.get(sessionId) === tier) return quality;
     try {
       const parameters = sender.getParameters();
       if (!parameters.encodings.length) parameters.encodings = [{}];
-      parameters.encodings[0].maxBitrate = limits.bitrate;
-      parameters.encodings[0].maxFramerate = limits.fps;
+      parameters.degradationPreference = "maintain-framerate";
+      parameters.encodings[0].maxBitrate = roundedBitrate;
+      parameters.encodings[0].maxFramerate = fps;
       parameters.encodings[0].scaleResolutionDownBy = scale;
       await sender.setParameters(parameters);
       qualityTierRef.current.set(sessionId, tier);
+      logMediaDiagnostic(`quality-stage id=${sessionId} stage=${next.stage} scale=${scale.toFixed(2)} fps=${fps} bitrate=${roundedBitrate}`);
     } catch {}
     return quality;
   }
@@ -1177,8 +1202,9 @@ export function App() {
           requestedQualitiesRef.current.set(sessionId, message.quality);
           requestedFpsRef.current.set(sessionId, message.maxFps);
           qualityTierRef.current.delete(sessionId);
+          adaptiveStateRef.current.delete(sessionId);
           if (fpsChanged) switchHostCapture(sessionId, undefined, undefined, message.maxFps).catch(() => undefined);
-          else applyAdaptiveQuality(sessionId, peersRef.current.get(sessionId)!, "host", 0, 0).catch(() => undefined);
+          // The next one-second sample applies the new preference using current network conditions.
           return;
         }
         if (message.type === "screen-options") return;
@@ -1525,8 +1551,9 @@ export function App() {
     if (qualityTimer) window.clearInterval(qualityTimer);
     qualityTimersRef.current.delete(sessionId);
     statsRef.current.delete(sessionId);
+    renderStatsRef.current.delete(sessionId);
     qualityTierRef.current.delete(sessionId);
-    performanceScaleRef.current.delete(sessionId);
+    adaptiveStateRef.current.delete(sessionId);
     requestedResolutionsRef.current.delete(sessionId);
     requestedQualitiesRef.current.delete(sessionId);
     requestedFpsRef.current.delete(sessionId);
@@ -1566,7 +1593,6 @@ export function App() {
     if (stopShare) {
       const stopCapture = captureCleanupRef.current.get(sessionId);
       captureCleanupRef.current.delete(sessionId);
-      capturePerformanceRef.current.delete(sessionId);
       if (stopCapture) stopCapture();
       else sessionsRef.current.find((item) => item.session.sessionId === sessionId)?.shareStream?.getTracks().forEach((track) => track.stop());
     }
@@ -1716,88 +1742,25 @@ export function App() {
     if (import.meta.env.DEV) logDiagnostic(message);
   }
 
-  function captureConstraints(value: LocalSettings, requestedResolution?: RemoteResolution, requestedFps?: RemoteFrameRate): MediaTrackConstraints {
+  function captureConstraints(value: LocalSettings, requestedResolution?: RemoteResolution, requestedFps?: RemoteFrameRate, source?: CaptureSource): MediaTrackConstraints {
     const frameRate = requestedFps ?? value.maxFps;
     const [width, height] = (requestedResolution ?? "1920x1080").split("x").map(Number);
     const limit = value.connectionQuality === "economy" ? [Math.min(width, 1280), Math.min(height, 720)] : [width, height];
+    if (source?.width && source?.height) {
+      limit[0] = Math.min(limit[0], source.width);
+      limit[1] = Math.min(limit[1], source.height);
+    }
     return { frameRate: { ideal: frameRate, max: frameRate }, width: { ideal: limit[0], max: limit[0] }, height: { ideal: limit[1], max: limit[1] } };
   }
 
-  async function stabilizeCaptureStream(source: MediaStream, requestedFps: RemoteFrameRate): Promise<PooledCapture> {
-    const sourceTrack = source.getVideoTracks()[0];
-    const stopSource = () => source.getTracks().forEach((track) => track.stop());
-    if (!sourceTrack) return { stream: source, stop: stopSource, setReduced: () => false };
-
-    const video = document.createElement("video");
-    video.muted = true;
-    video.playsInline = true;
-    video.srcObject = new MediaStream([sourceTrack]);
-    await video.play().catch(() => undefined);
-    if (!video.videoWidth || !video.videoHeight) {
-      await Promise.race([
-        new Promise<void>((resolve) => video.addEventListener("loadedmetadata", () => resolve(), { once: true })),
-        delay(1000).then(() => undefined),
-      ]);
-    }
-
-    const settings = sourceTrack.getSettings();
-    const canvas = document.createElement("canvas");
-    canvas.width = settings.width || video.videoWidth || 1280;
-    canvas.height = settings.height || video.videoHeight || 720;
-    const context = canvas.getContext("2d", { alpha: false, desynchronized: true });
-    if (!context || typeof canvas.captureStream !== "function") {
-      video.pause();
-      video.srcObject = null;
-      return { stream: source, stop: stopSource, setReduced: () => false };
-    }
-
-    const pacedStream = canvas.captureStream(0);
-    const pacedTrack = pacedStream.getVideoTracks()[0] as CanvasCaptureMediaStreamTrack;
-    pacedTrack.contentHint = "motion";
-    source.getAudioTracks().forEach((track) => pacedStream.addTrack(track));
-    const drawFrame = () => {
-      if (video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) return;
-      context.drawImage(video, 0, 0, canvas.width, canvas.height);
-      pacedTrack.requestFrame();
-    };
-    drawFrame();
-    let frameCallback = 0;
-    let lastDraw = 0;
-    const onVideoFrame = (now: number) => {
-      if (now - lastDraw >= 1000 / requestedFps - 1) {
-        drawFrame();
-        lastDraw = now;
-      }
-      frameCallback = video.requestVideoFrameCallback(onVideoFrame);
-    };
-    const hasVideoFrameCallback = typeof video.requestVideoFrameCallback === "function";
-    const frameTimer = hasVideoFrameCallback
-      ? 0
-      : window.setInterval(drawFrame, 1000 / requestedFps);
-    if (hasVideoFrameCallback) frameCallback = video.requestVideoFrameCallback(onVideoFrame);
-    logMediaDiagnostic(`capture-paced width=${canvas.width} height=${canvas.height} target=${requestedFps}`);
-    const baseWidth = canvas.width;
-    const baseHeight = canvas.height;
-    const reducedScale = Math.min(1, 1280 / baseWidth, 720 / baseHeight);
-
+  function prepareCaptureStream(source: MediaStream): PooledCapture {
+    // Keep the Chromium capture track on the native WebRTC path; a canvas adds a full-frame copy and pacing queue.
+    const track = source.getVideoTracks()[0];
+    if (track) track.contentHint = "motion";
     return {
-      stream: pacedStream,
-      setReduced: (reduced) => {
-        if (reducedScale >= 1) return false;
-        const scale = reduced ? reducedScale : 1;
-        canvas.width = Math.round(baseWidth * scale);
-        canvas.height = Math.round(baseHeight * scale);
-        drawFrame();
-        return true;
-      },
-      stop: () => {
-        if (frameTimer) window.clearInterval(frameTimer);
-        if (frameCallback) video.cancelVideoFrameCallback(frameCallback);
-        video.pause();
-        video.srcObject = null;
-        pacedStream.getTracks().forEach((track) => track.stop());
-        stopSource();
-      },
+      stream: source,
+      setReduced: () => false,
+      stop: () => source.getTracks().forEach((track) => track.stop()),
     };
   }
 
@@ -1805,10 +1768,10 @@ export function App() {
     const key = JSON.stringify([displayId, resolution, frameRate, shareAudio, settings.connectionQuality === "economy"]);
     return capturePoolRef.current.acquire(key, async () => {
       const rawRequest = captureQueueRef.current.then(async () => {
-        const source = captureSources.find((item) => item.id === displayId);
+        const source = captureSources.find((item) => item.id === displayId) ?? captureSources[0];
         await window.nodusDesktop?.setCaptureOptions({ sourceId: displayId, displayId: source?.displayId, shareAudio });
         return navigator.mediaDevices.getDisplayMedia({
-          video: captureConstraints(settings, resolution, frameRate),
+          video: captureConstraints(settings, resolution, frameRate, source),
           audio: shareAudio,
         });
       });
@@ -1817,12 +1780,7 @@ export function App() {
       logDiagnostic(`capture-started video=${raw.getVideoTracks().length} audio=${raw.getAudioTracks().length}`);
       const capture = raw.getVideoTracks()[0]?.getSettings();
       logMediaDiagnostic(`capture-settings width=${capture?.width || 0} height=${capture?.height || 0} fps=${capture?.frameRate || 0}`);
-      try {
-        return await stabilizeCaptureStream(raw, frameRate);
-      } catch (error) {
-        raw.getTracks().forEach((track) => track.stop());
-        throw error;
-      }
+      return prepareCaptureStream(raw);
     });
   }
 
@@ -1866,10 +1824,9 @@ export function App() {
       tuneVideoSender(sender, frameRate);
       applyRequestedResolution(sender, resolution);
       qualityTierRef.current.delete(sessionId);
-      performanceScaleRef.current.delete(sessionId);
+      adaptiveStateRef.current.delete(sessionId);
       const previousCleanup = captureCleanupRef.current.get(sessionId);
       captureCleanupRef.current.set(sessionId, captureLease.release);
-      capturePerformanceRef.current.set(sessionId, { setReduced: captureLease.setReduced, reduced: false, slow: 0, stable: 0, encoderReduced: false, encoderSlow: 0, encoderStable: 0 });
       updateRuntime(sessionId, { shareStream: stream });
       previousCleanup?.();
     } catch (error) {
@@ -3335,7 +3292,7 @@ function formatBytes(value: number): string {
 }
 
 function emptyMetrics(): SessionMetrics {
-  return { bitrateKbps: 0, fps: 0, captureFps: 0, encodedFps: 0, sentFps: 0, receivedFps: 0, decodedFps: 0, latencyMs: 0, route: "unknown", quality: "balanced", codec: "", packetLossPct: 0, encodeMs: 0, decodeMs: 0, droppedFrames: 0, limitation: "none", encoder: "", decoder: "" };
+  return { bitrateKbps: 0, fps: 0, captureFps: 0, encodedFps: 0, sentFps: 0, receivedFps: 0, decodedFps: 0, renderFps: 0, renderDroppedFrames: 0, latencyMs: 0, route: "unknown", quality: "balanced", codec: "", packetLossPct: 0, jitterMs: 0, availableKbps: 0, captureWidth: 0, captureHeight: 0, encodeMs: 0, decodeMs: 0, droppedFrames: 0, limitation: "none", encoder: "", decoder: "" };
 }
 
 function hasTurnServer(iceServers: RTCIceServer[]): boolean {

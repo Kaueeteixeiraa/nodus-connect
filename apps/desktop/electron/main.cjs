@@ -220,11 +220,11 @@ function createIcon() {
   return nativeImage.createFromDataURL(`data:image/svg+xml;charset=utf-8,${svg}`);
 }
 
-function appendLog(message) {
+function appendLog(message, filename = "desktop.log") {
   try {
     const logDir = path.join(app.getPath("userData"), "logs");
     fs.mkdirSync(logDir, { recursive: true });
-    fs.appendFileSync(path.join(logDir, "desktop.log"), `[${new Date().toISOString()}] ${message}\n`);
+    fs.appendFileSync(path.join(logDir, filename), `[${new Date().toISOString()}] ${message}\n`);
   } catch {
     // Logging must never break app startup.
   }
@@ -275,11 +275,13 @@ function setupIpc() {
     });
   });
   ipcMain.handle("nodus:apply-remote-input", (_event, input) => applyRemoteInput(input));
-  ipcMain.handle("nodus:get-capture-sources", async () => (await desktopCapturer.getSources({ types: ["screen"], thumbnailSize: { width: 0, height: 0 }, fetchWindowIcons: false })).map((source) => ({
-    id: source.id,
-    name: source.name,
-    displayId: source.display_id,
-  })));
+  ipcMain.handle("nodus:get-capture-sources", async () => {
+    const displays = screen.getAllDisplays();
+    return (await desktopCapturer.getSources({ types: ["screen"], thumbnailSize: { width: 0, height: 0 }, fetchWindowIcons: false })).map((source) => {
+      const display = displays.find((item) => String(item.id) === source.display_id);
+      return { id: source.id, name: source.name, displayId: source.display_id, width: display?.size.width || 0, height: display?.size.height || 0 };
+    });
+  });
   ipcMain.handle("nodus:set-capture-options", (_event, options) => {
     captureOptions = {
       sourceId: String(options?.sourceId || "").slice(0, 200),
@@ -293,6 +295,7 @@ function setupIpc() {
   ipcMain.handle("nodus:wake-on-lan", (_event, macAddress) => wakeOnLan(macAddress));
   ipcMain.handle("nodus:open-diagnostics", () => shell.showItemInFolder(path.join(app.getPath("userData"), "logs", "desktop.log")));
   ipcMain.handle("nodus:write-diagnostic", (_event, message) => appendLog(String(message || "").slice(0, 2000)));
+  ipcMain.handle("nodus:write-performance", (_event, message) => appendLog(String(message || "").slice(0, 2000), "performance.log"));
   ipcMain.handle("nodus:google-login", (_event, options) => googleLogin(options));
 }
 

@@ -67,6 +67,9 @@ contextBridge.exposeInMainWorld("nodusDesktop", {
   writeDiagnostic(message) {
     return ipcRenderer.invoke("nodus:write-diagnostic", message);
   },
+  writePerformance(message) {
+    return ipcRenderer.invoke("nodus:write-performance", message);
+  },
   googleLogin(options) {
     return ipcRenderer.invoke("nodus:google-login", options);
   },
