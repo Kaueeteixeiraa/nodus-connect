@@ -20,6 +20,7 @@ interface Window {
     setCaptureOptions(options: { sourceId: string; displayId?: string; shareAudio: boolean }): Promise<void>;
     readClipboard(): Promise<string>;
     writeClipboard(text: string): Promise<void>;
+    saveReceivedFile(fileName: string, data: ArrayBuffer): Promise<{ ok: boolean; path?: string; name?: string; error?: string }>;
     wakeOnLan(macAddress: string): Promise<{ ok: boolean; error?: string }>;
     openDiagnostics(): Promise<void>;
     writeDiagnostic(message: string): Promise<void>;

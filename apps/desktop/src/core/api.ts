@@ -59,7 +59,10 @@ export interface SessionRequestRecord {
   grantedPermissions?: SessionPermission[];
   passwordHash?: string;
   preferredResolution?: RemoteResolution;
+  preferredFps?: RemoteFrameRate;
 }
+
+export type RemoteFrameRate = 60 | 120;
 
 export interface SignalMessage {
   seq: number;
@@ -193,6 +196,7 @@ export async function createSessionRequest(input: {
   requestedPermissions?: SessionPermission[];
   passwordHash?: string;
   preferredResolution?: RemoteResolution;
+  preferredFps?: RemoteFrameRate;
 }): Promise<SessionRequestRecord> {
   if (firebaseConfigured()) return cloudCreateSessionRequest(input);
   return requestJson("/v1/session-requests", {

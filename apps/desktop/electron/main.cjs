@@ -35,6 +35,9 @@ app.setName("Nodus Connect");
 if (userDataDir) app.setPath("userData", userDataDir);
 app.commandLine.appendSwitch("enable-zero-copy");
 app.commandLine.appendSwitch("enable-gpu-rasterization");
+app.commandLine.appendSwitch("disable-background-timer-throttling");
+app.commandLine.appendSwitch("disable-renderer-backgrounding");
+app.commandLine.appendSwitch("disable-backgrounding-occluded-windows");
 
 const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) app.quit();
@@ -286,6 +289,7 @@ function setupIpc() {
   });
   ipcMain.handle("nodus:read-clipboard", () => clipboard.readText());
   ipcMain.handle("nodus:write-clipboard", (_event, text) => clipboard.writeText(String(text || "").slice(0, 1_000_000)));
+  ipcMain.handle("nodus:save-received-file", (_event, payload) => saveReceivedFile(payload));
   ipcMain.handle("nodus:wake-on-lan", (_event, macAddress) => wakeOnLan(macAddress));
   ipcMain.handle("nodus:open-diagnostics", () => shell.showItemInFolder(path.join(app.getPath("userData"), "logs", "desktop.log")));
   ipcMain.handle("nodus:write-diagnostic", (_event, message) => appendLog(String(message || "").slice(0, 2000)));
@@ -293,13 +297,13 @@ function setupIpc() {
 }
 
 function getNativeCaptureStatus() {
-  if (!fs.existsSync(nativeCaptureProbe)) return { available: false, supported: false, backend: "chromium-fallback" };
+  if (!fs.existsSync(nativeCaptureProbe)) return { available: false, supported: false, backend: "chromium-getdisplaymedia" };
   try {
     const result = require("node:child_process").execFileSync(nativeCaptureProbe, [], { encoding: "utf8", timeout: 1500, windowsHide: true });
     const supported = JSON.parse(result).windowsGraphicsCapture === true;
-    return { available: true, supported, backend: supported ? "windows-graphics-capture" : "chromium-fallback" };
+    return { available: true, supported, backend: "chromium-getdisplaymedia" };
   } catch {
-    return { available: false, supported: false, backend: "chromium-fallback" };
+    return { available: false, supported: false, backend: "chromium-getdisplaymedia" };
   }
 }
 
@@ -370,6 +374,35 @@ function readJsonFile(filePath, fallback) {
 function writeJsonFile(filePath, value) {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
   fs.writeFileSync(filePath, JSON.stringify(value, null, 2));
+}
+
+async function saveReceivedFile(payload) {
+  const data = payload?.data;
+  const buffer = data instanceof ArrayBuffer
+    ? Buffer.from(data)
+    : ArrayBuffer.isView(data)
+      ? Buffer.from(data.buffer, data.byteOffset, data.byteLength)
+      : null;
+  if (!buffer || buffer.byteLength > 256 * 1024 * 1024) return { ok: false, error: "INVALID_FILE" };
+  let original = path.basename(String(payload?.fileName || "arquivo")).replace(/[<>:"/\\|?*\x00-\x1F]/g, "_").replace(/[. ]+$/, "").slice(0, 180) || "arquivo";
+  if (/^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\.|$)/i.test(original)) original = `_${original}`;
+  const parsed = path.parse(original);
+  const documents = app.getPath("documents");
+  await fs.promises.mkdir(documents, { recursive: true });
+  let destination = "";
+  for (let index = 0; index < 10_000; index++) {
+    const candidate = path.join(documents, index ? `${parsed.name} (${index})${parsed.ext}` : original);
+    try {
+      await fs.promises.writeFile(candidate, buffer, { flag: "wx" });
+      destination = candidate;
+      break;
+    } catch (error) {
+      if (error.code !== "EEXIST") throw error;
+    }
+  }
+  if (!destination) return { ok: false, error: "FILE_NAME_EXHAUSTED" };
+  appendLog(`file-received name=${path.basename(destination)} bytes=${buffer.byteLength}`);
+  return { ok: true, path: destination, name: path.basename(destination) };
 }
 
 function applyRemoteInput(input) {
@@ -590,7 +623,7 @@ function startEmbeddedCoordination() {
       if (request.method === "POST" && url.pathname === "/v1/session-requests") {
         const body = await readBody(request);
         const id = crypto.randomUUID();
-        const item = { id, requesterNodusId: normalizeId(body.requesterNodusId), requesterName: body.requesterName, targetNodusId: normalizeId(body.targetNodusId), requestedPermissions: body.requestedPermissions || ["screen:view"], status: "pending", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
+        const item = { id, requesterNodusId: normalizeId(body.requesterNodusId), requesterName: body.requesterName, targetNodusId: normalizeId(body.targetNodusId), requestedPermissions: body.requestedPermissions || ["screen:view"], preferredResolution: body.preferredResolution, preferredFps: body.preferredFps, status: "pending", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
         requests.set(id, item);
         return json(response, 201, item);
       }

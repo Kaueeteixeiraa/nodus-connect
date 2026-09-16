@@ -55,6 +55,9 @@ contextBridge.exposeInMainWorld("nodusDesktop", {
   writeClipboard(text) {
     return ipcRenderer.invoke("nodus:write-clipboard", text);
   },
+  saveReceivedFile(fileName, data) {
+    return ipcRenderer.invoke("nodus:save-received-file", { fileName, data });
+  },
   wakeOnLan(macAddress) {
     return ipcRenderer.invoke("nodus:wake-on-lan", macAddress);
   },

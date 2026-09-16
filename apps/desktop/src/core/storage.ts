@@ -70,7 +70,7 @@ export interface LocalSettings {
   preferredDisplayId: string;
   preferredResolution: "1366x768" | "1280x720" | "1920x1080" | "1024x768";
   connectionQuality: "auto" | "high" | "balanced" | "economy";
-  maxFps: 15 | 30 | 60;
+  maxFps: 60 | 120;
   coordinationUrl: string;
   googleClientId: string;
   iceServersJson: string;
@@ -135,8 +135,8 @@ export function loadSettings(): LocalSettings {
     trustedNodusIds: [],
     preferredDisplayId: "",
     preferredResolution: "1920x1080",
-    connectionQuality: "balanced",
-    maxFps: 30,
+    connectionQuality: "high",
+    maxFps: 60,
     coordinationUrl: import.meta.env.VITE_NODUS_API ?? "",
     googleClientId: import.meta.env.VITE_GOOGLE_CLIENT_ID ?? GOOGLE_CLIENT_ID,
     iceServersJson: JSON.stringify([{ urls: "stun:stun.l.google.com:19302" }], null, 2),
@@ -149,6 +149,7 @@ export function loadSettings(): LocalSettings {
     theme: ["japan", "sakura-night", "neo-tokyo", "cosmos", "arctic"].includes(stored.theme ?? "")
       ? stored.theme as LocalSettings["theme"]
       : "dark",
+    maxFps: stored.maxFps === 120 ? 120 : 60,
     shareAudio: migratedShareAudio ?? defaults.shareAudio,
     coordinationUrl: defaults.coordinationUrl || stored.coordinationUrl || "",
     googleClientId: defaults.googleClientId || stored.googleClientId || "",

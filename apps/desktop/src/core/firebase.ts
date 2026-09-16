@@ -133,6 +133,7 @@ export async function cloudCreateSessionRequest(input: {
   requestedPermissions?: SessionPermission[];
   passwordHash?: string;
   preferredResolution?: import("./api").RemoteResolution;
+  preferredFps?: import("./api").RemoteFrameRate;
 }): Promise<SessionRequestRecord> {
   const uid = await ensureUid();
   const requesterNodusId = normalizeNodusId(input.requesterNodusId);
@@ -155,6 +156,7 @@ export async function cloudCreateSessionRequest(input: {
     requestedPermissions: input.requestedPermissions ?? ["screen:view"],
     passwordHash: input.passwordHash,
     preferredResolution: input.preferredResolution,
+    preferredFps: input.preferredFps,
     createdAt: now,
     updatedAt: now,
   };

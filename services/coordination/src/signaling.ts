@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { normalizeNodusId } from "../../../packages/common/src/nodusId.js";
 import type { SessionPermission } from "../../../packages/protocol/src/index.js";
-import type { RemoteResolution } from "../../../apps/desktop/src/core/api";
+import type { RemoteFrameRate, RemoteResolution } from "../../../apps/desktop/src/core/api";
 
 export type SessionRequestStatus = "pending" | "accepted" | "denied";
 export type SignalType = "offer" | "answer" | "ice-candidate" | "disconnect";
@@ -20,6 +20,7 @@ export interface SessionRequest {
   grantedPermissions?: SessionPermission[];
   passwordHash?: string;
   preferredResolution?: RemoteResolution;
+  preferredFps?: RemoteFrameRate;
 }
 
 export interface SignalMessage {
@@ -39,7 +40,7 @@ export class SignalingRegistry {
 
   constructor(private readonly pendingTtlMs = 5 * 60_000) {}
 
-  createRequest(input: { requesterNodusId: string; requesterName: string; targetNodusId: string; requestedPermissions?: SessionPermission[]; passwordHash?: string; preferredResolution?: RemoteResolution }): SessionRequest {
+  createRequest(input: { requesterNodusId: string; requesterName: string; targetNodusId: string; requestedPermissions?: SessionPermission[]; passwordHash?: string; preferredResolution?: RemoteResolution; preferredFps?: RemoteFrameRate }): SessionRequest {
     const requesterNodusId = normalizeNodusId(input.requesterNodusId);
     const targetNodusId = normalizeNodusId(input.targetNodusId);
     if (!requesterNodusId || !targetNodusId) throw new Error("INVALID_NODUS_ID");
@@ -56,6 +57,7 @@ export class SignalingRegistry {
       requestedPermissions: input.requestedPermissions ?? ["screen:view"],
       passwordHash: input.passwordHash,
       preferredResolution: input.preferredResolution,
+      preferredFps: input.preferredFps,
       createdAt: now,
       updatedAt: now,
     };

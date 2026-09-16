@@ -9,6 +9,7 @@ describe("SignalingRegistry", () => {
       requesterName: "A",
       targetNodusId: "444 555 666",
       requestedPermissions: ["screen:view", "mouse:control", "files:transfer"],
+      preferredFps: 120,
     });
 
     const accepted = registry.acceptRequest(request.id, "B", ["screen:view", "mouse:control"]);
@@ -21,6 +22,7 @@ describe("SignalingRegistry", () => {
     });
 
     expect(accepted.status).toBe("accepted");
+    expect(accepted.preferredFps).toBe(120);
     expect(accepted.grantedPermissions).toEqual(["screen:view", "mouse:control"]);
     expect(registry.getSignals(accepted.sessionId!, "111222333")).toHaveLength(1);
   });
