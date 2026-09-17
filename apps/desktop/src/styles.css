@@ -150,7 +150,7 @@
 .connection-home {
   display: grid;
   min-height: 0;
-  grid-template-rows: 198px minmax(0, 1fr);
+  grid-template-rows: 168px minmax(0, 1fr);
   gap: 18px;
 }
 
@@ -165,7 +165,7 @@
 .connection-overview .connect-box,
 .connection-overview .system-status-card {
   min-height: 0;
-  height: 198px;
+  height: 168px;
   border: 1px solid rgba(54, 151, 231, .28);
   border-radius: 10px;
   background: linear-gradient(145deg, rgba(8, 27, 47, .92), rgba(3, 13, 25, .9));
@@ -3030,6 +3030,8 @@ button[type="submit"]:hover,
 
 .app-workspace { min-width: 0; min-height: 0; display: grid; grid-template-rows: 88px minmax(0, 1fr); }
 .workspace-header {
+  position: relative;
+  z-index: 50;
   display: flex;
   align-items: center;
   justify-content: space-between;

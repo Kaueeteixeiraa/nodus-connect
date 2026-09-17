@@ -119,9 +119,9 @@ import { CapturePool, type CaptureLease, type PooledCapture } from "./core/captu
 import { advanceStage, recommendedStage, STAGE_LIMITS, type AdaptiveStage, type QualitySample } from "./core/adaptive-quality";
 
 const releaseNotes = [
+  { version: "0.4.17", changes: ["Painel de atualizações exibido acima da interface.", "Área superior da home mais compacta."] },
   { version: "0.4.16", changes: ["Busca de dispositivos por nome ou Nodus ID.", "Sugestões para computadores conectados anteriormente."] },
   { version: "0.4.15", changes: ["Ajustes de responsividade na tela inicial.", "Menus de dispositivos permanecem visíveis em telas menores."] },
-  { version: "0.4.14", changes: ["Idiomas em inglês, russo e japonês.", "Senha de acesso pode ser salva neste dispositivo."] },
 ];
 
 type ServiceState = "connecting" | "online" | "offline" | "error";
