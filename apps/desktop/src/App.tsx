@@ -118,6 +118,12 @@ import { createFileCryptoSession, decryptFileChunk, deriveFileCryptoKey, encrypt
 import { CapturePool, type CaptureLease, type PooledCapture } from "./core/capture-pool";
 import { advanceStage, recommendedStage, STAGE_LIMITS, type AdaptiveStage, type QualitySample } from "./core/adaptive-quality";
 
+const releaseNotes = [
+  { version: "0.4.16", changes: ["Busca de dispositivos por nome ou Nodus ID.", "Sugestões para computadores conectados anteriormente."] },
+  { version: "0.4.15", changes: ["Ajustes de responsividade na tela inicial.", "Menus de dispositivos permanecem visíveis em telas menores."] },
+  { version: "0.4.14", changes: ["Idiomas em inglês, russo e japonês.", "Senha de acesso pode ser salva neste dispositivo."] },
+];
+
 type ServiceState = "connecting" | "online" | "offline" | "error";
 type SettingsSection = "general" | "access" | "connection" | "appearance";
 type WindowsServiceStatus = { installed: boolean; running: boolean };
@@ -2118,7 +2124,23 @@ export function App() {
             {!activeSession && <p className="workspace-subtitle">{pageSubtitle}</p>}
           </div>
           <div className="workspace-actions">
-          <button className="icon-button" title="Notificacoes" type="button"><Bell aria-hidden="true" size={18} /></button>
+          <div className="release-notifications">
+            <button aria-label="Notas das versões" className="icon-button" type="button"><Bell aria-hidden="true" size={18} /></button>
+            <section aria-label="Últimas atualizações" className="release-notifications-panel">
+              <div className="release-notifications-heading">
+                <BellRing aria-hidden="true" size={16} />
+                <span>Últimas atualizações</span>
+              </div>
+              <ul>
+                {releaseNotes.map((release) => (
+                  <li key={release.version}>
+                    <strong>v{release.version}</strong>
+                    {release.changes.map((change) => <span key={change}>{change}</span>)}
+                  </li>
+                ))}
+              </ul>
+            </section>
+          </div>
           <button className="user-chip" onClick={logout} title="Sair" type="button">
             {currentUser.picture ? <img alt="" src={currentUser.picture} /> : <span>{currentUser.name.slice(0, 1)}</span>}
             <span className="user-meta"><b>{currentUser.name}</b><small><i /> Online</small></span>
@@ -2611,11 +2633,34 @@ function ConnectBox({
   targetPassword: string;
   rememberTargetPassword: boolean;
 }) {
+  const [targetQuery, setTargetQuery] = useState(targetId);
+  const normalizedQuery = targetQuery.replace(/\D/g, "");
+  const query = targetQuery.trim().toLocaleLowerCase();
+  const deviceMatches = useMemo(() => query ? recentDevices.filter((device) => {
+    const names = [device.alias, device.deviceName].filter((name): name is string => Boolean(name)).map((name) => name.toLocaleLowerCase());
+    return names.some((name) => name.includes(query)) || (normalizedQuery.length > 0 && device.nodusId.includes(normalizedQuery));
+  }).slice(0, 5) : [], [normalizedQuery, query, recentDevices]);
+
+  useEffect(() => {
+    if (targetId && normalizeNodusId(targetQuery) !== normalizeNodusId(targetId)) setTargetQuery(targetId);
+  }, [targetId, targetQuery]);
+
+  const updateTarget = (value: string) => {
+    setTargetQuery(value);
+    onTargetChange(formatNodusId(value));
+  };
+
+  const selectDevice = (device: RecentDevice) => {
+    const nodusId = formatNodusId(device.nodusId);
+    setTargetQuery(nodusId);
+    onTargetChange(nodusId);
+  };
+
   const handlePaste = (event: ReactClipboardEvent<HTMLInputElement>) => {
-    const pastedId = event.clipboardData.getData("text");
-    if (!pastedId) return;
+    const pastedValue = event.clipboardData.getData("text");
+    if (!pastedValue) return;
     event.preventDefault();
-    onTargetChange(formatNodusId(pastedId));
+    updateTarget(pastedValue);
   };
 
   return (
@@ -2623,21 +2668,29 @@ function ConnectBox({
       <label>
         Conectar a outro dispositivo
         <input
-          inputMode="numeric"
+          aria-autocomplete="list"
+          aria-expanded={deviceMatches.length > 0}
+          autoComplete="off"
+          inputMode="text"
           placeholder="Digite o Nodus ID"
-          value={targetId}
+          value={targetQuery}
           disabled={Boolean(outgoingRequest)}
-          onChange={(event) => onTargetChange(formatNodusId(event.target.value))}
+          onChange={(event) => updateTarget(event.target.value)}
           onPaste={handlePaste}
         />
       </label>
       <button disabled={Boolean(outgoingRequest)} type="submit">{outgoingRequest ? "Aguardando" : <><span>Conectar</span><ArrowRight aria-hidden="true" size={18} /></>}</button>
+      {deviceMatches.length > 0 && <div className="connect-suggestions" role="listbox" aria-label="Dispositivos encontrados">
+        {deviceMatches.map((device) => <button key={device.nodusId} onClick={() => selectDevice(device)} role="option" type="button">
+          <Monitor aria-hidden="true" size={16} />
+          <span><strong>{device.alias || device.deviceName}</strong><small>{formatNodusId(device.nodusId)}</small></span>
+        </button>)}
+      </div>}
       <details className="connect-password">
         <summary>Usar senha de acesso</summary>
         <input autoComplete="current-password" disabled={Boolean(outgoingRequest)} onChange={(event) => onTargetPasswordChange(event.target.value)} placeholder="Senha definida no outro Nodus" type="password" value={targetPassword} />
         <label className="remember-password"><input checked={rememberTargetPassword} disabled={Boolean(outgoingRequest)} onChange={(event) => onRememberTargetPasswordChange(event.target.checked)} type="checkbox" /><span>Salvar senha neste dispositivo</span></label>
       </details>
-      {!compact && recentDevices.length > 0 && <div className="recent-connects"><span>Recentes:</span>{recentDevices.map((device) => <button key={device.nodusId} onClick={() => onTargetChange(formatNodusId(device.nodusId))} type="button">{device.alias || device.deviceName}</button>)}<button className="recent-more" title="Mais dispositivos" type="button"><ChevronDown aria-hidden="true" size={16} /></button></div>}
       {outgoingRequest
         ? <p className="session-banner">Aguardando aceite de {formatNodusId(outgoingRequest.targetNodusId)}.</p>
         : feedback && <p className="feedback">{feedback}</p>}
