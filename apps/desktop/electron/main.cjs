@@ -1,4 +1,4 @@
-const { app, BrowserWindow, Menu, Tray, clipboard, desktopCapturer, ipcMain, nativeImage, powerSaveBlocker, screen, session, shell } = require("electron");
+const { app, BrowserWindow, Menu, Tray, clipboard, desktopCapturer, ipcMain, nativeImage, powerSaveBlocker, safeStorage, screen, session, shell } = require("electron");
 const { spawn, spawnSync } = require("node:child_process");
 const crypto = require("node:crypto");
 const dgram = require("node:dgram");
@@ -13,6 +13,7 @@ let tray;
 let isQuitting = false;
 let trayIdentity = { nodusId: "", deviceName: "Nodus Connect", status: "Online" };
 let remoteControlActive = false;
+let minimizeToTray = true;
 let inputHelper;
 let captureOptions = { sourceId: "", displayId: "", shareAudio: true };
 let powerSaveBlockerId = -1;
@@ -95,7 +96,7 @@ function createMainWindow() {
   });
 
   mainWindow.on("close", (event) => {
-    if (isQuitting) return;
+    if (isQuitting || !minimizeToTray) return;
     event.preventDefault();
     mainWindow.hide();
   });
@@ -268,6 +269,7 @@ function setupIpc() {
     }
   });
   ipcMain.handle("nodus:set-startup-options", (_event, options) => {
+    minimizeToTray = options?.minimizeToTray !== false;
     app.setLoginItemSettings({
       openAtLogin: Boolean(options?.startWithWindows),
       openAsHidden: Boolean(options?.startMinimized),
@@ -291,6 +293,13 @@ function setupIpc() {
   });
   ipcMain.handle("nodus:read-clipboard", () => clipboard.readText());
   ipcMain.handle("nodus:write-clipboard", (_event, text) => clipboard.writeText(String(text || "").slice(0, 1_000_000)));
+  ipcMain.handle("nodus:get-connection-password", (_event, nodusId) => getConnectionPassword(nodusId));
+  ipcMain.handle("nodus:save-connection-password", (_event, nodusId, password) => saveConnectionPassword(nodusId, password));
+  ipcMain.handle("nodus:open-external", (_event, value) => {
+    const url = new URL(String(value || ""));
+    if (url.protocol !== "https:") throw new Error("URL externa invalida.");
+    return shell.openExternal(url.toString());
+  });
   ipcMain.handle("nodus:save-received-file", (_event, payload) => saveReceivedFile(payload));
   ipcMain.handle("nodus:wake-on-lan", (_event, macAddress) => wakeOnLan(macAddress));
   ipcMain.handle("nodus:open-diagnostics", () => shell.showItemInFolder(path.join(app.getPath("userData"), "logs", "desktop.log")));
@@ -364,6 +373,31 @@ function getServerInfo() {
 
 function identityPath() {
   return path.join(app.getPath("userData"), "identity.json");
+}
+
+function connectionPasswordsPath() {
+  return path.join(app.getPath("userData"), "connection-passwords.json");
+}
+
+function getConnectionPassword(value) {
+  const nodusId = String(value || "").replace(/\D/g, "");
+  if (!/^\d{9}$/.test(nodusId) || !safeStorage.isEncryptionAvailable()) return "";
+  try {
+    const encrypted = readJsonFile(connectionPasswordsPath(), {})[nodusId];
+    return encrypted ? safeStorage.decryptString(Buffer.from(encrypted, "base64")) : "";
+  } catch {
+    return "";
+  }
+}
+
+function saveConnectionPassword(value, password) {
+  const nodusId = String(value || "").replace(/\D/g, "");
+  if (!/^\d{9}$/.test(nodusId) || !safeStorage.isEncryptionAvailable()) return { ok: false };
+  const saved = readJsonFile(connectionPasswordsPath(), {});
+  if (!password) delete saved[nodusId];
+  else saved[nodusId] = safeStorage.encryptString(String(password).slice(0, 512)).toString("base64");
+  writeJsonFile(connectionPasswordsPath(), saved);
+  return { ok: true };
 }
 
 function readJsonFile(filePath, fallback) {

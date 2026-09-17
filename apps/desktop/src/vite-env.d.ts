@@ -14,12 +14,15 @@ interface Window {
     startService(): Promise<{ ok: boolean; error?: string }>;
     stopService(): Promise<{ ok: boolean; error?: string }>;
     setRemoteControlActive(active: boolean): Promise<void>;
-    setStartupOptions(options: { startWithWindows: boolean; startMinimized: boolean }): Promise<void>;
+    setStartupOptions(options: { startWithWindows: boolean; startMinimized: boolean; minimizeToTray: boolean }): Promise<void>;
     applyRemoteInput(input: unknown): Promise<{ ok: boolean; error?: string }>;
     getCaptureSources(): Promise<Array<{ id: string; name: string; displayId: string; width: number; height: number }>>;
     setCaptureOptions(options: { sourceId: string; displayId?: string; shareAudio: boolean }): Promise<void>;
     readClipboard(): Promise<string>;
     writeClipboard(text: string): Promise<void>;
+    getConnectionPassword(nodusId: string): Promise<string>;
+    saveConnectionPassword(nodusId: string, password: string): Promise<{ ok: boolean }>;
+    openExternal(url: string): Promise<void>;
     saveReceivedFile(fileName: string, data: ArrayBuffer): Promise<{ ok: boolean; path?: string; name?: string; error?: string }>;
     wakeOnLan(macAddress: string): Promise<{ ok: boolean; error?: string }>;
     openDiagnostics(): Promise<void>;

@@ -55,6 +55,15 @@ contextBridge.exposeInMainWorld("nodusDesktop", {
   writeClipboard(text) {
     return ipcRenderer.invoke("nodus:write-clipboard", text);
   },
+  getConnectionPassword(nodusId) {
+    return ipcRenderer.invoke("nodus:get-connection-password", nodusId);
+  },
+  saveConnectionPassword(nodusId, password) {
+    return ipcRenderer.invoke("nodus:save-connection-password", nodusId, password);
+  },
+  openExternal(url) {
+    return ipcRenderer.invoke("nodus:open-external", url);
+  },
   saveReceivedFile(fileName, data) {
     return ipcRenderer.invoke("nodus:save-received-file", { fileName, data });
   },

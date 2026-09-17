@@ -1,4 +1,5 @@
 import {
+  type ClipboardEvent as ReactClipboardEvent,
   type FormEvent,
   type KeyboardEvent as ReactKeyboardEvent,
   type MouseEvent as ReactMouseEvent,
@@ -43,6 +44,7 @@ import {
   Palette,
   Power,
   RefreshCw,
+  Save,
   Search,
   Settings2,
   ShieldCheck,
@@ -78,6 +80,7 @@ import {
   type SignalMessage,
 } from "./core/api";
 import { loadNativeIdentity, loadOrCreateIdentity, regenerateNodusId, saveIdentity, type LocalIdentity } from "./core/identity";
+import { applyLanguage, currentLocale } from "./core/localization";
 import {
   firebaseConfigured,
   loadCloudSettings,
@@ -91,6 +94,7 @@ import {
   addAccessLog,
   clearUser,
   createFolder,
+  deleteRecent,
   loadAccessLog,
   loadFolders,
   loadFavorites,
@@ -115,6 +119,7 @@ import { CapturePool, type CaptureLease, type PooledCapture } from "./core/captu
 import { advanceStage, recommendedStage, STAGE_LIMITS, type AdaptiveStage, type QualitySample } from "./core/adaptive-quality";
 
 type ServiceState = "connecting" | "online" | "offline" | "error";
+type SettingsSection = "general" | "access" | "connection" | "appearance";
 type WindowsServiceStatus = { installed: boolean; running: boolean };
 type View = "connection" | "devices" | "recents" | "favorites" | "files" | "settings";
 const themeOptions: { id: LocalSettings["theme"]; label: string; description: string }[] = [
@@ -224,8 +229,12 @@ export function App() {
   const [deviceName, setDeviceName] = useState(identity.deviceName);
   const [serviceState, setServiceState] = useState<ServiceState>("connecting");
   const [targetId, setTargetId] = useState("");
+  const [targetPassword, setTargetPassword] = useState("");
+  const [rememberTargetPassword, setRememberTargetPassword] = useState(false);
+  const [, setLocaleRevision] = useState(0);
   const [feedback, setFeedback] = useState("");
   const [activeView, setActiveView] = useState<View>("connection");
+  const [settingsSection, setSettingsSection] = useState<SettingsSection>("general");
   const [recents, setRecents] = useState<RecentDevice[]>(() => loadRecents());
   const [favorites, setFavorites] = useState<string[]>(() => loadFavorites());
   const [settings, setSettings] = useState<LocalSettings>(() => loadSettings());
@@ -291,6 +300,7 @@ export function App() {
   const autoAcceptingRef = useRef(new Set<string>());
   const processedSignalsRef = useRef(new Set<string>());
   const lastIncomingAlertRef = useRef("");
+  const targetPasswordLookupRef = useRef(0);
   const outgoingRequestRef = useRef<SessionRequestRecord | null>(null);
   const sessionsRef = useRef<SessionRuntime[]>([]);
   const remoteVideoRef = useRef<HTMLVideoElement | null>(null);
@@ -334,6 +344,11 @@ export function App() {
   }, [settings.theme]);
 
   useEffect(() => {
+    applyLanguage(settings.language);
+    setLocaleRevision((revision) => revision + 1);
+  }, [settings.language]);
+
+  useEffect(() => {
     document.documentElement.dataset.mode = settings.lightweightMode ? "simple" : "full";
   }, [settings.lightweightMode]);
 
@@ -362,8 +377,9 @@ export function App() {
     window.nodusDesktop?.setStartupOptions({
       startWithWindows: settings.startWithWindows,
       startMinimized: settings.startMinimized,
+      minimizeToTray: settings.minimizeToTray,
     }).catch(() => undefined);
-  }, [settings.startMinimized, settings.startWithWindows]);
+  }, [settings.minimizeToTray, settings.startMinimized, settings.startWithWindows]);
 
   useEffect(() => {
     if (!currentUser || !firebaseConfigured()) return;
@@ -646,11 +662,12 @@ export function App() {
   }, [incomingRequests, settings.notifyIncomingRequests, settings.playRequestSound]);
 
   useEffect(() => {
-    const request = incomingRequests.find((item) => settings.trustedNodusIds.includes(item.requesterNodusId));
-    if (!settings.unattendedAccess || !request || autoAcceptingRef.current.has(request.id)) return;
+    const request = incomingRequests.find((item) => (settings.unattendedAccess && settings.trustedNodusIds.includes(item.requesterNodusId))
+      || Boolean(settings.accessPasswordHash && item.passwordHash === settings.accessPasswordHash));
+    if (!request || autoAcceptingRef.current.has(request.id)) return;
     autoAcceptingRef.current.add(request.id);
     acceptIncoming(request).finally(() => autoAcceptingRef.current.delete(request.id));
-  }, [incomingRequests, settings.trustedNodusIds, settings.unattendedAccess]);
+  }, [incomingRequests, settings.accessPasswordHash, settings.trustedNodusIds, settings.unattendedAccess]);
 
   function completeOnboarding(event: FormEvent) {
     event.preventDefault();
@@ -664,10 +681,21 @@ export function App() {
 
   async function connect(event: FormEvent) {
     event.preventDefault();
-    await connectToDevice(targetId);
+    await connectToDevice(targetId, targetPassword);
   }
 
-  async function connectToDevice(target: string) {
+  async function copyNodusId() {
+    const nodusId = formatNodusId(identity.nodusId);
+    try {
+      if (window.nodusDesktop?.writeClipboard) await window.nodusDesktop.writeClipboard(nodusId);
+      else await navigator.clipboard.writeText(nodusId);
+      setFeedback("Nodus ID copiado.");
+    } catch {
+      setFeedback("Nao foi possivel copiar o Nodus ID.");
+    }
+  }
+
+  async function connectToDevice(target: string, password = "") {
     const normalized = normalizeNodusId(target);
     if (!normalized) {
       setFeedback("Informe um Nodus ID com 9 digitos.");
@@ -695,7 +723,7 @@ export function App() {
         requesterName: currentUser ? `${currentUser.name} - ${identity.deviceName}` : identity.deviceName,
         targetNodusId: normalized,
         requestedPermissions: ["screen:view", "mouse:control", "keyboard:control", "clipboard:sync", "files:transfer", "audio:remote"],
-        passwordHash: await hashPassword(settings.remoteAccessPassword),
+        passwordHash: await hashPassword(password),
         preferredResolution: settings.preferredResolution,
         preferredFps: settings.maxFps,
       });
@@ -706,10 +734,30 @@ export function App() {
         result: "requested",
       });
       setOutgoingRequest(request);
+      if (rememberTargetPassword && password) await window.nodusDesktop?.saveConnectionPassword(normalized, password);
+      else if (!rememberTargetPassword) await window.nodusDesktop?.saveConnectionPassword(normalized, "");
+      if (!rememberTargetPassword) setTargetPassword("");
       setFeedback("Dispositivo encontrado. Aguardando autorizacao...");
     } catch (error) {
       setFeedback(error instanceof Error ? error.message : "Nao foi possivel conectar ao dispositivo.");
     }
+  }
+
+  function updateTargetId(value: string) {
+    const lookupId = ++targetPasswordLookupRef.current;
+    const formatted = formatNodusId(value);
+    const normalized = normalizeNodusId(formatted);
+    setTargetId(formatted);
+    if (!normalized) {
+      setTargetPassword("");
+      setRememberTargetPassword(false);
+      return;
+    }
+    window.nodusDesktop?.getConnectionPassword(normalized).then((password) => {
+      if (targetPasswordLookupRef.current !== lookupId) return;
+      setTargetPassword(password);
+      setRememberTargetPassword(Boolean(password));
+    }).catch(() => undefined);
   }
 
   async function acceptIncoming(request: SessionRequestRecord): Promise<string | null> {
@@ -718,7 +766,7 @@ export function App() {
       setFeedback("");
       if (settings.accessPasswordHash && request.passwordHash !== settings.accessPasswordHash) {
         setFeedback("Senha incorreta. O solicitante precisa informar a senha deste Nodus.");
-        return "Senha incorreta. Configure a senha de acesso nas configuracoes do computador que esta iniciando a conexao.";
+        return "Senha incorreta. Informe a senha definida neste Nodus no pedido de conexão.";
       }
       const iceWarmup = fetchIceServers(settings.coordinationUrl).then((servers) => {
         if (servers.length) setServerIceServers(servers);
@@ -1613,6 +1661,27 @@ export function App() {
     setRecents(loadRecents().map((item) => ({ ...item, favorite: next.includes(item.nodusId) })));
   }
 
+  function onDeleteDevice(nodusId: string) {
+    setRecents(deleteRecent(nodusId));
+    setFavorites(loadFavorites());
+    setFeedback("Dispositivo excluido.");
+  }
+
+  function onRenameDevice(nodusId: string, alias: string) {
+    setRecents(renameDevice(nodusId, alias));
+    setFeedback(alias.trim() ? "Nome do dispositivo atualizado." : "Nome original restaurado.");
+  }
+
+  async function openSupport() {
+    const url = "https://wa.me/5543998453910";
+    try {
+      if (window.nodusDesktop?.openExternal) await window.nodusDesktop.openExternal(url);
+      else window.open(url, "_blank", "noopener,noreferrer");
+    } catch {
+      setFeedback("Nao foi possivel abrir o WhatsApp.");
+    }
+  }
+
   async function wakeDevice(device: RecentDevice) {
     if (!device.macAddress) {
       setFeedback("Informe o endereco do computador nos detalhes do dispositivo.");
@@ -1631,6 +1700,7 @@ export function App() {
       window.nodusDesktop?.setStartupOptions({
         startWithWindows: next.startWithWindows,
         startMinimized: next.startMinimized,
+        minimizeToTray: next.minimizeToTray,
       }).catch(() => undefined);
     }
     if ("allowRemoteControl" in patch) {
@@ -1639,6 +1709,9 @@ export function App() {
     if ("preferredResolution" in patch && activeSession) {
       if (activeSession.role === "viewer") sendRemoteInputToSession(activeSession.sessionId, { type: "resolution", resolution: next.preferredResolution });
       else switchHostCapture(activeSession.sessionId, next.preferredResolution).catch(() => setFeedback("Nao foi possivel aplicar a resolucao agora."));
+    }
+    if ("preferredDisplayId" in patch && activeSession?.role === "host") {
+      switchHostCapture(activeSession.sessionId, undefined, next.preferredDisplayId).catch(() => setFeedback("Nao foi possivel trocar a tela agora."));
     }
     if (("connectionQuality" in patch || "maxFps" in patch) && activeSession?.role === "viewer") {
       sendRemoteInputToSession(activeSession.sessionId, { type: "quality", quality: next.connectionQuality, maxFps: next.maxFps });
@@ -2104,26 +2177,35 @@ export function App() {
               items={recents}
               nodusIdLabel={visibleNodusId}
               onConnect={connectToDevice}
-              onCopy={() => navigator.clipboard.writeText(identity.nodusId).then(() => setFeedback("Nodus ID copiado."))}
+              onCopy={copyNodusId}
+              onDeleteDevice={onDeleteDevice}
+              onRenameDevice={onRenameDevice}
               onOpenDevices={() => setActiveView("devices")}
-              onOpenFiles={() => setActiveView("files")}
-              onOpenSettings={() => setActiveView("settings")}
+              onOpenSettings={() => { setSettingsSection("general"); setActiveView("settings"); }}
+              onOpenConnectionSettings={() => { setSettingsSection("connection"); setActiveView("settings"); }}
+              onOpenPasswordSettings={() => { setSettingsSection("access"); setActiveView("settings"); }}
+              onOpenSupport={openSupport}
               onSubmit={connect}
-              onTargetChange={setTargetId}
+              onTargetChange={updateTargetId}
+              onTargetPasswordChange={setTargetPassword}
+              onRememberTargetPasswordChange={setRememberTargetPassword}
               onToggleFavorite={onToggleFavorite}
-              onViewStatus={() => setActiveView("settings")}
               outgoingRequest={outgoingRequest}
               recentDevices={recents.slice(0, 3)}
               serviceState={serviceState}
               statusLabel={statusLabel}
               targetId={targetId}
+              targetPassword={targetPassword}
+              rememberTargetPassword={rememberTargetPassword}
             />}
-            {activeView === "devices" && <Devices identity={identity} items={recents} favorites={favorites} nodusIdLabel={visibleNodusId} onAddDevice={() => setFeedback("Digite o Nodus ID no campo acima para adicionar um dispositivo.")} onConnect={connectToDevice} onOpenFiles={() => setActiveView("files")} onToggleFavorite={onToggleFavorite} statusLabel={statusLabel} />}
-            {activeView === "favorites" && <FavoritesPage favorites={favorites} items={recents.filter((item) => favorites.includes(item.nodusId))} onConnect={connectToDevice} onOpenDevices={() => setActiveView("devices")} onToggleFavorite={onToggleFavorite} />}
+            {activeView === "devices" && <Devices identity={identity} items={recents} favorites={favorites} nodusIdLabel={visibleNodusId} onAddDevice={() => setFeedback("Digite o Nodus ID no campo acima para adicionar um dispositivo.")} onConnect={connectToDevice} onDeleteDevice={onDeleteDevice} onRenameDevice={onRenameDevice} onToggleFavorite={onToggleFavorite} statusLabel={statusLabel} />}
+            {activeView === "favorites" && <FavoritesPage favorites={favorites} items={recents.filter((item) => favorites.includes(item.nodusId))} onConnect={connectToDevice} onDeleteDevice={onDeleteDevice} onRenameDevice={onRenameDevice} onOpenDevices={() => setActiveView("devices")} onToggleFavorite={onToggleFavorite} />}
             {activeView === "recents" && <DeviceList empty="Nenhum dispositivo recente." favorites={favorites} items={recents} folders={folders} onCreateFolder={(name) => setFolders(createFolder(name))} onMove={setRecents} onRename={setRecents} onUpdate={setRecents} onWake={wakeDevice} onToggleFavorite={onToggleFavorite} />}
             {activeView === "files" && <FileTransferPanel activeSession={activeSession} channelReady={activeFileReady} transfers={fileTransfers} onSendFile={sendFile} />}
             {activeView === "settings" && <Settings
+              appVersion={appVersion}
               captureSources={captureSources}
+              initialSection={settingsSection}
               serviceStatus={windowsServiceStatus}
               onInstallService={() => changeWindowsService("install")}
               onUninstallService={() => changeWindowsService("uninstall")}
@@ -2247,18 +2329,25 @@ function ConnectionHome({
   nodusIdLabel,
   onConnect,
   onCopy,
+  onDeleteDevice,
+  onRenameDevice,
   onOpenDevices,
-  onOpenFiles,
   onOpenSettings,
+  onOpenConnectionSettings,
+  onOpenPasswordSettings,
+  onOpenSupport,
   onSubmit,
   onTargetChange,
+  onTargetPasswordChange,
+  onRememberTargetPasswordChange,
   onToggleFavorite,
-  onViewStatus,
   outgoingRequest,
   recentDevices,
   serviceState,
   statusLabel,
   targetId,
+  targetPassword,
+  rememberTargetPassword,
 }: {
   feedback: string;
   favorites: string[];
@@ -2267,38 +2356,45 @@ function ConnectionHome({
   nodusIdLabel: string;
   onConnect: (nodusId: string) => void;
   onCopy: () => void;
+  onDeleteDevice: (nodusId: string) => void;
+  onRenameDevice: (nodusId: string, currentName: string) => void;
   onOpenDevices: () => void;
-  onOpenFiles: () => void;
   onOpenSettings: () => void;
+  onOpenConnectionSettings: () => void;
+  onOpenPasswordSettings: () => void;
+  onOpenSupport: () => void;
   onSubmit: (event: FormEvent) => void;
   onTargetChange: (value: string) => void;
+  onTargetPasswordChange: (value: string) => void;
+  onRememberTargetPasswordChange: (value: boolean) => void;
   onToggleFavorite: (nodusId: string) => void;
-  onViewStatus: () => void;
   outgoingRequest: SessionRequestRecord | null;
   recentDevices: RecentDevice[];
   serviceState: ServiceState;
   statusLabel: string;
   targetId: string;
+  targetPassword: string;
+  rememberTargetPassword: boolean;
 }) {
   return (
     <section className="connection-home">
       <div className="connection-overview">
         <section className="identity-card">
-          <div className="panel-label"><span>Seu Nodus ID</span><button className="help-icon" title="Sobre o Nodus ID" type="button">?</button></div>
+          <div className="panel-label"><span>Seu Nodus ID</span><button aria-label="Sobre o Nodus ID" className="help-icon" data-tooltip="O Nodus ID identifica este computador. Compartilhe-o apenas com pessoas de confiança para que elas possam solicitar acesso." type="button">?</button></div>
           <strong className="nodus-id-value">{formatNodusId(nodusIdLabel).slice(0, -3)}<em>{formatNodusId(nodusIdLabel).slice(-3)}</em></strong>
           <span><i /> Disponível para conexões</span>
           <button className="icon-button copy-id" onClick={onCopy} title="Copiar Nodus ID" type="button"><Copy aria-hidden="true" size={18} /></button>
         </section>
-        <ConnectBox feedback={feedback} outgoingRequest={outgoingRequest} recentDevices={recentDevices} targetId={targetId} onSubmit={onSubmit} onTargetChange={onTargetChange} />
-        <SystemStatusCard onViewMore={onViewStatus} serviceState={serviceState} statusLabel={statusLabel} />
+        <ConnectBox feedback={feedback} outgoingRequest={outgoingRequest} recentDevices={recentDevices} targetId={targetId} targetPassword={targetPassword} rememberTargetPassword={rememberTargetPassword} onSubmit={onSubmit} onTargetChange={onTargetChange} onTargetPasswordChange={onTargetPasswordChange} onRememberTargetPasswordChange={onRememberTargetPasswordChange} />
+        <SystemStatusCard serviceState={serviceState} statusLabel={statusLabel} />
       </div>
       <div className="connection-content">
-        <RecentDeviceList favorites={favorites} items={items.slice(0, 4)} onConnect={onConnect} onToggleFavorite={onToggleFavorite} onViewAll={onOpenDevices} />
+        <RecentDeviceList favorites={favorites} items={items.slice(0, 4)} onConnect={onConnect} onDeleteDevice={onDeleteDevice} onRenameDevice={onRenameDevice} onToggleFavorite={onToggleFavorite} onViewAll={onOpenDevices} />
         <section className="quick-access-panel">
           <h2>Acesso rápido</h2>
-          <button onClick={onOpenFiles} type="button"><FolderUp aria-hidden="true" /><span>Transferir arquivos</span><ArrowRight aria-hidden="true" /></button>
-          <button onClick={onOpenSettings} type="button"><Settings2 aria-hidden="true" /><span>Configurações</span><ArrowRight aria-hidden="true" /></button>
-          <button disabled title="Ajuda e suporte estará disponível em breve" type="button"><ShieldCheck aria-hidden="true" /><span>Ajuda e suporte</span><ArrowRight aria-hidden="true" /></button>
+          <button onClick={onOpenPasswordSettings} type="button"><LockKeyhole aria-hidden="true" /><span>Configurar senha</span><ArrowRight aria-hidden="true" /></button>
+          <button onClick={onOpenConnectionSettings} type="button"><Activity aria-hidden="true" /><span>Conexão</span><ArrowRight aria-hidden="true" /></button>
+          <button onClick={onOpenSupport} type="button"><ShieldCheck aria-hidden="true" /><span>Ajuda e suporte</span><ArrowRight aria-hidden="true" /></button>
         </section>
       </div>
     </section>
@@ -2309,28 +2405,32 @@ function RecentDeviceList({
   favorites,
   items,
   onConnect,
+  onDeleteDevice,
+  onRenameDevice,
   onToggleFavorite,
   onViewAll,
 }: {
   favorites: string[];
   items: RecentDevice[];
   onConnect: (nodusId: string) => void;
+  onDeleteDevice: (nodusId: string) => void;
+  onRenameDevice: (nodusId: string, currentName: string) => void;
   onToggleFavorite: (nodusId: string) => void;
   onViewAll: () => void;
 }) {
   return (
     <section className="recent-device-panel">
       <div className="section-heading"><h2>Dispositivos recentes</h2><button className="panel-action" onClick={onViewAll} type="button">Ver todos <ArrowRight aria-hidden="true" size={15} /></button></div>
-      {items.length ? <div className="recent-device-list">{items.map((item, index) => <RecentDeviceRow favorite={favorites.includes(item.nodusId)} item={item} key={item.nodusId} onConnect={onConnect} onToggleFavorite={onToggleFavorite} tone={["blue", "red", "sunset", "forest"][index % 4] as DeviceTone} />)}</div> : <p className="note">Os computadores acessados aparecerão aqui para conexões mais rápidas.</p>}
+      {items.length ? <div className="recent-device-list">{items.map((item, index) => <RecentDeviceRow favorite={favorites.includes(item.nodusId)} item={item} key={item.nodusId} onConnect={onConnect} onDeleteDevice={onDeleteDevice} onRenameDevice={onRenameDevice} onToggleFavorite={onToggleFavorite} tone={["blue", "red", "sunset", "forest"][index % 4] as DeviceTone} />)}</div> : <p className="note">Os computadores acessados aparecerão aqui para conexões mais rápidas.</p>}
     </section>
   );
 }
 
 type DeviceTone = "blue" | "red" | "sunset" | "forest";
 
-function RecentDeviceRow({ favorite, item, onConnect, onToggleFavorite, tone }: { favorite?: boolean; item: RecentDevice; onConnect: (nodusId: string) => void; onToggleFavorite?: (nodusId: string) => void; tone: DeviceTone }) {
+function RecentDeviceRow({ favorite, item, onConnect, onDeleteDevice, onRenameDevice, onToggleFavorite, tone }: { favorite?: boolean; item: RecentDevice; onConnect: (nodusId: string) => void; onDeleteDevice: (nodusId: string) => void; onRenameDevice: (nodusId: string, currentName: string) => void; onToggleFavorite?: (nodusId: string) => void; tone: DeviceTone }) {
   const online = item.status === "online";
-  const lastAccess = new Date(item.lastConnectionAt).toLocaleDateString("pt-BR");
+  const lastAccess = new Date(item.lastConnectionAt).toLocaleDateString(currentLocale());
   return (
     <article className="recent-device-row">
       <div className={`recent-device-art tone-${tone}`} aria-hidden="true" />
@@ -2338,18 +2438,30 @@ function RecentDeviceRow({ favorite, item, onConnect, onToggleFavorite, tone }: 
       <div className={online ? "recent-device-status online" : "recent-device-status"}><span><i /> {online ? "Online" : "Offline"}</span><small><Clock3 aria-hidden="true" size={15} /> Último acesso: {lastAccess}</small></div>
       <button className="secondary-button recent-device-connect" onClick={() => onConnect(item.nodusId)} type="button">Conectar <ArrowRight aria-hidden="true" size={16} /></button>
       {onToggleFavorite && <button className={favorite ? "favorite-row active" : "favorite-row"} onClick={() => onToggleFavorite(item.nodusId)} title={favorite ? "Remover dos favoritos" : "Adicionar aos favoritos"} type="button"><Star aria-hidden="true" fill={favorite ? "currentColor" : "none"} size={18} /></button>}
-      <span className="row-menu" aria-hidden="true"><MoreHorizontal size={19} /></span>
+      <DeviceMenu className="row-menu" name={item.alias || item.deviceName} onDelete={() => onDeleteDevice(item.nodusId)} onRename={(name) => onRenameDevice(item.nodusId, name)} />
     </article>
   );
 }
 
-function FavoritesPage({ favorites, items, onConnect, onOpenDevices, onToggleFavorite }: { favorites: string[]; items: RecentDevice[]; onConnect: (nodusId: string) => void; onOpenDevices: () => void; onToggleFavorite: (nodusId: string) => void }) {
+function DeviceMenu({ className, name, onDelete, onRename }: { className: string; name: string; onDelete: () => void; onRename?: (name: string) => void }) {
+  const [editing, setEditing] = useState(false);
+  const [draftName, setDraftName] = useState(name);
+  return <details className={`${className} device-menu-control`}>
+    <summary title="Mais ações"><MoreHorizontal aria-hidden="true" size={18} /></summary>
+    <div className="device-menu-actions">
+      {onRename && (editing ? <form onSubmit={(event) => { event.preventDefault(); onRename(draftName); setEditing(false); }}><input aria-label="Novo nome do dispositivo" autoFocus onChange={(event) => setDraftName(event.target.value)} value={draftName} /><button type="submit">Salvar</button></form> : <button onClick={() => setEditing(true)} type="button">Renomear</button>)}
+      <button className="device-menu-delete" onClick={onDelete} type="button">Excluir dispositivo</button>
+    </div>
+  </details>;
+}
+
+function FavoritesPage({ favorites, items, onConnect, onDeleteDevice, onRenameDevice, onOpenDevices, onToggleFavorite }: { favorites: string[]; items: RecentDevice[]; onConnect: (nodusId: string) => void; onDeleteDevice: (nodusId: string) => void; onRenameDevice: (nodusId: string, currentName: string) => void; onOpenDevices: () => void; onToggleFavorite: (nodusId: string) => void }) {
   const [query, setQuery] = useState("");
-  const visibleItems = items.filter((item) => `${item.alias ?? ""} ${item.deviceName} ${item.nodusId}`.toLocaleLowerCase("pt-BR").includes(query.toLocaleLowerCase("pt-BR")));
+  const visibleItems = items.filter((item) => `${item.alias ?? ""} ${item.deviceName} ${item.nodusId}`.toLocaleLowerCase(currentLocale()).includes(query.toLocaleLowerCase(currentLocale())));
   return (
     <section className="favorites-page">
       <div className="favorites-tools"><label><Search aria-hidden="true" size={19} /><input placeholder="Buscar nos favoritos..." value={query} onChange={(event) => setQuery(event.target.value)} /></label><span>{favorites.length} favorito{favorites.length === 1 ? "" : "s"}</span></div>
-      {visibleItems.length ? <div className="favorites-list">{visibleItems.map((item, index) => <RecentDeviceRow favorite item={item} key={item.nodusId} onConnect={onConnect} onToggleFavorite={onToggleFavorite} tone={["blue", "red", "sunset", "forest"][index % 4] as DeviceTone} />)}</div> : <section className="favorites-empty"><Star aria-hidden="true" /><h2>Nenhum dispositivo favorito</h2><p>Adicione dispositivos aos favoritos para encontrá-los rapidamente aqui.</p><button className="secondary-button" onClick={onOpenDevices} type="button">Ver dispositivos <ArrowRight aria-hidden="true" size={16} /></button></section>}
+      {visibleItems.length ? <div className="favorites-list">{visibleItems.map((item, index) => <RecentDeviceRow favorite item={item} key={item.nodusId} onConnect={onConnect} onDeleteDevice={onDeleteDevice} onRenameDevice={onRenameDevice} onToggleFavorite={onToggleFavorite} tone={["blue", "red", "sunset", "forest"][index % 4] as DeviceTone} />)}</div> : <section className="favorites-empty"><Star aria-hidden="true" /><h2>Nenhum dispositivo favorito</h2><p>Adicione dispositivos aos favoritos para encontrá-los rapidamente aqui.</p><button className="secondary-button" onClick={onOpenDevices} type="button">Ver dispositivos <ArrowRight aria-hidden="true" size={16} /></button></section>}
     </section>
   );
 }
@@ -2361,7 +2473,8 @@ function Devices({
   nodusIdLabel,
   onAddDevice,
   onConnect,
-  onOpenFiles,
+  onDeleteDevice,
+  onRenameDevice,
   onToggleFavorite,
   statusLabel,
 }: {
@@ -2371,7 +2484,8 @@ function Devices({
   nodusIdLabel: string;
   onAddDevice: () => void;
   onConnect: (nodusId: string) => void;
-  onOpenFiles: () => void;
+  onDeleteDevice: (nodusId: string) => void;
+  onRenameDevice: (nodusId: string, currentName: string) => void;
   onToggleFavorite: (nodusId: string) => void;
   statusLabel: string;
 }) {
@@ -2398,7 +2512,7 @@ function Devices({
         </div>
       </div>
       <div className={`device-cards ${layout === "list" ? "list-view" : ""}`}>
-        <DeviceCard current identity={identity} nodusIdLabel={nodusIdLabel} onConnect={onConnect} onOpenFiles={onOpenFiles} statusLabel={statusLabel} tone="blue" />
+        <DeviceCard current identity={identity} nodusIdLabel={nodusIdLabel} onConnect={onConnect} statusLabel={statusLabel} tone="blue" />
         {visibleItems.map((item, index) => (
           <DeviceCard
             key={item.nodusId}
@@ -2406,7 +2520,8 @@ function Devices({
             item={item}
             nodusIdLabel={formatNodusId(item.nodusId)}
             onConnect={onConnect}
-            onOpenFiles={onOpenFiles}
+            onDelete={() => onDeleteDevice(item.nodusId)}
+            onRename={(name) => onRenameDevice(item.nodusId, name)}
             onToggleFavorite={onToggleFavorite}
             tone={["red", "sunset", "forest"][index % 3] as "red" | "sunset" | "forest"}
           />
@@ -2424,7 +2539,8 @@ function DeviceCard({
   item,
   nodusIdLabel,
   onConnect,
-  onOpenFiles,
+  onDelete,
+  onRename,
   onToggleFavorite,
   statusLabel = "Online",
   tone = "blue",
@@ -2435,16 +2551,17 @@ function DeviceCard({
   item?: RecentDevice;
   nodusIdLabel: string;
   onConnect: (nodusId: string) => void;
-  onOpenFiles: () => void;
+  onDelete?: () => void;
+  onRename?: (name: string) => void;
   onToggleFavorite?: (nodusId: string) => void;
   statusLabel?: string;
   tone?: "blue" | "red" | "sunset" | "forest";
 }) {
-  const name = current ? identity?.deviceName ?? "Este computador" : item?.deviceName ?? "Dispositivo";
-  const deviceInitial = name.trim().slice(0, 1).toLocaleUpperCase("pt-BR") || "N";
+  const name = current ? identity?.deviceName ?? "Este computador" : item?.alias || item?.deviceName || "Dispositivo";
+  const deviceInitial = name.trim().slice(0, 1).toLocaleUpperCase(currentLocale()) || "N";
   const online = current || item?.status === "online";
   const nodusId = item?.nodusId ?? "";
-  const lastAccess = current ? "agora" : new Date(item?.lastConnectionAt ?? Date.now()).toLocaleDateString("pt-BR");
+  const lastAccess = current ? "agora" : new Date(item?.lastConnectionAt ?? Date.now()).toLocaleDateString(currentLocale());
   return (
     <article className={`device-card ${current ? "current-device" : ""}`}>
       <div className={`device-card-art tone-${tone}`}>
@@ -2452,23 +2569,18 @@ function DeviceCard({
       </div>
       <span className={online ? "device-online" : "device-offline"}><i /> {online ? (current ? statusLabel : "Online") : "Offline"}</span>
       {!current && <button className={favorite ? "device-favorite active" : "device-favorite"} onClick={() => onToggleFavorite?.(nodusId)} title={favorite ? "Remover dos favoritos" : "Adicionar aos favoritos"} type="button"><Star aria-hidden="true" size={17} fill={favorite ? "currentColor" : "none"} /></button>}
-      <span className="device-menu" aria-hidden="true"><MoreHorizontal size={17} /></span>
+      {!current && onDelete && <DeviceMenu className="device-menu" name={item?.alias || name} onDelete={onDelete} onRename={onRename} />}
       <strong>{name}</strong>
       <small>{nodusIdLabel}</small>
       <div className="device-card-meta"><span><Monitor aria-hidden="true" size={14} /> Windows</span><span><Clock3 aria-hidden="true" size={14} /> Último acesso: {lastAccess}</span></div>
       <button className={current ? "secondary-button device-access" : "device-access"} disabled={current} onClick={() => !current && onConnect(nodusId)} type="button">{current ? "Este computador" : "Acessar"}<ArrowRight aria-hidden="true" size={15} /></button>
-      <div className="device-quick-actions">
-        <button onClick={onOpenFiles} title="Abrir transferência de arquivos" type="button"><FolderOpen aria-hidden="true" size={15} /><span>Arquivos</span></button>
-        <button disabled title="Terminal estará disponível em uma próxima sessão" type="button"><MonitorUp aria-hidden="true" size={15} /><span>Terminal</span></button>
-        <button disabled title="Mais ações em breve" type="button"><MoreHorizontal aria-hidden="true" size={17} /><span>Mais</span></button>
-      </div>
     </article>
   );
 }
 
-function SystemStatusCard({ onViewMore, serviceState, statusLabel }: { onViewMore: () => void; serviceState: ServiceState; statusLabel: string }) {
+function SystemStatusCard({ serviceState, statusLabel }: { serviceState: ServiceState; statusLabel: string }) {
   return <section className="system-status-card">
-    <div className="section-heading"><h2>Status do Sistema</h2><button className="panel-action" onClick={onViewMore} type="button">Ver mais <ArrowRight aria-hidden="true" size={15} /></button></div>
+    <div className="section-heading"><h2>Status do Sistema</h2></div>
     <div className="system-check"><CheckCircle2 aria-hidden="true" size={16} /> Serviço Nodus <b>{statusLabel}</b></div>
     <div className="system-check"><LockKeyhole aria-hidden="true" size={16} /> Conexão protegida <b>{serviceState === "online" ? "Estável" : statusLabel}</b></div>
   </section>;
@@ -2479,18 +2591,33 @@ function ConnectBox({
   feedback,
   onSubmit,
   onTargetChange,
+  onTargetPasswordChange,
+  onRememberTargetPasswordChange,
   outgoingRequest,
   recentDevices = [],
   targetId,
+  targetPassword,
+  rememberTargetPassword,
 }: {
   compact?: boolean;
   feedback: string;
   onSubmit: (event: FormEvent) => void;
   onTargetChange: (value: string) => void;
+  onTargetPasswordChange: (value: string) => void;
+  onRememberTargetPasswordChange: (value: boolean) => void;
   outgoingRequest: SessionRequestRecord | null;
   recentDevices?: RecentDevice[];
   targetId: string;
+  targetPassword: string;
+  rememberTargetPassword: boolean;
 }) {
+  const handlePaste = (event: ReactClipboardEvent<HTMLInputElement>) => {
+    const pastedId = event.clipboardData.getData("text");
+    if (!pastedId) return;
+    event.preventDefault();
+    onTargetChange(formatNodusId(pastedId));
+  };
+
   return (
     <form className={compact ? "connect-box session-connect" : "connect-box"} onSubmit={onSubmit}>
       <label>
@@ -2501,9 +2628,15 @@ function ConnectBox({
           value={targetId}
           disabled={Boolean(outgoingRequest)}
           onChange={(event) => onTargetChange(formatNodusId(event.target.value))}
+          onPaste={handlePaste}
         />
       </label>
       <button disabled={Boolean(outgoingRequest)} type="submit">{outgoingRequest ? "Aguardando" : <><span>Conectar</span><ArrowRight aria-hidden="true" size={18} /></>}</button>
+      <details className="connect-password">
+        <summary>Usar senha de acesso</summary>
+        <input autoComplete="current-password" disabled={Boolean(outgoingRequest)} onChange={(event) => onTargetPasswordChange(event.target.value)} placeholder="Senha definida no outro Nodus" type="password" value={targetPassword} />
+        <label className="remember-password"><input checked={rememberTargetPassword} disabled={Boolean(outgoingRequest)} onChange={(event) => onRememberTargetPasswordChange(event.target.checked)} type="checkbox" /><span>Salvar senha neste dispositivo</span></label>
+      </details>
       {!compact && recentDevices.length > 0 && <div className="recent-connects"><span>Recentes:</span>{recentDevices.map((device) => <button key={device.nodusId} onClick={() => onTargetChange(formatNodusId(device.nodusId))} type="button">{device.alias || device.deviceName}</button>)}<button className="recent-more" title="Mais dispositivos" type="button"><ChevronDown aria-hidden="true" size={16} /></button></div>}
       {outgoingRequest
         ? <p className="session-banner">Aguardando aceite de {formatNodusId(outgoingRequest.targetNodusId)}.</p>
@@ -2625,7 +2758,7 @@ function AccessHistory({ entries, onViewAll }: { entries: AccessLogEntry[]; onVi
                   {directionLabel(entry.direction)} - {resultLabel(entry.result)}
                 </small>
               </div>
-              <time>{new Date(entry.at).toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" })}</time>
+              <time>{new Date(entry.at).toLocaleTimeString(currentLocale(), { hour: "2-digit", minute: "2-digit" })}</time>
             </div>
           ))}
         </div>
@@ -2990,7 +3123,7 @@ function DeviceList({
               <div>
                 <strong>{item.alias || item.deviceName}</strong>
                 <small>
-                  {item.nodusId} - {new Date(item.lastConnectionAt).toLocaleString("pt-BR")}
+                  {item.nodusId} - {new Date(item.lastConnectionAt).toLocaleString(currentLocale())}
                 </small>
               </div>
               <div className="row-actions">
@@ -3102,7 +3235,9 @@ function FileTransferPanel({
 }
 
 function Settings({
+  appVersion,
   captureSources,
+  initialSection,
   serviceStatus,
   onInstallService,
   onUninstallService,
@@ -3111,7 +3246,9 @@ function Settings({
   settings,
   updateSettings,
 }: {
+  appVersion: string;
   captureSources: CaptureSource[];
+  initialSection: SettingsSection;
   serviceStatus: WindowsServiceStatus;
   onInstallService: () => void;
   onUninstallService: () => void;
@@ -3122,13 +3259,17 @@ function Settings({
 }) {
   const [draft, setDraft] = useState(settings);
   const [passwordDraft, setPasswordDraft] = useState("");
-  const [section, setSection] = useState<"general" | "access" | "connection" | "appearance">("general");
+  const [section, setSection] = useState<SettingsSection>(initialSection);
   const dirty = JSON.stringify(draft) !== JSON.stringify(settings);
   const updateDraft = (patch: Partial<LocalSettings>) => setDraft((current) => ({ ...current, ...patch }));
 
   useEffect(() => {
     setDraft(settings);
   }, [settings]);
+
+  useEffect(() => {
+    setSection(initialSection);
+  }, [initialSection]);
 
   useEffect(() => {
     document.documentElement.dataset.theme = draft.theme;
@@ -3161,11 +3302,11 @@ function Settings({
             <Switch checked={draft.playRequestSound} icon={Volume2} label="Som ao receber pedido" description="Reproduz um som quando alguém solicitar acesso." onChange={(value) => updateDraft({ playRequestSound: value })} />
           </SettingsGroup>
           <SettingsGroup icon={ShieldCheck} title="Privacidade" description="Controle sua privacidade no aplicativo.">
-            <Switch checked={draft.showNodusId} icon={Monitor} label="Mostrar meu status como online" description="Exibe este computador para conexões autorizadas." onChange={(value) => updateDraft({ showNodusId: value })} />
+            <Switch checked={draft.showNodusId} icon={Monitor} label="Mostrar meu Nodus ID" description="Oculta o ID na tela inicial, sem encerrar o serviço." onChange={(value) => updateDraft({ showNodusId: value })} />
             <Switch checked={draft.confirmBeforeDisconnect} icon={ShieldCheck} label="Confirmar antes de encerrar" description="Evita o encerramento acidental de uma sessão." onChange={(value) => updateDraft({ confirmBeforeDisconnect: value })} />
           </SettingsGroup>
           <SettingsGroup icon={RefreshCw} title="Atualizações" description="Mantenha o Nodus sempre atualizado.">
-            <div className="update-row"><span>Versão atual: 0.4.1</span></div>
+            <div className="update-row"><span>Versão atual: {appVersion}</span></div>
           </SettingsGroup>
         </>}
         {section === "access" && <>
@@ -3204,17 +3345,8 @@ function Settings({
               }} disabled={!passwordDraft} type="button">Definir senha</button>
               {draft.accessPasswordHash && <button className="secondary-button" onClick={() => updateDraft({ accessPasswordHash: "" })} type="button">Remover</button>}
             </div>
-            <small className="note">Pedidos sem a senha correta nao serao aceitos.</small>
+            <small className="note">Quem informar esta senha corretamente entra na conexão sem um novo aceite.</small>
           </div>
-          <label className="settings-field">Senha para acessar outros Nodus
-            <input
-              autoComplete="current-password"
-              type="password"
-              value={draft.remoteAccessPassword}
-              onChange={(event) => updateDraft({ remoteAccessPassword: event.target.value })}
-              placeholder="Senha usada nos acessos de saida"
-            />
-          </label>
           <div className="trusted-list">
             <strong>Computadores confiaveis</strong>
             {draft.trustedNodusIds.length === 0 && <span>Nenhum computador autorizado.</span>}
@@ -3256,15 +3388,15 @@ function Settings({
           <div className="theme-grid" role="radiogroup" aria-label="Tema visual">
             {themeOptions.map((theme) => <button aria-checked={draft.theme === theme.id} className={`theme-option theme-${theme.id} ${draft.theme === theme.id ? "active" : ""}`} key={theme.id} onClick={() => updateDraft({ theme: theme.id })} role="radio" type="button"><span className="theme-option-preview" aria-hidden="true" /><span><b>{theme.label}</b><small>{theme.description}</small></span></button>)}
           </div>
-          <label className="appearance-language"><span><Globe2 />Idioma</span><select value={draft.language} onChange={(event) => updateDraft({ language: event.target.value as "pt-BR" })}><option value="pt-BR">Português (Brasil)</option></select></label>
+          <label className="appearance-language"><span><Globe2 />Idioma</span><select value={draft.language} onChange={(event) => updateDraft({ language: event.target.value as LocalSettings["language"] })}><option value="pt-BR">Português (Brasil)</option><option value="en-US">English</option><option value="ru-RU">Русский</option><option value="ja-JP">日本語</option></select></label>
         </section>}
       </div>
       <div className="settings-actions">
         <button className="secondary-button" disabled={!dirty} onClick={() => setDraft(settings)} type="button">
           Descartar
         </button>
-        <button disabled={!dirty} onClick={() => updateSettings(draft)} type="button">
-          Salvar
+        <button className="settings-save-button" disabled={!dirty} onClick={() => updateSettings(draft)} type="button">
+          <Save aria-hidden="true" size={16} /> Salvar
         </button>
       </div>
     </section>

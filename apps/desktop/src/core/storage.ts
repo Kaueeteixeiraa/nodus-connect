@@ -54,7 +54,7 @@ export interface LocalSettings {
   minimizeToTray: boolean;
   confirmBeforeDisconnect: boolean;
   theme: "dark" | "japan" | "sakura-night" | "neo-tokyo" | "cosmos" | "arctic";
-  language: "pt-BR";
+  language: "pt-BR" | "en-US" | "ru-RU" | "ja-JP";
   lightweightMode: boolean;
   showNodusId: boolean;
   notifyIncomingRequests: boolean;
@@ -64,7 +64,6 @@ export interface LocalSettings {
   allowClipboard: boolean;
   shareAudio: boolean;
   accessPasswordHash: string;
-  remoteAccessPassword: string;
   unattendedAccess: boolean;
   trustedNodusIds: string[];
   preferredDisplayId: string;
@@ -100,6 +99,13 @@ export function saveRecent(device: CoordinationDevice): RecentDevice[] {
   return merged;
 }
 
+export function deleteRecent(nodusId: string): RecentDevice[] {
+  const next = loadRecents().filter((item) => item.nodusId !== nodusId);
+  localStorage.setItem(RECENTS_KEY, JSON.stringify(next));
+  localStorage.setItem(FAVORITES_KEY, JSON.stringify(loadFavorites().filter((item) => item !== nodusId)));
+  return next;
+}
+
 export function loadFavorites(): string[] {
   return read<string[]>(FAVORITES_KEY, []);
 }
@@ -130,7 +136,6 @@ export function loadSettings(): LocalSettings {
     allowClipboard: true,
     shareAudio: true,
     accessPasswordHash: "",
-    remoteAccessPassword: "",
     unattendedAccess: false,
     trustedNodusIds: [],
     preferredDisplayId: "",
@@ -149,6 +154,9 @@ export function loadSettings(): LocalSettings {
     theme: ["japan", "sakura-night", "neo-tokyo", "cosmos", "arctic"].includes(stored.theme ?? "")
       ? stored.theme as LocalSettings["theme"]
       : "dark",
+    language: ["pt-BR", "en-US", "ru-RU", "ja-JP"].includes(stored.language ?? "")
+      ? stored.language as LocalSettings["language"]
+      : "pt-BR",
     maxFps: stored.maxFps === 120 ? 120 : 60,
     shareAudio: migratedShareAudio ?? defaults.shareAudio,
     coordinationUrl: defaults.coordinationUrl || stored.coordinationUrl || "",
