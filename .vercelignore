@@ -3,6 +3,12 @@ work
 dist
 build/*.ico
 build/nodus-payload.zip
+download-site
+download-part*
+nodus-connect-download.zip
+native/bin
+*.exe
+*.zip
 node_modules
 .vercel
 *.log
