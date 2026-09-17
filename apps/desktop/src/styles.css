@@ -4654,10 +4654,10 @@ button[type="submit"]:hover,
 
 .connection-overview .connect-box:has(.connect-password[open]) { height: auto; min-height: 198px; }
 
-.connection-home:has(.connect-password[open]) { grid-template-rows: 296px minmax(0, 1fr); }
+.connection-home:has(.connect-password[open]) { grid-template-rows: 246px minmax(0, 1fr); }
 .connection-overview:has(.connect-password[open]) .identity-card,
 .connection-overview:has(.connect-password[open]) .connect-box,
-.connection-overview:has(.connect-password[open]) .system-status-card { height: 296px; }
+.connection-overview:has(.connect-password[open]) .system-status-card { height: 246px; }
 
 .connection-overview .connect-box .remember-password {
   display: inline-flex;
@@ -4678,7 +4678,7 @@ button[type="submit"]:hover,
 @media (max-height: 720px) {
   .connection-main { overflow-y: auto; }
   .connection-home:has(.connect-password[open]) {
-    grid-template-rows: 296px max-content;
+    grid-template-rows: 246px max-content;
     min-height: max-content;
   }
   .connection-home:has(.connect-password[open]) .connection-content { align-items: start; }
