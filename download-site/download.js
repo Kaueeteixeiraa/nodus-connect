@@ -1,9 +1,9 @@
 const parts = [
-  "https://nodus-connect-download-1.vercel.app/Nodus-Connect-Setup-0.4.2.part01.bin",
-  "https://nodus-connect-download-2.vercel.app/Nodus-Connect-Setup-0.4.2.part02.bin",
-  "https://nodus-connect-download-3.vercel.app/Nodus-Connect-Setup-0.4.2.part03.bin",
-  "https://nodus-connect-download-4.vercel.app/Nodus-Connect-Setup-0.4.2.part04.bin",
-  "https://nodus-connect-download-5.vercel.app/Nodus-Connect-Setup-0.4.2.part05.bin",
+  "https://nodus-connect-download-1.vercel.app/Nodus-Connect-Setup-0.4.15.part01.bin",
+  "https://nodus-connect-download-2.vercel.app/Nodus-Connect-Setup-0.4.15.part02.bin",
+  "https://nodus-connect-download-3.vercel.app/Nodus-Connect-Setup-0.4.15.part03.bin",
+  "https://nodus-connect-download-4.vercel.app/Nodus-Connect-Setup-0.4.15.part04.bin",
+  "https://nodus-connect-download-5.vercel.app/Nodus-Connect-Setup-0.4.15.part05.bin",
 ];
 
 const link = document.querySelector("#download-link");
@@ -31,11 +31,11 @@ link.addEventListener("click", async (event) => {
     const downloadUrl = URL.createObjectURL(blob);
     const download = document.createElement("a");
     download.href = downloadUrl;
-    download.download = "Nodus-Connect-Setup-0.4.2.exe";
+    download.download = "Nodus-Connect-Setup-0.4.15.exe";
     download.click();
     URL.revokeObjectURL(downloadUrl);
     title.textContent = "Download iniciado";
-    detail.textContent = "Nodus Connect Setup 0.4.2";
+    detail.textContent = "Nodus Connect Setup 0.4.15";
   } catch {
     title.textContent = "Não foi possível baixar";
     detail.textContent = "Tente novamente em alguns instantes.";
