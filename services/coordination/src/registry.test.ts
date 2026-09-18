@@ -20,4 +20,10 @@ describe("PresenceRegistry", () => {
     registry.pruneExpired(Date.now() + 10);
     expect(registry.lookup("111222333")).toBeNull();
   });
+
+  it("marks a device offline when it closes cleanly", () => {
+    const registry = new PresenceRegistry();
+    registry.upsert({ nodusId: "111222333", deviceName: "Notebook" });
+    expect(registry.offline("111222333").status).toBe("offline");
+  });
 });

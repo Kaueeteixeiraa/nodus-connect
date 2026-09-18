@@ -10,6 +10,7 @@ import {
   cloudLookupDevice,
   cloudRegisterPresence,
   cloudSendSignal,
+  cloudUnregisterPresence,
   firebaseConfigured,
 } from "./firebase";
 import type { LocalIdentity } from "./identity";
@@ -174,6 +175,14 @@ export async function heartbeat(identity: LocalIdentity | string): Promise<Coord
   const normalized = normalizeNodusId(nodusId);
   if (!normalized) throw new Error("Nodus ID invalido");
   return request(`/v1/presence/${normalized}/heartbeat`, { method: "POST" });
+}
+
+export async function unregisterPresence(identity: LocalIdentity | string): Promise<CoordinationDevice> {
+  if (firebaseConfigured()) return cloudUnregisterPresence(identity);
+  const nodusId = typeof identity === "string" ? identity : identity.nodusId;
+  const normalized = normalizeNodusId(nodusId);
+  if (!normalized) throw new Error("Nodus ID invalido");
+  return request(`/v1/presence/${normalized}`, { method: "DELETE" });
 }
 
 export async function lookupDevice(nodusId: string): Promise<CoordinationDevice | null> {

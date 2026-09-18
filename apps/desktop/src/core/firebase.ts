@@ -15,7 +15,7 @@ const config = {
   messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID,
   appId: import.meta.env.VITE_FIREBASE_APP_ID,
 };
-const DEVICE_ONLINE_TTL_MS = 45_000;
+const DEVICE_ONLINE_TTL_MS = 20_000;
 const PENDING_REQUEST_TTL_MS = 5 * 60_000;
 
 type FirebaseModules = {
@@ -115,6 +115,53 @@ export async function cloudHeartbeat(identityInput: LocalIdentity | string): Pro
   return device;
 }
 
+export async function cloudUnregisterPresence(identityInput: LocalIdentity | string): Promise<CoordinationDevice> {
+  const uid = await ensureUid();
+  const nodusIdInput = typeof identityInput === "string" ? identityInput : identityInput.nodusId;
+  const nodusId = normalizeNodusId(nodusIdInput);
+  if (!nodusId) throw new Error("Nodus ID invalido");
+  const { doc, getDoc, setDoc, store } = await fire();
+  const ref = doc(store, "devices", nodusId);
+  const current = await getDoc(ref);
+  const currentDevice = current.data() as CoordinationDevice | undefined;
+  const device: CoordinationDevice = {
+    nodusId,
+    ownerUid: uid ?? currentDevice?.ownerUid,
+    deviceName: typeof identityInput === "string" ? currentDevice?.deviceName ?? "Dispositivo" : identityInput.deviceName,
+    status: "offline",
+    updatedAt: new Date().toISOString(),
+    capabilities: currentDevice?.capabilities ?? ["desktop-shell", "presence", "screen-share", "remote-control", "firebase"],
+  };
+  await setDoc(ref, device, { merge: true });
+  return device;
+}
+
+export function subscribeCloudDevicePresence(nodusIdInput: string, onPresence: (device: CoordinationDevice | null) => void): { close(): void } {
+  const nodusId = normalizeNodusId(nodusIdInput);
+  let closed = false;
+  let unsubscribe: Unsubscribe | undefined;
+  let expiryTimer = 0;
+
+  const publish = (device: CoordinationDevice | null) => {
+    if (closed) return;
+    window.clearTimeout(expiryTimer);
+    if (!device || !isFresh(device.updatedAt, DEVICE_ONLINE_TTL_MS)) {
+      onPresence(null);
+      return;
+    }
+    onPresence(device);
+    expiryTimer = window.setTimeout(() => onPresence(null), Math.max(0, DEVICE_ONLINE_TTL_MS - (Date.now() - Date.parse(device.updatedAt)) + 20));
+  };
+
+  if (!firebaseConfigured() || !nodusId) return { close() {} };
+  fire().then(({ doc, onSnapshot, store }) => {
+    if (closed) return;
+    unsubscribe = onSnapshot(doc(store, "devices", nodusId), (snapshot) => publish(snapshot.exists() ? snapshot.data() as CoordinationDevice : null), () => publish(null));
+  }).catch(() => publish(null));
+
+  return { close() { closed = true; window.clearTimeout(expiryTimer); unsubscribe?.(); } };
+}
+
 export async function cloudLookupDevice(nodusIdInput: string): Promise<CoordinationDevice | null> {
   await ensureUid();
   const nodusId = normalizeNodusId(nodusIdInput);
@@ -123,7 +170,7 @@ export async function cloudLookupDevice(nodusIdInput: string): Promise<Coordinat
   const snapshot = await getDoc(doc(store, "devices", nodusId));
   if (!snapshot.exists()) return null;
   const device = snapshot.data() as CoordinationDevice;
-  return isFresh(device.updatedAt, DEVICE_ONLINE_TTL_MS) ? device : null;
+  return device.status === "online" && isFresh(device.updatedAt, DEVICE_ONLINE_TTL_MS) ? device : null;
 }
 
 export async function cloudCreateSessionRequest(input: {

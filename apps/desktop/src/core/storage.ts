@@ -216,6 +216,14 @@ export function updateDevice(nodusId: string, patch: Partial<Pick<RecentDevice, 
   return next;
 }
 
+export function updateDevicePresence(nodusId: string, device: CoordinationDevice | null): RecentDevice[] {
+  const next = loadRecents().map((item) => item.nodusId === nodusId
+    ? { ...item, deviceName: device?.deviceName || item.deviceName, status: device?.status ?? "offline" }
+    : item);
+  localStorage.setItem(RECENTS_KEY, JSON.stringify(next));
+  return next;
+}
+
 export function loadAccessLog(): AccessLogEntry[] {
   return read<AccessLogEntry[]>(ACCESS_LOG_KEY, []);
 }

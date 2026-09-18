@@ -74,6 +74,7 @@ import {
   registerPresence,
   sendSignal,
   testIceServers,
+  unregisterPresence,
   type RemoteResolution,
   type RemoteFrameRate,
   type SessionRequestRecord,
@@ -88,6 +89,7 @@ import {
   saveCloudSettings,
   signInFirebaseWithGoogle,
   syncCloudUser,
+  subscribeCloudDevicePresence,
 } from "./core/firebase";
 import { connectRealtime } from "./core/realtime";
 import {
@@ -108,6 +110,7 @@ import {
   saveUser,
   toggleFavorite,
   updateDevice,
+  updateDevicePresence,
   type AccessLogEntry,
   type DeviceFolder,
   type LocalSettings,
@@ -119,9 +122,9 @@ import { CapturePool, type CaptureLease, type PooledCapture } from "./core/captu
 import { advanceStage, recommendedStage, STAGE_LIMITS, type AdaptiveStage, type QualitySample } from "./core/adaptive-quality";
 
 const releaseNotes = [
+  { version: "0.4.19", changes: ["Status dos dispositivos atualizado em tempo real.", "Tela de espera exibida acima da interface."] },
   { version: "0.4.18", changes: ["Espaço reduzido ao usar senha de acesso.", "Home mais compacta em telas menores."] },
   { version: "0.4.17", changes: ["Painel de atualizações exibido acima da interface.", "Área superior da home mais compacta."] },
-  { version: "0.4.16", changes: ["Busca de dispositivos por nome ou Nodus ID.", "Sugestões para computadores conectados anteriormente."] },
 ];
 
 type ServiceState = "connecting" | "online" | "offline" | "error";
@@ -266,6 +269,7 @@ export function App() {
   const [adminRequests, setAdminRequests] = useState<Record<string, string>>({});
   const [recordingSessionId, setRecordingSessionId] = useState<string | null>(null);
   const [standby, setStandby] = useState(false);
+  const recentPresenceIds = useMemo(() => recents.map((item) => item.nodusId).sort().join(","), [recents]);
   const peersRef = useRef(new Map<string, RTCPeerConnection>());
   const controlChannelsRef = useRef(new Map<string, RTCDataChannel>());
   const fileChannelsRef = useRef(new Map<string, RTCDataChannel>());
@@ -530,13 +534,37 @@ export function App() {
       } catch {
         if (!disposed) setServiceState(navigator.onLine ? "error" : "offline");
       }
-    }, 8_000);
+    }, 5_000);
 
     return () => {
       disposed = true;
       window.clearInterval(timer);
+      unregisterPresence(identity).catch(() => undefined);
     };
   }, [identity, settings.coordinationUrl]);
+
+  useEffect(() => {
+    const nodusIds = recentPresenceIds ? recentPresenceIds.split(",") : [];
+    if (nodusIds.length === 0) return;
+
+    const applyPresence = (nodusId: string, device: Awaited<ReturnType<typeof lookupDevice>>) => setRecents(updateDevicePresence(nodusId, device));
+    if (firebaseConfigured()) {
+      const subscriptions = nodusIds.map((nodusId) => subscribeCloudDevicePresence(nodusId, (device) => applyPresence(nodusId, device)));
+      return () => subscriptions.forEach((subscription) => subscription.close());
+    }
+
+    let disposed = false;
+    const refresh = async () => {
+      const devices = await Promise.all(nodusIds.map((nodusId) => lookupDevice(nodusId).catch(() => null)));
+      if (!disposed) devices.forEach((device, index) => applyPresence(nodusIds[index], device));
+    };
+    refresh();
+    const timer = window.setInterval(refresh, 5_000);
+    return () => {
+      disposed = true;
+      window.clearInterval(timer);
+    };
+  }, [recentPresenceIds, settings.coordinationUrl]);
 
   useEffect(() => {
     if (!identity.deviceNameConfirmed) return;
@@ -719,7 +747,7 @@ export function App() {
         return servers;
       }).catch(() => [] as RTCIceServer[]);
       const device = await lookupDevice(normalized);
-      if (!device) {
+      if (!device || device.status !== "online") {
         setFeedback("Dispositivo nao encontrado. Abra o Nodus no outro PC e use o ID dele.");
         return;
       }

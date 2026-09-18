@@ -63,6 +63,13 @@ export function createRelayServer() {
         return json(response, 200, record);
       }
 
+      const offlineMatch = url.pathname.match(/^\/v1\/presence\/(\d{9})$/);
+      if (request.method === "DELETE" && offlineMatch) {
+        const record = registry.offline(offlineMatch[1]);
+        notify(clients, record.nodusId, "presence", { device: record });
+        return json(response, 200, record);
+      }
+
       const deviceMatch = url.pathname.match(/^\/v1\/devices\/(\d{9})$/);
       if (request.method === "GET" && deviceMatch) {
         const device = registry.lookup(deviceMatch[1]);

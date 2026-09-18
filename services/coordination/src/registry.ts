@@ -20,7 +20,7 @@ export interface PresenceInput {
 export class PresenceRegistry {
   private readonly records = new Map<string, PresenceRecord>();
 
-  constructor(private readonly ttlMs = 45_000) {}
+  constructor(private readonly ttlMs = 20_000) {}
 
   upsert(input: PresenceInput): PresenceRecord {
     const nodusId = normalizeNodusId(input.nodusId);
@@ -47,6 +47,18 @@ export class PresenceRegistry {
     if (!current) throw new Error("DEVICE_NOT_FOUND");
 
     const next = { ...current, status: "online" as const, updatedAt: new Date().toISOString() };
+    this.records.set(nodusId, next);
+    return next;
+  }
+
+  offline(nodusIdInput: string): PresenceRecord {
+    const nodusId = normalizeNodusId(nodusIdInput);
+    if (!nodusId) throw new Error("INVALID_NODUS_ID");
+
+    const current = this.records.get(nodusId);
+    if (!current) throw new Error("DEVICE_NOT_FOUND");
+
+    const next = { ...current, status: "offline" as const, updatedAt: new Date().toISOString() };
     this.records.set(nodusId, next);
     return next;
   }
