@@ -122,6 +122,7 @@ import {
 import { createFileCryptoSession, decryptFileChunk, deriveFileCryptoKey, encryptFileChunk, type FileCryptoSession } from "./core/file-crypto";
 import { CapturePool, type CaptureLease, type PooledCapture } from "./core/capture-pool";
 import { advanceStage, recommendedStage, STAGE_LIMITS, type AdaptiveStage, type QualitySample } from "./core/adaptive-quality";
+import { diagnosePipeline, smoothPipelineSample, type EncoderKind, type EncoderVendor, type PipelineBottleneck, type PipelineSample } from "./core/performance-monitor";
 
 const releaseNotes = [
   { version: "0.4.19", changes: ["Status dos dispositivos atualizado em tempo real.", "Tela de espera 3D opcional."] },
@@ -188,6 +189,10 @@ type SessionMetrics = {
   limitation: string;
   encoder: string;
   decoder: string;
+  bottleneck: PipelineBottleneck;
+  bottleneckConfidence: number;
+  encoderKind: EncoderKind;
+  encoderVendor: EncoderVendor;
 };
 type RemoteInputMessage =
   | { type: "mouseMove"; x: number; y: number }
@@ -201,6 +206,7 @@ type RemoteInputMessage =
   | { type: "screen-options"; displays: CaptureSource[] }
   | { type: "latency-ping" | "latency-pong"; sentAt: number }
   | { type: "receiver-stats"; jitterBufferMs: number; renderFps: number; droppedFrames: number; freezes: number }
+  | { type: "sender-stats"; captureFps: number; encodedFps: number; sentFps: number; encodeMs: number; limitation: string; encoder: string }
   | { type: "admin-request" }
   | { type: "admin-status"; status: "approved" | "denied" | "unavailable" };
 type CaptureSource = { id: string; name: string; displayId: string; width: number; height: number };
@@ -297,6 +303,7 @@ export function App() {
   const hostInputRateRef = useRef(new Map<string, { at: number; count: number }>());
   const controlLatencyRef = useRef(new Map<string, number>());
   const receiverFeedbackRef = useRef(new Map<string, { jitterBufferMs: number; renderFps: number; droppedFrames: number; freezes: number }>());
+  const senderFeedbackRef = useRef(new Map<string, { captureFps: number; encodedFps: number; sentFps: number; encodeMs: number; limitation: string; encoder: string }>());
   const qualityTimersRef = useRef(new Map<string, number>());
   const statsRef = useRef(new Map<string, {
     bytes: number;
@@ -320,6 +327,9 @@ export function App() {
   const qualityTierRef = useRef(new Map<string, string>());
   const adaptiveStateRef = useRef(new Map<string, { stage: AdaptiveStage; stableSamples: number; startedAt: number }>());
   const smoothedQualityRef = useRef(new Map<string, QualitySample>());
+  const smoothedPipelineRef = useRef(new Map<string, PipelineSample>());
+  const lastMetricsUiAtRef = useRef(new Map<string, number>());
+  const performanceEventStateRef = useRef(new Map<string, { bottleneck: PipelineBottleneck; quality: SessionMetrics["quality"]; route: SessionMetrics["route"]; encoder: string }>());
   const requestedResolutionsRef = useRef(new Map<string, RemoteResolution>());
   const requestedQualitiesRef = useRef(new Map<string, LocalSettings["connectionQuality"]>());
   const requestedFpsRef = useRef(new Map<string, RemoteFrameRate>());
@@ -1226,17 +1236,59 @@ export function App() {
         statsRef.current.set(sessionId, { bytes, captured, encoded, sent, received: receivedFrames, decoded, encodeTime, decodeTime, packetSendDelay, packetsSent, jitterBufferDelay, jitterBufferEmitted, freezes, dropped, lost, receivedPackets: received, at: now });
         const targetFps = requestedFpsRef.current.get(sessionId) ?? settings.maxFps;
         const receiverFeedback = receiverFeedbackRef.current.get(sessionId);
+        const senderFeedback = senderFeedbackRef.current.get(sessionId);
+        const render = renderStatsRef.current.get(sessionId);
+        const renderFps = role === "host" ? receiverFeedback?.renderFps ?? 0 : render?.fps ?? 0;
+        const activePicture = bitrateKbps >= 200 && [captureFps, encodedFps, receivedFps, decodedFps, renderFps].some((value) => value >= targetFps * 0.25)
+          || limitation === "cpu";
         const sample: QualitySample = {
           rttMs: latencyMs, jitterMs, lossPct, availableKbps, bitrateKbps, captureFps, encodedFps, encodeMs, targetFps,
-          activePicture: (bitrateKbps >= 200 && (captureFps >= targetFps * 0.25 || encodedFps >= targetFps * 0.25)) || limitation === "cpu", limitation,
+          activePicture, limitation,
           jitterBufferMs: role === "host" ? receiverFeedback?.jitterBufferMs : jitterBufferMs,
           packetSendDelayMs,
-          renderFps: role === "host" ? receiverFeedback?.renderFps : renderStatsRef.current.get(sessionId)?.fps,
+          renderFps,
           freezes: role === "host" ? receiverFeedback?.freezes : freezeDelta,
         };
         const quality = await applyAdaptiveQuality(sessionId, peer, role, sample);
-        const render = renderStatsRef.current.get(sessionId);
-        const metrics = { bitrateKbps, fps, captureFps, encodedFps, sentFps, receivedFps, decodedFps, renderFps: role === "host" ? receiverFeedback?.renderFps ?? 0 : render?.fps ?? 0, renderDroppedFrames: render?.dropped ?? 0, latencyMs, controlLatencyMs: controlLatencyRef.current.get(sessionId) ?? 0, route, quality, codec, packetLossPct: Math.round(lossPct * 10) / 10, jitterMs: Math.round(jitterMs), jitterBufferMs: role === "host" ? receiverFeedback?.jitterBufferMs ?? 0 : jitterBufferMs, packetSendDelayMs, freezes: role === "host" ? receiverFeedback?.freezes ?? 0 : freezeDelta, availableKbps, captureWidth, captureHeight, encodeMs, decodeMs, droppedFrames, limitation, encoder, decoder };
+        const pipelineSample: PipelineSample = {
+          role,
+          targetFps,
+          captureFps: role === "host" ? captureFps : senderFeedback?.captureFps ?? 0,
+          encodedFps: role === "host" ? encodedFps : senderFeedback?.encodedFps ?? 0,
+          sentFps: role === "host" ? sentFps : senderFeedback?.sentFps ?? 0,
+          receivedFps,
+          decodedFps,
+          renderFps,
+          encodeMs: role === "host" ? encodeMs : senderFeedback?.encodeMs ?? 0,
+          decodeMs,
+          rttMs: latencyMs,
+          jitterMs,
+          lossPct,
+          jitterBufferMs: role === "host" ? receiverFeedback?.jitterBufferMs ?? 0 : jitterBufferMs,
+          packetSendDelayMs,
+          limitation: role === "host" ? limitation : senderFeedback?.limitation ?? limitation,
+          encoder: role === "host" ? encoder : senderFeedback?.encoder ?? "",
+          activePicture,
+        };
+        const smoothedPipeline = smoothPipelineSample(smoothedPipelineRef.current.get(sessionId), pipelineSample);
+        smoothedPipelineRef.current.set(sessionId, smoothedPipeline);
+        const diagnosis = diagnosePipeline(smoothedPipeline);
+        const metrics: SessionMetrics = {
+          bitrateKbps, fps,
+          captureFps: pipelineSample.captureFps,
+          encodedFps: pipelineSample.encodedFps,
+          sentFps: pipelineSample.sentFps,
+          receivedFps, decodedFps, renderFps, renderDroppedFrames: render?.dropped ?? 0,
+          latencyMs, controlLatencyMs: controlLatencyRef.current.get(sessionId) ?? 0, route, quality, codec,
+          packetLossPct: Math.round(lossPct * 10) / 10, jitterMs: Math.round(jitterMs),
+          jitterBufferMs: pipelineSample.jitterBufferMs, packetSendDelayMs,
+          freezes: role === "host" ? receiverFeedback?.freezes ?? 0 : freezeDelta,
+          availableKbps, captureWidth, captureHeight,
+          encodeMs: pipelineSample.encodeMs, decodeMs, droppedFrames,
+          limitation: pipelineSample.limitation, encoder: pipelineSample.encoder, decoder,
+          bottleneck: diagnosis.bottleneck, bottleneckConfidence: diagnosis.confidence,
+          encoderKind: diagnosis.encoderKind, encoderVendor: diagnosis.encoderVendor,
+        };
         if (role === "viewer") {
           const channel = controlChannelsRef.current.get(sessionId);
           if (channel?.readyState === "open" && channel.bufferedAmount < 16_384) {
@@ -1246,7 +1298,29 @@ export function App() {
         }
         logMediaDiagnostic(`media-stats id=${sessionId} role=${role} capture=${captureFps} encoded=${encodedFps} sent=${sentFps} received=${receivedFps} decoded=${decodedFps} bitrate=${bitrateKbps} encodeMs=${encodeMs} dropped=${droppedFrames} limit=${limitation} encoder=${encoder || "pending"}`);
         window.nodusDesktop?.writePerformance?.(JSON.stringify({ at: new Date().toISOString(), sessionId, role, ...metrics })).catch(() => undefined);
-        updateRuntime(sessionId, { metrics });
+        const previousEventState = performanceEventStateRef.current.get(sessionId);
+        const eventState = { bottleneck: metrics.bottleneck, quality, route, encoder: metrics.encoder };
+        if (previousEventState) {
+          const events = [
+            previousEventState.bottleneck !== eventState.bottleneck && { event: "bottleneck-changed", from: previousEventState.bottleneck, to: eventState.bottleneck },
+            previousEventState.quality !== eventState.quality && { event: "quality-stage-changed", from: previousEventState.quality, to: eventState.quality },
+            previousEventState.route !== eventState.route && { event: "route-changed", from: previousEventState.route, to: eventState.route },
+            previousEventState.encoder !== eventState.encoder && eventState.encoder && { event: "encoder-changed", from: previousEventState.encoder || "unknown", to: eventState.encoder },
+          ].filter(Boolean);
+          for (const event of events) window.nodusDesktop?.writePerformance?.(JSON.stringify({ at: new Date().toISOString(), sessionId, role, ...event })).catch(() => undefined);
+        }
+        performanceEventStateRef.current.set(sessionId, eventState);
+        const shouldPublish = now - (lastMetricsUiAtRef.current.get(sessionId) ?? 0) >= 1_000 || !previousEventState;
+        if (shouldPublish) {
+          lastMetricsUiAtRef.current.set(sessionId, now);
+          if (role === "host") {
+            const channel = controlChannelsRef.current.get(sessionId);
+            if (channel?.readyState === "open" && channel.bufferedAmount < 16_384) {
+              channel.send(JSON.stringify({ type: "sender-stats", captureFps, encodedFps, sentFps, encodeMs, limitation, encoder } satisfies RemoteInputMessage));
+            }
+          }
+          updateRuntime(sessionId, { metrics });
+        }
       } catch {} finally { inspecting = false; }
     };
     inspect();
@@ -1411,6 +1485,10 @@ export function App() {
         const message = JSON.parse(event.data) as RemoteInputMessage;
         if (message.type === "latency-pong") {
           controlLatencyRef.current.set(sessionId, Math.max(0, Date.now() - message.sentAt));
+          return;
+        }
+        if (message.type === "sender-stats") {
+          senderFeedbackRef.current.set(sessionId, message);
           return;
         }
         if (message.type === "screen-options") setRemoteDisplays((current) => ({ ...current, [sessionId]: message.displays }));
@@ -1735,6 +1813,7 @@ export function App() {
     hostInputRateRef.current.delete(sessionId);
     controlLatencyRef.current.delete(sessionId);
     receiverFeedbackRef.current.delete(sessionId);
+    senderFeedbackRef.current.delete(sessionId);
     const qualityTimer = qualityTimersRef.current.get(sessionId);
     if (qualityTimer) window.clearInterval(qualityTimer);
     qualityTimersRef.current.delete(sessionId);
@@ -1743,6 +1822,9 @@ export function App() {
     qualityTierRef.current.delete(sessionId);
     adaptiveStateRef.current.delete(sessionId);
     smoothedQualityRef.current.delete(sessionId);
+    smoothedPipelineRef.current.delete(sessionId);
+    lastMetricsUiAtRef.current.delete(sessionId);
+    performanceEventStateRef.current.delete(sessionId);
     requestedResolutionsRef.current.delete(sessionId);
     requestedQualitiesRef.current.delete(sessionId);
     requestedFpsRef.current.delete(sessionId);
@@ -3175,7 +3257,7 @@ function RemoteSessionPanel({
             {activeTool === "monitor" && <div className="viewer-tool-fields"><label><span>Monitor remoto</span><select defaultValue="" disabled={remoteDisplays.length < 2} onChange={(event) => event.target.value && onDisplayChange(event.target.value)}><option value="">{remoteDisplays.length > 1 ? "Selecionar monitor" : "Monitor principal"}</option>{remoteDisplays.map((display, index) => <option key={display.id} value={display.id}>Monitor {index + 1}</option>)}</select></label></div>}
             {activeTool === "quality" && <div className="viewer-tool-fields"><label><span>Perfil de qualidade</span><select value={connectionQuality} onChange={(event) => onQualityChange(event.target.value as LocalSettings["connectionQuality"])}><option value="auto">Automática</option><option value="high">Alta</option><option value="balanced">Equilibrada</option><option value="economy">Economia</option></select></label><label><span>Resolução</span><select value={remoteResolution} onChange={(event) => onResolutionChange(event.target.value as RemoteResolution)}><option value="1920x1080">1920 × 1080</option><option value="1366x768">1366 × 768</option><option value="1280x720">1280 × 720</option><option value="1024x768">1024 × 768</option></select></label><label><span>Taxa de quadros</span><select value={maxFps} onChange={(event) => onFpsChange(Number(event.target.value) as LocalSettings["maxFps"])}><option value={60}>60 FPS</option><option value={120}>120 FPS</option></select></label></div>}
             {activeTool === "actions" && <div className="viewer-tool-actions"><button onClick={enterFullscreen} type="button"><Maximize2 aria-hidden="true" size={18} /><span>Tela cheia</span></button><button onClick={onRecord} type="button"><Radio aria-hidden="true" size={18} /><span>{recording ? "Parar gravação" : "Gravar sessão"}</span></button><button onClick={onClipboard} type="button"><Clipboard aria-hidden="true" size={18} /><span>Sincronizar texto</span></button></div>}
-            {activeTool === "connection" && <dl className="viewer-connection-details"><div><dt>Rota</dt><dd>{metrics.route === "relay" ? "Relay TURN" : metrics.route === "direct" ? "P2P direta" : "Verificando"}</dd></div><div><dt>Rede / controle</dt><dd>{metrics.latencyMs ? `${metrics.latencyMs} ms` : "-"} / {metrics.controlLatencyMs ? `${metrics.controlLatencyMs} ms` : "-"}</dd></div><div><dt>FPS exibido</dt><dd>{metrics.renderFps || metrics.decodedFps || metrics.fps || "-"}</dd></div><div><dt>FPS recebido</dt><dd>{metrics.receivedFps || "-"}</dd></div><div><dt>Buffer de vídeo</dt><dd>{metrics.jitterBufferMs ? `${metrics.jitterBufferMs} ms` : "-"}</dd></div><div><dt>Quadros descartados</dt><dd>{metrics.droppedFrames}</dd></div><div><dt>Decodificação</dt><dd>{metrics.decodeMs ? `${metrics.decodeMs} ms/quadro` : "-"}</dd></div><div><dt>Bitrate</dt><dd>{metrics.bitrateKbps ? formatBitrate(metrics.bitrateKbps) : "-"}</dd></div><div><dt>Perda</dt><dd>{metrics.packetLossPct ? `${metrics.packetLossPct}%` : "0%"}</dd></div><div><dt>Codec</dt><dd>{metrics.codec || "Negociando"}</dd></div></dl>}
+            {activeTool === "connection" && <div className="viewer-connection-inspector"><div className="pipeline-flow"><span>Captura <b>{metrics.captureFps || "-"}</b></span><i>›</i><span>Encoder <b>{metrics.encodedFps || "-"}</b></span><i>›</i><span>Rede <b>{metrics.receivedFps || metrics.sentFps || "-"}</b></span><i>›</i><span>Decoder <b>{metrics.decodedFps || "-"}</b></span><i>›</i><span>Render <b>{metrics.renderFps || "-"}</b></span></div><div className={`pipeline-bottleneck state-${metrics.bottleneck.toLowerCase()}`}><span>Gargalo</span><strong>{bottleneckLabel(metrics.bottleneck)}</strong></div><dl className="viewer-connection-details"><div><dt>Rota</dt><dd>{metrics.route === "relay" ? "Relay TURN" : metrics.route === "direct" ? "P2P direta" : "Verificando"}</dd></div><div><dt>Rede / controle</dt><dd>{metrics.latencyMs ? `${metrics.latencyMs} ms` : "-"} / {metrics.controlLatencyMs ? `${metrics.controlLatencyMs} ms` : "-"}</dd></div><div><dt>Buffer de vídeo</dt><dd>{metrics.jitterBufferMs ? `${metrics.jitterBufferMs} ms` : "-"}</dd></div><div><dt>Quadros descartados</dt><dd>{metrics.droppedFrames}</dd></div><div><dt>Codificação</dt><dd>{metrics.encodeMs ? `${metrics.encodeMs} ms/quadro` : "-"}</dd></div><div><dt>Decodificação</dt><dd>{metrics.decodeMs ? `${metrics.decodeMs} ms/quadro` : "-"}</dd></div><div><dt>Bitrate</dt><dd>{metrics.bitrateKbps ? formatBitrate(metrics.bitrateKbps) : "-"}</dd></div><div><dt>Perda</dt><dd>{metrics.packetLossPct ? `${metrics.packetLossPct}%` : "0%"}</dd></div><div><dt>Codec</dt><dd>{metrics.codec || "Negociando"}</dd></div><div><dt>Encoder</dt><dd>{encoderLabel(metrics)}</dd></div></dl></div>}
           </aside>}
           {error && <p className="viewer-session-error">{error}</p>}
         </div>
@@ -3613,7 +3695,17 @@ function formatBytes(value: number): string {
 }
 
 function emptyMetrics(): SessionMetrics {
-  return { bitrateKbps: 0, fps: 0, captureFps: 0, encodedFps: 0, sentFps: 0, receivedFps: 0, decodedFps: 0, renderFps: 0, renderDroppedFrames: 0, latencyMs: 0, controlLatencyMs: 0, route: "unknown", quality: "balanced", codec: "", packetLossPct: 0, jitterMs: 0, jitterBufferMs: 0, packetSendDelayMs: 0, freezes: 0, availableKbps: 0, captureWidth: 0, captureHeight: 0, encodeMs: 0, decodeMs: 0, droppedFrames: 0, limitation: "none", encoder: "", decoder: "" };
+  return { bitrateKbps: 0, fps: 0, captureFps: 0, encodedFps: 0, sentFps: 0, receivedFps: 0, decodedFps: 0, renderFps: 0, renderDroppedFrames: 0, latencyMs: 0, controlLatencyMs: 0, route: "unknown", quality: "balanced", codec: "", packetLossPct: 0, jitterMs: 0, jitterBufferMs: 0, packetSendDelayMs: 0, freezes: 0, availableKbps: 0, captureWidth: 0, captureHeight: 0, encodeMs: 0, decodeMs: 0, droppedFrames: 0, limitation: "none", encoder: "", decoder: "", bottleneck: "UNKNOWN", bottleneckConfidence: 0, encoderKind: "unknown", encoderVendor: "unknown" };
+}
+
+function bottleneckLabel(value: PipelineBottleneck): string {
+  return ({ CAPTURE: "Captura", ENCODER: "Encoder", NETWORK: "Rede", DECODER: "Decoder", RENDER: "Render", NONE: "Nenhum", UNKNOWN: "Analisando" })[value];
+}
+
+function encoderLabel(metrics: SessionMetrics): string {
+  if (!metrics.encoder) return "Detectando";
+  const kind = metrics.encoderKind === "hardware" ? "Hardware" : metrics.encoderKind === "software" ? "Software" : "Não identificado";
+  return `${kind} · ${metrics.encoder}`;
 }
 
 function hasTurnServer(iceServers: RTCIceServer[]): boolean {

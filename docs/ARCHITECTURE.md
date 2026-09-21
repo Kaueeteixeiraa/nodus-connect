@@ -1,17 +1,13 @@
 # Arquitetura
 
-## Decisao
+## Implementacao atual
 
-O Nodus Connect deve evoluir para:
-
-- `apps/desktop`: Tauri + Rust + UI React.
-- `services/coordination`: servico Rust/Axum para presenca, lookup e sinalizacao.
-- `services/relay`: relay TURN/WebRTC ou QUIC quando conexao direta falhar.
-- `services/auth`: contas, dispositivos confiaveis e revogacao.
+- `apps/desktop`: Electron, Chromium, React e Vite.
+- `services/coordination`: presenca, lookup e sinalizacao.
+- `services/relay`: fallback TURN/WebRTC quando a conexao direta falha.
 - `packages/protocol`: mensagens versionadas.
 - `packages/common`: validacao, IDs e utilitarios compartilhados.
-
-Nesta Fase 1 o ambiente local nao possui Rust instalado. Por isso, a base executavel usa React/Vite e um servidor Node em memoria, mantendo os contratos separados para migração direta para Rust/Tauri.
+- `native`: entrada remota e verificacao da captura WGC/encoders do Windows.
 
 ## Fluxo alvo
 
@@ -27,6 +23,23 @@ Nesta Fase 1 o ambiente local nao possui Rust instalado. Por isso, a base execut
 ## Decisoes de rede
 
 WebRTC/ICE e a escolha inicial para transporte interativo porque padroniza descoberta de candidatos, STUN/TURN e canais em tempo real. O relay existe para redes restritivas. O servidor de coordenacao nunca concede controle por conhecimento do ID.
+
+## Pipeline de video e desempenho
+
+O caminho principal permanece sem canvas ou recodificacao intermediaria:
+
+`getDisplayMedia (WGC no Chromium) -> encoder WebRTC -> ICE P2P/TURN -> decoder Chromium -> video`
+
+- O controlador coleta `RTCStats` a cada 500 ms e ajusta bitrate, escala e FPS no sender existente.
+- A interface recebe uma amostra consolidada a cada 1 segundo para evitar renderizacoes React desnecessarias.
+- A degradacao preserva 60 FPS em 1080p, 900p e 720p antes de reduzir para 45/30 FPS.
+- A recuperacao ocorre gradualmente depois de varias amostras estaveis.
+- O inspetor usa media movel para apontar `CAPTURE`, `ENCODER`, `NETWORK`, `DECODER`, `RENDER`, `NONE` ou `UNKNOWN`.
+- Tela estatica e aquecimento sem dados suficientes sao classificados como `UNKNOWN`, evitando conclusoes falsas.
+
+O relatorio de laboratorio pode ser gerado com:
+
+`node scripts/perf-lab.mjs report <performance.log> --duration=60`
 
 ## Riscos
 
