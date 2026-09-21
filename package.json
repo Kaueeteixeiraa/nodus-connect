@@ -10,6 +10,7 @@
   "scripts": {
     "icons": "node scripts/generate-icons.mjs",
     "native:capture": "node scripts/build-native-capture.mjs",
+    "native:capture:test": "node scripts/build-native-capture.mjs --test",
     "native:service": "node scripts/build-native-service.mjs",
     "dev:desktop": "vite --config apps/desktop/vite.config.ts",
     "dev:coordination": "tsx services/coordination/src/server.ts",
@@ -30,6 +31,7 @@
     "lucide-react": "^1.43.0",
     "react": "^19.1.1",
     "react-dom": "^19.1.1",
+    "three": "^0.186.0",
     "vite": "^7.1.1",
     "ws": "^8.21.3"
   },
@@ -37,6 +39,7 @@
     "@types/node": "^24.2.1",
     "@types/react": "^19.1.9",
     "@types/react-dom": "^19.1.7",
+    "@types/three": "^0.186.0",
     "@types/ws": "^8.18.1",
     "electron": "^43.3.0",
     "electron-builder": "^26.0.12",

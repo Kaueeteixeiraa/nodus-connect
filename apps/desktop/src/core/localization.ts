@@ -18,6 +18,8 @@ const dictionaries: Record<Exclude<UiLanguage, "pt-BR">, Dictionary> = {
     "Defina como o Nodus deve se comportar com o seu sistema.": "Choose how Nodus behaves with your system.",
     "Iniciar Nodus com o Windows": "Start Nodus with Windows", "O aplicativo será iniciado automaticamente.": "The app will start automatically.",
     "Iniciar minimizado": "Start minimized", "Abrir o Nodus na bandeja do sistema.": "Open Nodus in the system tray.",
+    "Tela de espera 3D": "3D waiting screen", "Ativa a animação 3D até reiniciar o Nodus.": "Enables the 3D animation until Nodus restarts.",
+    "Tela de espera 3D opcional.": "Optional 3D waiting screen.", "CANAL NODUS PRONTO": "NODUS CHANNEL READY", "Aguardando conexão": "Waiting for connection", "Pronto para receber acesso seguro.": "Ready to receive secure access.", "Conexão segura disponível": "Secure connection available", "CONECTANDO": "CONNECTING", "PESSOAS": "PEOPLE", "A NOVOS": "TO NEW", "HORIZONTES": "HORIZONS", "RÁPIDO": "FAST", "SEGURO": "SECURE", "ESTÁVEL": "STABLE",
     "Minimizar para bandeja": "Minimize to tray", "Ao fechar a janela, manter o Nodus em execução.": "Keep Nodus running when the window is closed.",
     "Modo leve": "Lightweight mode", "Reduz o uso de memória e efeitos gráficos.": "Reduces memory use and visual effects.",
     "Notificar pedidos recebidos": "Notify incoming requests", "Exibe notificações de novas conexões.": "Shows notifications for new connections.",
@@ -60,6 +62,8 @@ const dictionaries: Record<Exclude<UiLanguage, "pt-BR">, Dictionary> = {
     "Defina como o Nodus deve se comportar com o seu sistema.": "Настройте работу Nodus в вашей системе.",
     "Iniciar Nodus com o Windows": "Запускать Nodus с Windows", "O aplicativo será iniciado automaticamente.": "Приложение будет запускаться автоматически.",
     "Iniciar minimizado": "Запускать свернутым", "Abrir o Nodus na bandeja do sistema.": "Открывать Nodus в системном трее.",
+    "Tela de espera 3D": "Экран ожидания 3D", "Ativa a animação 3D até reiniciar o Nodus.": "Включает 3D-анимацию до перезапуска Nodus.",
+    "Tela de espera 3D opcional.": "Дополнительный 3D-экран ожидания.", "CANAL NODUS PRONTO": "КАНАЛ NODUS ГОТОВ", "Aguardando conexão": "Ожидание подключения", "Pronto para receber acesso seguro.": "Готов к безопасному подключению.", "Conexão segura disponível": "Безопасное подключение доступно", "CONECTANDO": "СОЕДИНЯЕМ", "PESSOAS": "ЛЮДЕЙ", "A NOVOS": "С НОВЫМИ", "HORIZONTES": "ГОРИЗОНТАМИ", "RÁPIDO": "БЫСТРО", "SEGURO": "БЕЗОПАСНО", "ESTÁVEL": "СТАБИЛЬНО",
     "Minimizar para bandeja": "Сворачивать в трей", "Ao fechar a janela, manter o Nodus em execução.": "Оставлять Nodus работающим при закрытии окна.",
     "Modo leve": "Облегченный режим", "Reduz o uso de memória e efeitos gráficos.": "Снижает использование памяти и графических эффектов.",
     "Notificar pedidos recebidos": "Уведомлять о запросах", "Exibe notificações de novas conexões.": "Показывает уведомления о новых подключениях.",
@@ -102,6 +106,8 @@ const dictionaries: Record<Exclude<UiLanguage, "pt-BR">, Dictionary> = {
     "Defina como o Nodus deve se comportar com o seu sistema.": "システム上での Nodus の動作を設定します。",
     "Iniciar Nodus com o Windows": "Windows と一緒に Nodus を起動", "O aplicativo será iniciado automaticamente.": "アプリは自動的に起動します。",
     "Iniciar minimizado": "最小化して起動", "Abrir o Nodus na bandeja do sistema.": "システムトレイで Nodus を開きます。",
+    "Tela de espera 3D": "3D 待機画面", "Ativa a animação 3D até reiniciar o Nodus.": "Nodus を再起動するまで 3D アニメーションを有効にします。",
+    "Tela de espera 3D opcional.": "オプションの 3D 待機画面。", "CANAL NODUS PRONTO": "NODUS チャネル準備完了", "Aguardando conexão": "接続を待っています", "Pronto para receber acesso seguro.": "安全なアクセスを受け入れる準備ができました。", "Conexão segura disponível": "安全な接続が利用可能", "CONECTANDO": "つなぐ", "PESSOAS": "人々を", "A NOVOS": "新しい", "HORIZONTES": "世界へ", "RÁPIDO": "高速", "SEGURO": "安全", "ESTÁVEL": "安定",
     "Minimizar para bandeja": "トレイに最小化", "Ao fechar a janela, manter o Nodus em execução.": "ウィンドウを閉じても Nodus を実行し続けます。",
     "Modo leve": "軽量モード", "Reduz o uso de memória e efeitos gráficos.": "メモリ使用量と視覚効果を減らします。",
     "Notificar pedidos recebidos": "受信リクエストを通知", "Exibe notificações de novas conexões.": "新しい接続の通知を表示します。",
@@ -150,11 +156,12 @@ function translate(value: string, language: UiLanguage): string {
 
 function translateTree(root: Node, language: UiLanguage): void {
   const applyText = (node: Text) => {
-    if (["SCRIPT", "STYLE"].includes(node.parentElement?.tagName ?? "")) return;
+    if (["SCRIPT", "STYLE"].includes(node.parentElement?.tagName ?? "") || node.parentElement?.closest('[translate="no"]')) return;
     const translated = translate(node.data, language);
     if (translated !== node.data) node.data = translated;
   };
   const applyAttributes = (element: Element) => {
+    if (element.closest('[translate="no"]')) return;
     ["placeholder", "title", "aria-label", "data-tooltip"].forEach((attribute) => {
       const value = element.getAttribute(attribute);
       if (!value) return;

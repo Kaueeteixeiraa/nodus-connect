@@ -2,6 +2,10 @@
 #include <shellapi.h>
 #include <userenv.h>
 #include <wtsapi32.h>
+#include <cstdint>
+#include <cstdio>
+#include <fcntl.h>
+#include <io.h>
 #include <string>
 
 #pragma comment(lib, "advapi32.lib")
@@ -14,6 +18,54 @@ static SERVICE_STATUS status{};
 static HANDLE stopEvent;
 static HANDLE launchedProcess;
 static std::wstring appPath;
+
+#pragma pack(push, 1)
+struct InputPacket {
+  std::uint8_t type;
+  std::uint8_t button;
+  std::uint16_t keyCode;
+  std::int32_t x;
+  std::int32_t y;
+  std::int32_t delta;
+};
+#pragma pack(pop)
+
+static_assert(sizeof(InputPacket) == 16);
+
+void sendMouseButton(std::uint8_t button, bool down) {
+  INPUT input{};
+  input.type = INPUT_MOUSE;
+  if (button == 2) input.mi.dwFlags = down ? MOUSEEVENTF_RIGHTDOWN : MOUSEEVENTF_RIGHTUP;
+  else if (button == 1) input.mi.dwFlags = down ? MOUSEEVENTF_MIDDLEDOWN : MOUSEEVENTF_MIDDLEUP;
+  else input.mi.dwFlags = down ? MOUSEEVENTF_LEFTDOWN : MOUSEEVENTF_LEFTUP;
+  SendInput(1, &input, sizeof(input));
+}
+
+int runInputHelper() {
+  _setmode(_fileno(stdin), _O_BINARY);
+  InputPacket packet{};
+  while (std::fread(&packet, sizeof(packet), 1, stdin) == 1) {
+    if (packet.type == 1) {
+      SetCursorPos(packet.x, packet.y);
+    } else if (packet.type == 2 || packet.type == 3) {
+      SetCursorPos(packet.x, packet.y);
+      sendMouseButton(packet.button, packet.type == 2);
+    } else if (packet.type == 4) {
+      INPUT input{};
+      input.type = INPUT_MOUSE;
+      input.mi.dwFlags = MOUSEEVENTF_WHEEL;
+      input.mi.mouseData = static_cast<DWORD>(packet.delta);
+      SendInput(1, &input, sizeof(input));
+    } else if ((packet.type == 5 || packet.type == 6) && packet.keyCode > 0 && packet.keyCode < 256) {
+      INPUT input{};
+      input.type = INPUT_KEYBOARD;
+      input.ki.wVk = static_cast<WORD>(packet.keyCode);
+      input.ki.dwFlags = packet.type == 6 ? KEYEVENTF_KEYUP : 0;
+      SendInput(1, &input, sizeof(input));
+    }
+  }
+  return 0;
+}
 
 void setStatus(DWORD state, DWORD exitCode = NO_ERROR) {
   status.dwServiceType = SERVICE_WIN32_OWN_PROCESS;
@@ -72,6 +124,7 @@ void WINAPI serviceMain(DWORD argc, LPWSTR* argv) {
 }
 
 int wmain(int argc, wchar_t** argv) {
+  if (argc >= 2 && _wcsicmp(argv[1], L"--input-helper") == 0) return runInputHelper();
   if (argc >= 3 && _wcsicmp(argv[1], L"--install") == 0) {
     SC_HANDLE manager = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CREATE_SERVICE);
     if (!manager) return 1;

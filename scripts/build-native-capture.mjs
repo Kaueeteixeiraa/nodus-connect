@@ -21,6 +21,7 @@ const include = [
   join(sdkRoot, "Include", sdkVersion, "ucrt"),
   join(sdkRoot, "Include", sdkVersion, "shared"),
   join(sdkRoot, "Include", sdkVersion, "um"),
+  join(sdkRoot, "Include", sdkVersion, "winrt"),
   sdk,
 ];
 const lib = [
@@ -28,6 +29,16 @@ const lib = [
   join(sdkRoot, "Lib", sdkVersion, "ucrt", "x64"),
   join(sdkRoot, "Lib", sdkVersion, "um", "x64"),
 ];
-const result = spawnSync(compiler, ["/nologo", "/std:c++17", "/EHsc", "/utf-8", ...include.map((item) => `/I${item}`), source, `/Fe${output}`, "/link", ...lib.map((item) => `/LIBPATH:${item}`), "windowsapp.lib"], { cwd: root, stdio: "inherit", windowsHide: true });
+const result = spawnSync(compiler, ["/nologo", "/std:c++17", "/EHsc", "/utf-8", ...include.map((item) => `/I${item}`), source, `/Fe${output}`, "/link", ...lib.map((item) => `/LIBPATH:${item}`), "windowsapp.lib", "d3d11.lib", "dxgi.lib", "mf.lib", "mfplat.lib", "mfuuid.lib", "ole32.lib", "user32.lib"], { cwd: root, stdio: "inherit", windowsHide: true });
 if (result.status !== 0) process.exit(result.status ?? 1);
 console.log(`Native capture probe: ${output}`);
+
+if (process.argv.includes("--test")) {
+  const benchmark = spawnSync(output, ["--capture-test", "1500"], { cwd: root, encoding: "utf8", windowsHide: true });
+  if (benchmark.status !== 0) process.exit(benchmark.status ?? 1);
+  const status = JSON.parse(benchmark.stdout);
+  if (!status.windowsGraphicsCapture || !status.d3d11Hardware || !status.captureTest?.ok) {
+    throw new Error(`Pipeline nativo indisponivel: ${benchmark.stdout}`);
+  }
+  console.log(`Native WGC: ${status.captureTest.width}x${status.captureTest.height} @ ${status.captureTest.fps} FPS; H264 hardware encoders: ${status.hardwareH264Encoders}`);
+}

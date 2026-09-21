@@ -41,7 +41,7 @@ contextBridge.exposeInMainWorld("nodusDesktop", {
     return ipcRenderer.invoke("nodus:set-startup-options", options);
   },
   applyRemoteInput(input) {
-    return ipcRenderer.invoke("nodus:apply-remote-input", input);
+    ipcRenderer.send("nodus:apply-remote-input", input);
   },
   getCaptureSources() {
     return ipcRenderer.invoke("nodus:get-capture-sources");

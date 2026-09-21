@@ -56,6 +56,7 @@ export interface LocalSettings {
   theme: "dark" | "japan" | "sakura-night" | "neo-tokyo" | "cosmos" | "arctic";
   language: "pt-BR" | "en-US" | "ru-RU" | "ja-JP";
   lightweightMode: boolean;
+  threeDimensionalStandby: boolean;
   showNodusId: boolean;
   notifyIncomingRequests: boolean;
   playRequestSound: boolean;
@@ -128,6 +129,7 @@ export function loadSettings(): LocalSettings {
     theme: "dark",
     language: "pt-BR",
     lightweightMode: false,
+    threeDimensionalStandby: false,
     showNodusId: true,
     notifyIncomingRequests: true,
     playRequestSound: true,
@@ -151,6 +153,7 @@ export function loadSettings(): LocalSettings {
   return {
     ...defaults,
     ...stored,
+    threeDimensionalStandby: false,
     theme: ["japan", "sakura-night", "neo-tokyo", "cosmos", "arctic"].includes(stored.theme ?? "")
       ? stored.theme as LocalSettings["theme"]
       : "dark",
@@ -165,7 +168,7 @@ export function loadSettings(): LocalSettings {
 }
 
 export function saveSettings(settings: LocalSettings): void {
-  localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
+  localStorage.setItem(SETTINGS_KEY, JSON.stringify({ ...settings, threeDimensionalStandby: false }));
   localStorage.setItem(SETTINGS_VERSION_KEY, "2");
 }
 

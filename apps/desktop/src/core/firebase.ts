@@ -65,7 +65,7 @@ export async function saveCloudSettings(settings: LocalSettings): Promise<void> 
   const uid = await ensureUid();
   if (!uid) return;
   const { doc, setDoc, store } = await fire();
-  await setDoc(doc(store, "users", uid, "private", "settings"), firestoreData(settings), { merge: true });
+  await setDoc(doc(store, "users", uid, "private", "settings"), firestoreData({ ...settings, threeDimensionalStandby: false }), { merge: true });
 }
 
 export async function loadCloudSettings(): Promise<Partial<LocalSettings> | null> {

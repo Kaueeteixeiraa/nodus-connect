@@ -12,6 +12,10 @@ export type QualitySample = {
   targetFps: number;
   activePicture: boolean;
   limitation: string;
+  jitterBufferMs?: number;
+  packetSendDelayMs?: number;
+  renderFps?: number;
+  freezes?: number;
 };
 
 export const STAGE_LIMITS = [
@@ -28,9 +32,12 @@ export function recommendedStage(sample: QualitySample): AdaptiveStage {
   if (lossPct >= 10 || rttMs >= 320 || jitterMs >= 80 || (bandwidthBound && availableKbps < 1500)) return 4;
   if (lossPct >= 5 || rttMs >= 200 || jitterMs >= 45 || (bandwidthBound && availableKbps < 2500)) return 3;
   let stage = lossPct >= 2 || rttMs >= 120 || jitterMs >= 25 || (bandwidthBound && availableKbps < 4500) ? 2 : 0;
+  if ((sample.activePicture && (sample.freezes ?? 0) > 0 && (sample.jitterBufferMs ?? 0) >= 80) || (sample.jitterBufferMs ?? 0) >= 120 || (sample.packetSendDelayMs ?? 0) >= 100) stage = Math.max(stage, 3);
+  else if ((sample.jitterBufferMs ?? 0) >= 60 || (sample.packetSendDelayMs ?? 0) >= 50) stage = Math.max(stage, 2);
   if (sample.limitation === "bandwidth" || (bandwidthBound && availableKbps < 8000)) stage = Math.max(stage, 1);
   if (sample.limitation === "cpu" || (sample.activePicture && sample.encodeMs > 1000 / sample.targetFps * 1.3 && sample.encodedFps < sample.targetFps * 0.9)) stage = Math.max(stage, 2);
   if (sample.activePicture && sample.captureFps >= sample.targetFps * 0.8 && sample.encodedFps < sample.targetFps * 0.7) stage = Math.max(stage, 2);
+  if (sample.activePicture && sample.encodedFps >= sample.targetFps * 0.7 && (sample.renderFps ?? 0) > 0 && (sample.renderFps ?? 0) < sample.encodedFps * 0.65) stage = Math.max(stage, 2);
   return stage as AdaptiveStage;
 }
 

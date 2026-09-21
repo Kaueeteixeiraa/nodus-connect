@@ -39,6 +39,12 @@ app.commandLine.appendSwitch("enable-gpu-rasterization");
 app.commandLine.appendSwitch("disable-background-timer-throttling");
 app.commandLine.appendSwitch("disable-renderer-backgrounding");
 app.commandLine.appendSwitch("disable-backgrounding-occluded-windows");
+if (process.platform === "win32") app.commandLine.appendSwitch("enable-features", [
+  "WebRtcAllowWgcScreenCapturer",
+  "WebRtcAllowWgcWindowCapturer",
+  "MediaFoundationD3DVideoProcessing",
+  "MediaFoundationSharedImageEncode",
+].join(","));
 
 const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) app.quit();
@@ -276,7 +282,7 @@ function setupIpc() {
       args: options?.startMinimized ? ["--minimized"] : [],
     });
   });
-  ipcMain.handle("nodus:apply-remote-input", (_event, input) => applyRemoteInput(input));
+  ipcMain.on("nodus:apply-remote-input", (_event, input) => applyRemoteInput(input));
   ipcMain.handle("nodus:get-capture-sources", async () => {
     const displays = screen.getAllDisplays();
     return (await desktopCapturer.getSources({ types: ["screen"], thumbnailSize: { width: 0, height: 0 }, fetchWindowIcons: false })).map((source) => {
@@ -312,8 +318,17 @@ function getNativeCaptureStatus() {
   if (!fs.existsSync(nativeCaptureProbe)) return { available: false, supported: false, backend: "chromium-getdisplaymedia" };
   try {
     const result = require("node:child_process").execFileSync(nativeCaptureProbe, [], { encoding: "utf8", timeout: 1500, windowsHide: true });
-    const supported = JSON.parse(result).windowsGraphicsCapture === true;
-    return { available: true, supported, backend: "chromium-getdisplaymedia" };
+    const capabilities = JSON.parse(result);
+    const supported = capabilities.windowsGraphicsCapture === true;
+    return {
+      available: true,
+      supported,
+      backend: supported ? "chromium-wgc-mf" : "chromium-dxgi",
+      d3d11Hardware: capabilities.d3d11Hardware === true,
+      hardwareH264: capabilities.hardwareH264 === true,
+      hardwareH264Encoders: Number(capabilities.hardwareH264Encoders || 0),
+      adapter: String(capabilities.adapter || "").slice(0, 200),
+    };
   } catch {
     return { available: false, supported: false, backend: "chromium-getdisplaymedia" };
   }
@@ -449,12 +464,27 @@ function applyRemoteInput(input) {
     const bounds = display.bounds;
     const message = normalizeRemoteInput(input, bounds);
     if (!message) return { ok: false, error: "INVALID_INPUT" };
-    ensureInputHelper().stdin.write(`${JSON.stringify(message)}\n`);
+    const helper = ensureInputHelper();
+    if (message.type === "mouseMove" && helper.stdin.writableLength > 64) return { ok: true };
+    helper.stdin.write(helper.nodusBinaryInput ? encodeRemoteInput(message) : `${JSON.stringify(message)}\n`);
     return { ok: true };
   } catch (error) {
     appendLog(`remote-input-error ${error.message}`);
     return { ok: false, error: error.message };
   }
+}
+
+function encodeRemoteInput(input) {
+  const packet = Buffer.allocUnsafe(16);
+  const type = { mouseMove: 1, mouseDown: 2, mouseUp: 3, wheel: 4, keyDown: 5, keyUp: 6 }[input.type] || 0;
+  const button = input.button === "right" ? 2 : input.button === "middle" ? 1 : 0;
+  packet.writeUInt8(type, 0);
+  packet.writeUInt8(button, 1);
+  packet.writeUInt16LE(input.keyCode || 0, 2);
+  packet.writeInt32LE(input.x || 0, 4);
+  packet.writeInt32LE(input.y || 0, 8);
+  packet.writeInt32LE(input.delta || 0, 12);
+  return packet;
 }
 
 function normalizeRemoteInput(input, bounds) {
@@ -467,7 +497,12 @@ function normalizeRemoteInput(input, bounds) {
     };
   }
   if (input.type === "mouseDown" || input.type === "mouseUp") {
-    return { type: input.type, button: input.button === 2 ? "right" : input.button === 1 ? "middle" : "left" };
+    return {
+      type: input.type,
+      button: input.button === 2 ? "right" : input.button === 1 ? "middle" : "left",
+      x: Math.round(bounds.x + clamp(Number(input.x)) * bounds.width),
+      y: Math.round(bounds.y + clamp(Number(input.y)) * bounds.height),
+    };
   }
   if (input.type === "wheel") return { type: "wheel", delta: Math.max(-1200, Math.min(1200, Number(input.delta) || 0)) };
   if (input.type === "keyDown" || input.type === "keyUp") {
@@ -479,6 +514,12 @@ function normalizeRemoteInput(input, bounds) {
 
 function ensureInputHelper() {
   if (inputHelper && !inputHelper.killed) return inputHelper;
+  if (fs.existsSync(nativeService)) {
+    inputHelper = spawn(nativeService, ["--input-helper"], { windowsHide: true, stdio: ["pipe", "ignore", "ignore"] });
+    inputHelper.nodusBinaryInput = true;
+    inputHelper.on("exit", () => { inputHelper = null; });
+    return inputHelper;
+  }
   const script = `
 Add-Type @"
 using System;

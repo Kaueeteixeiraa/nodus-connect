@@ -4,6 +4,8 @@ import {
   type KeyboardEvent as ReactKeyboardEvent,
   type MouseEvent as ReactMouseEvent,
   type RefObject,
+  lazy,
+  Suspense,
   useEffect,
   useMemo,
   useRef,
@@ -122,10 +124,12 @@ import { CapturePool, type CaptureLease, type PooledCapture } from "./core/captu
 import { advanceStage, recommendedStage, STAGE_LIMITS, type AdaptiveStage, type QualitySample } from "./core/adaptive-quality";
 
 const releaseNotes = [
-  { version: "0.4.19", changes: ["Status dos dispositivos atualizado em tempo real.", "Tela de espera exibida acima da interface."] },
+  { version: "0.4.19", changes: ["Status dos dispositivos atualizado em tempo real.", "Tela de espera 3D opcional."] },
   { version: "0.4.18", changes: ["Espaço reduzido ao usar senha de acesso.", "Home mais compacta em telas menores."] },
   { version: "0.4.17", changes: ["Painel de atualizações exibido acima da interface.", "Área superior da home mais compacta."] },
 ];
+
+const Standby3D = lazy(() => import("./Standby3D"));
 
 type ServiceState = "connecting" | "online" | "offline" | "error";
 type SettingsSection = "general" | "access" | "connection" | "appearance";
@@ -166,11 +170,15 @@ type SessionMetrics = {
   renderFps: number;
   renderDroppedFrames: number;
   latencyMs: number;
+  controlLatencyMs: number;
   route: "direct" | "relay" | "unknown";
   quality: "high" | "balanced" | "economy";
   codec: string;
   packetLossPct: number;
   jitterMs: number;
+  jitterBufferMs: number;
+  packetSendDelayMs: number;
+  freezes: number;
   availableKbps: number;
   captureWidth: number;
   captureHeight: number;
@@ -183,7 +191,7 @@ type SessionMetrics = {
 };
 type RemoteInputMessage =
   | { type: "mouseMove"; x: number; y: number }
-  | { type: "mouseDown" | "mouseUp"; button: number }
+  | { type: "mouseDown" | "mouseUp"; button: number; x: number; y: number }
   | { type: "wheel"; delta: number }
   | { type: "keyDown" | "keyUp"; keyCode: number }
   | { type: "clipboard"; text: string }
@@ -191,6 +199,8 @@ type RemoteInputMessage =
   | { type: "quality"; quality: LocalSettings["connectionQuality"]; maxFps: RemoteFrameRate }
   | { type: "display"; displayId: string }
   | { type: "screen-options"; displays: CaptureSource[] }
+  | { type: "latency-ping" | "latency-pong"; sentAt: number }
+  | { type: "receiver-stats"; jitterBufferMs: number; renderFps: number; droppedFrames: number; freezes: number }
   | { type: "admin-request" }
   | { type: "admin-status"; status: "approved" | "denied" | "unavailable" };
 type CaptureSource = { id: string; name: string; displayId: string; width: number; height: number };
@@ -272,17 +282,21 @@ export function App() {
   const recentPresenceIds = useMemo(() => recents.map((item) => item.nodusId).sort().join(","), [recents]);
   const peersRef = useRef(new Map<string, RTCPeerConnection>());
   const controlChannelsRef = useRef(new Map<string, RTCDataChannel>());
+  const pointerChannelsRef = useRef(new Map<string, RTCDataChannel>());
   const fileChannelsRef = useRef(new Map<string, RTCDataChannel>());
   const fileCryptoRef = useRef(new Map<string, { local: FileCryptoSession; remote: Promise<CryptoKey> | null }>());
   const fileCryptoSessionsRef = useRef(new Map<string, Promise<FileCryptoSession>>());
   const incomingFilesRef = useRef(new Map<string, IncomingFileTransfer>());
-  const lastControlMoveRef = useRef(0);
+  const pendingPointerRef = useRef<{ sessionId: string; x: number; y: number } | null>(null);
+  const pointerFrameRef = useRef(0);
   const signalTimersRef = useRef(new Map<string, number>());
   const lastSignalSeqRef = useRef(new Map<string, number>());
   const pendingCandidatesRef = useRef(new Map<string, RTCIceCandidateInit[]>());
   const reconnectTimersRef = useRef(new Map<string, number>());
   const reconnectAttemptsRef = useRef(new Map<string, number>());
   const hostInputRateRef = useRef(new Map<string, { at: number; count: number }>());
+  const controlLatencyRef = useRef(new Map<string, number>());
+  const receiverFeedbackRef = useRef(new Map<string, { jitterBufferMs: number; renderFps: number; droppedFrames: number; freezes: number }>());
   const qualityTimersRef = useRef(new Map<string, number>());
   const statsRef = useRef(new Map<string, {
     bytes: number;
@@ -293,13 +307,19 @@ export function App() {
     decoded: number;
     encodeTime: number;
     decodeTime: number;
+    packetSendDelay: number;
+    packetsSent: number;
+    jitterBufferDelay: number;
+    jitterBufferEmitted: number;
+    freezes: number;
     dropped: number;
     lost: number;
     receivedPackets: number;
     at: number;
   }>());
   const qualityTierRef = useRef(new Map<string, string>());
-  const adaptiveStateRef = useRef(new Map<string, { stage: AdaptiveStage; stableSamples: number }>());
+  const adaptiveStateRef = useRef(new Map<string, { stage: AdaptiveStage; stableSamples: number; startedAt: number }>());
+  const smoothedQualityRef = useRef(new Map<string, QualitySample>());
   const requestedResolutionsRef = useRef(new Map<string, RemoteResolution>());
   const requestedQualitiesRef = useRef(new Map<string, LocalSettings["connectionQuality"]>());
   const requestedFpsRef = useRef(new Map<string, RemoteFrameRate>());
@@ -397,7 +417,7 @@ export function App() {
     loadCloudSettings().then((cloudSettings) => {
       if (!cloudSettings) return;
       setSettings((current) => {
-        const next = { ...current, ...cloudSettings };
+        const next = { ...current, ...cloudSettings, threeDimensionalStandby: current.threeDimensionalStandby };
         saveSettings(next);
         return next;
       });
@@ -423,7 +443,7 @@ export function App() {
       setNativeGoogleClient(Boolean(info.googleClientConfigured));
     }).catch(() => undefined);
     window.nodusDesktop?.getNativeCaptureStatus().then((status) => {
-      window.nodusDesktop?.writeDiagnostic(`capture-backend=${status.backend || "chromium-getdisplaymedia"} wgc-supported=${status.supported}`);
+      window.nodusDesktop?.writeDiagnostic(`capture-backend=${status.backend || "chromium-getdisplaymedia"} wgc-supported=${status.supported} d3d11=${Boolean(status.d3d11Hardware)} hardware-h264=${Boolean(status.hardwareH264)} encoders=${status.hardwareH264Encoders || 0} adapter=${status.adapter || "unknown"}`);
     }).catch(() => undefined);
     window.nodusDesktop?.getServiceStatus().then(setWindowsServiceStatus).catch(() => undefined);
   }, []);
@@ -893,20 +913,21 @@ export function App() {
     const remoteNodusId = request.requesterNodusId;
     const peer = createPeer(request.sessionId, identity.nodusId, remoteNodusId, "host", getEffectiveIceServers());
     const permissions = request.grantedPermissions ?? allowedPermissions(request, settings);
-    stream.getTracks().filter((track) => track.kind === "video" || permissions.includes("audio:remote")).forEach((track) => {
+    for (const track of stream.getTracks().filter((track) => track.kind === "video" || permissions.includes("audio:remote"))) {
       if (track.kind === "video") track.contentHint = settings.connectionQuality === "economy" ? "detail" : "motion";
       const sender = peer.addTrack(track, stream);
       logDiagnostic(`track-added id=${request.sessionId} kind=${track.kind} state=${track.readyState}`);
       const transceiver = peer.getTransceivers().find((item) => item.sender === sender);
       if (track.kind === "video" && transceiver) preferDesktopCodecs(transceiver);
       if (track.kind === "video") {
-        requestedResolutionsRef.current.set(request.sessionId!, request.preferredResolution ?? settings.preferredResolution);
-        requestedFpsRef.current.set(request.sessionId!, request.preferredFps ?? settings.maxFps);
-        setSessionResolutions((current) => ({ ...current, [request.sessionId!]: request.preferredResolution ?? settings.preferredResolution }));
-        tuneVideoSender(sender, request.preferredFps);
-        applyRequestedResolution(sender, request.preferredResolution ?? settings.preferredResolution);
+        const resolution = request.preferredResolution ?? settings.preferredResolution;
+        const frameRate = request.preferredFps ?? settings.maxFps;
+        requestedResolutionsRef.current.set(request.sessionId!, resolution);
+        requestedFpsRef.current.set(request.sessionId!, frameRate);
+        setSessionResolutions((current) => ({ ...current, [request.sessionId!]: resolution }));
+        await tuneVideoSender(sender, frameRate, resolution);
       }
-    });
+    }
     upsertRuntime({
       session: {
         role: "host",
@@ -935,10 +956,13 @@ export function App() {
     const remoteNodusId = request.targetNodusId;
     const permissions = request.grantedPermissions ?? ["screen:view", "mouse:control", "keyboard:control", "clipboard:sync", "files:transfer"];
     const peer = createPeer(request.sessionId, identity.nodusId, remoteNodusId, "viewer", getEffectiveIceServers());
-    preferDesktopCodecs(peer.addTransceiver("video", { direction: "recvonly" }));
+    const videoTransceiver = peer.addTransceiver("video", { direction: "recvonly" });
+    preferDesktopCodecs(videoTransceiver);
+    configureLowLatencyReceiver(videoTransceiver.receiver);
     if (permissions.includes("audio:remote")) peer.addTransceiver("audio", { direction: "recvonly" });
     if (permissions.some((item) => item === "mouse:control" || item === "keyboard:control" || item === "clipboard:sync")) {
       attachViewerControl(request.sessionId, peer.createDataChannel("control"));
+      attachViewerPointer(request.sessionId, peer.createDataChannel("pointer", { ordered: false, maxRetransmits: 0 }));
     }
     if (permissions.includes("files:transfer")) attachFileTransfer(request.sessionId, peer.createDataChannel("files"), request.targetName ?? "Dispositivo remoto");
     const runtime: SessionRuntime = {
@@ -1005,6 +1029,13 @@ export function App() {
           return;
         }
         attachHostControl(sessionId, event.channel);
+      }
+      if (event.channel.label === "pointer" && role === "host") {
+        if (!settings.allowRemoteControl) {
+          event.channel.close();
+          return;
+        }
+        attachHostPointer(sessionId, event.channel);
       }
     };
     peer.onicecandidate = (event) => {
@@ -1095,6 +1126,11 @@ export function App() {
         let decoded = 0;
         let encodeTime = 0;
         let decodeTime = 0;
+        let packetSendDelay = 0;
+        let packetsSent = 0;
+        let jitterBufferDelay = 0;
+        let jitterBufferEmitted = 0;
+        let freezes = 0;
         let dropped = 0;
         let captureWidth = 0;
         let captureHeight = 0;
@@ -1130,6 +1166,9 @@ export function App() {
             decoded += Number(item.framesDecoded || 0);
             decodeTime += Number(item.totalDecodeTime || 0);
             dropped += Number(item.framesDropped || 0);
+            jitterBufferDelay += Number(item.jitterBufferDelay || 0);
+            jitterBufferEmitted += Number(item.jitterBufferEmittedCount || 0);
+            freezes = Math.max(freezes, Number(item.freezeCount || 0));
             decoder = String(item.decoderImplementation || decoder);
             lost += Number(item.packetsLost || 0);
             received += Number(item.packetsReceived || 0);
@@ -1141,6 +1180,8 @@ export function App() {
             encoded += Number(item.framesEncoded || 0);
             sent += Number(item.framesSent || 0);
             encodeTime += Number(item.totalEncodeTime || 0);
+            packetSendDelay += Number(item.totalPacketSendDelay || 0);
+            packetsSent += Number(item.packetsSent || 0);
             limitation = String(item.qualityLimitationReason || limitation);
             encoder = String(item.encoderImplementation || encoder);
             codecId = String(item.codecId || codecId);
@@ -1174,27 +1215,42 @@ export function App() {
         const decodedFps = stageFps(decoded, previous?.decoded ?? 0);
         const encodeMs = previous && encoded > previous.encoded ? Math.round(((encodeTime - previous.encodeTime) * 1000 / (encoded - previous.encoded)) * 10) / 10 : 0;
         const decodeMs = previous && decoded > previous.decoded ? Math.round(((decodeTime - previous.decodeTime) * 1000 / (decoded - previous.decoded)) * 10) / 10 : 0;
+        const packetSendDelayMs = previous && packetsSent > previous.packetsSent ? Math.round(((packetSendDelay - previous.packetSendDelay) * 1000 / (packetsSent - previous.packetsSent)) * 10) / 10 : 0;
+        const jitterBufferMs = previous && jitterBufferEmitted > previous.jitterBufferEmitted ? Math.round(((jitterBufferDelay - previous.jitterBufferDelay) * 1000 / (jitterBufferEmitted - previous.jitterBufferEmitted)) * 10) / 10 : 0;
+        const freezeDelta = previous ? Math.max(0, freezes - previous.freezes) : 0;
         const droppedFrames = previous ? Math.max(0, dropped - previous.dropped) : 0;
         const fps = role === "host" ? encodedFps || sentFps || captureFps : decodedFps || receivedFps;
         const lostDelta = Math.max(0, lost - (previous?.lost ?? lost));
         const receivedDelta = Math.max(0, received - (previous?.receivedPackets ?? received));
         const lossPct = lostDelta / Math.max(1, lostDelta + receivedDelta) * 100;
-        statsRef.current.set(sessionId, { bytes, captured, encoded, sent, received: receivedFrames, decoded, encodeTime, decodeTime, dropped, lost, receivedPackets: received, at: now });
+        statsRef.current.set(sessionId, { bytes, captured, encoded, sent, received: receivedFrames, decoded, encodeTime, decodeTime, packetSendDelay, packetsSent, jitterBufferDelay, jitterBufferEmitted, freezes, dropped, lost, receivedPackets: received, at: now });
         const targetFps = requestedFpsRef.current.get(sessionId) ?? settings.maxFps;
+        const receiverFeedback = receiverFeedbackRef.current.get(sessionId);
         const sample: QualitySample = {
           rttMs: latencyMs, jitterMs, lossPct, availableKbps, bitrateKbps, captureFps, encodedFps, encodeMs, targetFps,
-          activePicture: captureFps >= 10 || bitrateKbps >= 200 || limitation === "cpu", limitation,
+          activePicture: (bitrateKbps >= 200 && (captureFps >= targetFps * 0.25 || encodedFps >= targetFps * 0.25)) || limitation === "cpu", limitation,
+          jitterBufferMs: role === "host" ? receiverFeedback?.jitterBufferMs : jitterBufferMs,
+          packetSendDelayMs,
+          renderFps: role === "host" ? receiverFeedback?.renderFps : renderStatsRef.current.get(sessionId)?.fps,
+          freezes: role === "host" ? receiverFeedback?.freezes : freezeDelta,
         };
         const quality = await applyAdaptiveQuality(sessionId, peer, role, sample);
         const render = renderStatsRef.current.get(sessionId);
-        const metrics = { bitrateKbps, fps, captureFps, encodedFps, sentFps, receivedFps, decodedFps, renderFps: render?.fps ?? 0, renderDroppedFrames: render?.dropped ?? 0, latencyMs, route, quality, codec, packetLossPct: Math.round(lossPct * 10) / 10, jitterMs: Math.round(jitterMs), availableKbps, captureWidth, captureHeight, encodeMs, decodeMs, droppedFrames, limitation, encoder, decoder };
+        const metrics = { bitrateKbps, fps, captureFps, encodedFps, sentFps, receivedFps, decodedFps, renderFps: role === "host" ? receiverFeedback?.renderFps ?? 0 : render?.fps ?? 0, renderDroppedFrames: render?.dropped ?? 0, latencyMs, controlLatencyMs: controlLatencyRef.current.get(sessionId) ?? 0, route, quality, codec, packetLossPct: Math.round(lossPct * 10) / 10, jitterMs: Math.round(jitterMs), jitterBufferMs: role === "host" ? receiverFeedback?.jitterBufferMs ?? 0 : jitterBufferMs, packetSendDelayMs, freezes: role === "host" ? receiverFeedback?.freezes ?? 0 : freezeDelta, availableKbps, captureWidth, captureHeight, encodeMs, decodeMs, droppedFrames, limitation, encoder, decoder };
+        if (role === "viewer") {
+          const channel = controlChannelsRef.current.get(sessionId);
+          if (channel?.readyState === "open" && channel.bufferedAmount < 16_384) {
+            channel.send(JSON.stringify({ type: "latency-ping", sentAt: Date.now() } satisfies RemoteInputMessage));
+            channel.send(JSON.stringify({ type: "receiver-stats", jitterBufferMs, renderFps: render?.fps ?? 0, droppedFrames, freezes: freezeDelta } satisfies RemoteInputMessage));
+          }
+        }
         logMediaDiagnostic(`media-stats id=${sessionId} role=${role} capture=${captureFps} encoded=${encodedFps} sent=${sentFps} received=${receivedFps} decoded=${decodedFps} bitrate=${bitrateKbps} encodeMs=${encodeMs} dropped=${droppedFrames} limit=${limitation} encoder=${encoder || "pending"}`);
         window.nodusDesktop?.writePerformance?.(JSON.stringify({ at: new Date().toISOString(), sessionId, role, ...metrics })).catch(() => undefined);
         updateRuntime(sessionId, { metrics });
       } catch {} finally { inspecting = false; }
     };
     inspect();
-    qualityTimersRef.current.set(sessionId, window.setInterval(inspect, 1000));
+    qualityTimersRef.current.set(sessionId, window.setInterval(inspect, 500));
   }
 
   async function applyAdaptiveQuality(
@@ -1209,10 +1265,15 @@ export function App() {
     const sender = peer.getSenders().find((item) => item.track?.kind === "video");
     if (!sender) return "balanced";
     const minimum = requestedQuality === "economy" ? 2 : requestedQuality === "balanced" ? 1 : 0;
-    const current = adaptiveStateRef.current.get(sessionId) ?? { stage: minimum as AdaptiveStage, stableSamples: 0 };
-    const target = Math.max(minimum, recommendedStage(sample)) as AdaptiveStage;
-    const next = advanceStage(current.stage, target, current.stableSamples);
-    adaptiveStateRef.current.set(sessionId, next);
+    const current = adaptiveStateRef.current.get(sessionId) ?? { stage: minimum as AdaptiveStage, stableSamples: 0, startedAt: performance.now() };
+    const smoothed = smoothQualitySample(smoothedQualityRef.current.get(sessionId), sample);
+    smoothedQualityRef.current.set(sessionId, smoothed);
+    const immediate = sample.lossPct >= 5;
+    const target = Math.max(minimum, recommendedStage(smoothed), immediate ? recommendedStage(sample) : 0) as AdaptiveStage;
+    const next = performance.now() - current.startedAt < 4_000
+      ? { stage: minimum as AdaptiveStage, stableSamples: 0 }
+      : advanceStage(current.stage, target, current.stableSamples);
+    adaptiveStateRef.current.set(sessionId, { ...next, startedAt: current.startedAt });
     const limits = STAGE_LIMITS[next.stage];
     const quality: SessionMetrics["quality"] = next.stage >= 3 ? "economy" : next.stage >= 1 ? "balanced" : "high";
     const requestedResolution = requestedResolutionsRef.current.get(sessionId);
@@ -1235,6 +1296,9 @@ export function App() {
       parameters.encodings[0].maxBitrate = roundedBitrate;
       parameters.encodings[0].maxFramerate = fps;
       parameters.encodings[0].scaleResolutionDownBy = scale;
+      const prioritized = parameters.encodings[0] as RTCRtpEncodingParameters & { priority?: "very-low" | "low" | "medium" | "high"; networkPriority?: "very-low" | "low" | "medium" | "high" };
+      prioritized.priority = "high";
+      prioritized.networkPriority = "high";
       await sender.setParameters(parameters);
       qualityTierRef.current.set(sessionId, tier);
       logMediaDiagnostic(`quality-stage id=${sessionId} stage=${next.stage} scale=${scale.toFixed(2)} fps=${fps} bitrate=${roundedBitrate}`);
@@ -1242,14 +1306,21 @@ export function App() {
     return quality;
   }
 
-  function tuneVideoSender(sender: RTCRtpSender, requestedFps = settings.maxFps) {
+  async function tuneVideoSender(sender: RTCRtpSender, requestedFps = settings.maxFps, resolution = settings.preferredResolution) {
     try {
       const parameters = sender.getParameters();
       if (!parameters.encodings.length) parameters.encodings = [{}];
+      const [targetWidth, targetHeight] = resolution.split("x").map(Number);
+      const source = sender.track?.getSettings();
+      const scale = Math.max(1, (source?.width ?? targetWidth) / targetWidth, (source?.height ?? targetHeight) / targetHeight);
       parameters.degradationPreference = "maintain-framerate";
       parameters.encodings[0].maxBitrate = settings.connectionQuality === "high" ? (requestedFps > 60 ? 24_000_000 : 14_000_000) : 10_000_000;
       parameters.encodings[0].maxFramerate = requestedFps;
-      sender.setParameters(parameters).catch(() => undefined);
+      parameters.encodings[0].scaleResolutionDownBy = scale;
+      const prioritized = parameters.encodings[0] as RTCRtpEncodingParameters & { priority?: "very-low" | "low" | "medium" | "high"; networkPriority?: "very-low" | "low" | "medium" | "high" };
+      prioritized.priority = "high";
+      prioritized.networkPriority = "high";
+      await sender.setParameters(parameters);
     } catch {}
   }
 
@@ -1270,6 +1341,14 @@ export function App() {
         if (current.count > 500) return;
         const message = JSON.parse(event.data) as RemoteInputMessage;
         const permissions = sessionsRef.current.find((item) => item.session.sessionId === sessionId)?.session.permissions ?? [];
+        if (message.type === "latency-ping") {
+          channel.send(JSON.stringify({ type: "latency-pong", sentAt: message.sentAt } satisfies RemoteInputMessage));
+          return;
+        }
+        if (message.type === "receiver-stats") {
+          receiverFeedbackRef.current.set(sessionId, message);
+          return;
+        }
         if (message.type === "admin-request") {
           setAdminRequests((current) => ({ ...current, [sessionId]: sessionsRef.current.find((item) => item.session.sessionId === sessionId)?.session.remoteName ?? "O outro computador" }));
           return;
@@ -1286,7 +1365,7 @@ export function App() {
           qualityTierRef.current.delete(sessionId);
           adaptiveStateRef.current.delete(sessionId);
           if (fpsChanged) switchHostCapture(sessionId, undefined, undefined, message.maxFps).catch(() => undefined);
-          // The next one-second sample applies the new preference using current network conditions.
+          // The next quality sample applies the new preference using current network conditions.
           return;
         }
         if (message.type === "screen-options") return;
@@ -1296,11 +1375,27 @@ export function App() {
           const allowed = message.type.startsWith("mouse") || message.type === "wheel"
             ? permissions.includes("mouse:control")
             : permissions.includes("keyboard:control");
-          if (settings.allowRemoteControl && allowed) window.nodusDesktop?.applyRemoteInput(message).catch(() => undefined);
+          if (settings.allowRemoteControl && allowed) window.nodusDesktop?.applyRemoteInput(message);
         }
       } catch {
         updateRuntime(sessionId, { error: "Comando remoto invalido." });
       }
+    };
+  }
+
+  function attachHostPointer(sessionId: string, channel: RTCDataChannel) {
+    channel.binaryType = "arraybuffer";
+    pointerChannelsRef.current.set(sessionId, channel);
+    channel.onmessage = (event) => {
+      const permissions = sessionsRef.current.find((item) => item.session.sessionId === sessionId)?.session.permissions ?? [];
+      if (!settings.allowRemoteControl || !permissions.includes("mouse:control") || !(event.data instanceof ArrayBuffer)) return;
+      const message = decodePointerMessage(event.data);
+      if (!message) return;
+      const now = Date.now();
+      const rate = hostInputRateRef.current.get(sessionId);
+      const current = !rate || now - rate.at >= 1000 ? { at: now, count: 1 } : { ...rate, count: rate.count + 1 };
+      hostInputRateRef.current.set(sessionId, current);
+      if (current.count <= 240) window.nodusDesktop?.applyRemoteInput(message);
     };
   }
 
@@ -1314,6 +1409,10 @@ export function App() {
     channel.onmessage = (event) => {
       try {
         const message = JSON.parse(event.data) as RemoteInputMessage;
+        if (message.type === "latency-pong") {
+          controlLatencyRef.current.set(sessionId, Math.max(0, Date.now() - message.sentAt));
+          return;
+        }
         if (message.type === "screen-options") setRemoteDisplays((current) => ({ ...current, [sessionId]: message.displays }));
         if (message.type === "admin-status") {
           const label = message.status === "approved" ? "O proprietário autorizou a solicitação no Windows." : message.status === "denied" ? "O proprietário recusou a solicitação de administrador." : "A solicitação de administrador não pôde ser concluída.";
@@ -1321,6 +1420,11 @@ export function App() {
         }
       } catch {}
     };
+  }
+
+  function attachViewerPointer(sessionId: string, channel: RTCDataChannel) {
+    channel.binaryType = "arraybuffer";
+    pointerChannelsRef.current.set(sessionId, channel);
   }
 
   function attachFileTransfer(sessionId: string, channel: RTCDataChannel, remoteName: string) {
@@ -1452,7 +1556,7 @@ export function App() {
       const keyPromise = fileCryptoRef.current.get(activeSession.sessionId)?.remote;
       if (!keyPromise) throw new Error("A criptografia da transferencia ainda nao esta pronta.");
       const key = await keyPromise;
-      const chunkSize = 64 * 1024;
+      const chunkSize = 16 * 1024;
       for (let offset = 0; offset < file.size; offset += chunkSize) {
         await waitForFileChannel(channel);
         channel.send(await encryptFileChunk(key, await file.slice(offset, offset + chunkSize).arrayBuffer()));
@@ -1477,8 +1581,8 @@ export function App() {
   }
 
   async function waitForFileChannel(channel: RTCDataChannel) {
-    while (channel.readyState === "open" && channel.bufferedAmount > 2_000_000) {
-      await new Promise((resolve) => window.setTimeout(resolve, 60));
+    while (channel.readyState === "open" && channel.bufferedAmount > 256 * 1024) {
+      await new Promise((resolve) => window.setTimeout(resolve, 16));
     }
     if (channel.readyState !== "open") throw new Error("Conexao encerrada.");
   }
@@ -1629,6 +1733,8 @@ export function App() {
     reconnectTimersRef.current.delete(sessionId);
     reconnectAttemptsRef.current.delete(sessionId);
     hostInputRateRef.current.delete(sessionId);
+    controlLatencyRef.current.delete(sessionId);
+    receiverFeedbackRef.current.delete(sessionId);
     const qualityTimer = qualityTimersRef.current.get(sessionId);
     if (qualityTimer) window.clearInterval(qualityTimer);
     qualityTimersRef.current.delete(sessionId);
@@ -1636,6 +1742,7 @@ export function App() {
     renderStatsRef.current.delete(sessionId);
     qualityTierRef.current.delete(sessionId);
     adaptiveStateRef.current.delete(sessionId);
+    smoothedQualityRef.current.delete(sessionId);
     requestedResolutionsRef.current.delete(sessionId);
     requestedQualitiesRef.current.delete(sessionId);
     requestedFpsRef.current.delete(sessionId);
@@ -1662,6 +1769,8 @@ export function App() {
     }
     controlChannelsRef.current.get(sessionId)?.close();
     controlChannelsRef.current.delete(sessionId);
+    pointerChannelsRef.current.get(sessionId)?.close();
+    pointerChannelsRef.current.delete(sessionId);
     fileChannelsRef.current.get(sessionId)?.close();
     fileChannelsRef.current.delete(sessionId);
     fileCryptoRef.current.delete(sessionId);
@@ -1891,18 +2000,6 @@ export function App() {
     });
   }
 
-  function applyRequestedResolution(sender: RTCRtpSender, resolution: RemoteResolution) {
-    try {
-      const [targetWidth, targetHeight] = resolution.split("x").map(Number);
-      const source = sender.track?.getSettings();
-      const scale = Math.max(1, (source?.width ?? targetWidth) / targetWidth, (source?.height ?? targetHeight) / targetHeight);
-      const parameters = sender.getParameters();
-      if (!parameters.encodings.length) parameters.encodings = [{}];
-      parameters.encodings[0].scaleResolutionDownBy = scale;
-      sender.setParameters(parameters).catch(() => undefined);
-    } catch {}
-  }
-
   async function switchHostCapture(sessionId: string, requestedResolution?: RemoteResolution, requestedDisplayId?: string, requestedFps?: RemoteFrameRate) {
     const runtime = sessionsRef.current.find((item) => item.session.sessionId === sessionId);
     const peer = peersRef.current.get(sessionId);
@@ -1928,8 +2025,7 @@ export function App() {
       const audioTrack = stream.getAudioTracks()[0];
       const audioSender = peer.getSenders().find((item) => item.track?.kind === "audio");
       if (audioTrack && audioSender) await audioSender.replaceTrack(audioTrack);
-      tuneVideoSender(sender, frameRate);
-      applyRequestedResolution(sender, resolution);
+      await tuneVideoSender(sender, frameRate, resolution);
       qualityTierRef.current.delete(sessionId);
       adaptiveStateRef.current.delete(sessionId);
       const previousCleanup = captureCleanupRef.current.get(sessionId);
@@ -1975,6 +2071,11 @@ export function App() {
   }
 
   function sendRemoteInputToSession(sessionId: string | null | undefined, message: RemoteInputMessage) {
+    if (message.type === "mouseMove" && sessionId) {
+      const pointer = pointerChannelsRef.current.get(sessionId);
+      if (pointer?.readyState === "open" && pointer.bufferedAmount <= 256) pointer.send(encodePointerMessage(message.x, message.y));
+      return;
+    }
     const channel = sessionId ? controlChannelsRef.current.get(sessionId) : null;
     if (!channel || channel.readyState !== "open") return;
     channel.send(JSON.stringify(message));
@@ -2055,17 +2156,20 @@ export function App() {
 
   function sendPointerMove(event: ReactMouseEvent<HTMLElement>) {
     if (!activeSession || activeSession.role !== "viewer") return;
-    const now = performance.now();
-    if (now - lastControlMoveRef.current < 8) return;
-    lastControlMoveRef.current = now;
-    sendRemoteInput({ type: "mouseMove", ...remotePoint(event.currentTarget, event.nativeEvent) });
+    pendingPointerRef.current = { sessionId: activeSession.sessionId, ...remotePoint(event.currentTarget, event.nativeEvent) };
+    if (pointerFrameRef.current) return;
+    pointerFrameRef.current = window.requestAnimationFrame(() => {
+      pointerFrameRef.current = 0;
+      const pending = pendingPointerRef.current;
+      pendingPointerRef.current = null;
+      if (pending) sendRemoteInputToSession(pending.sessionId, { type: "mouseMove", x: pending.x, y: pending.y });
+    });
   }
 
   function sendPointerButton(type: "mouseDown" | "mouseUp", event: ReactMouseEvent<HTMLElement>) {
     if (!activeSession || activeSession.role !== "viewer") return;
     event.preventDefault();
-    sendRemoteInput({ type: "mouseMove", ...remotePoint(event.currentTarget, event.nativeEvent) });
-    sendRemoteInput({ type, button: event.button });
+    sendRemoteInput({ type, button: event.button, ...remotePoint(event.currentTarget, event.nativeEvent) });
   }
 
   function sendWheel(event: ReactWheelEvent<HTMLElement>) {
@@ -2088,7 +2192,7 @@ export function App() {
           <span>N</span>
         </div>
         <form className="onboarding-panel" onSubmit={completeOnboarding}>
-          <p className="eyebrow">Nodus Connect</p>
+          <p className="eyebrow" translate="no">Nodus Connect</p>
           <h1>Bem-vindo ao Nodus Connect.</h1>
           <p>Conecte seus dispositivos de qualquer lugar com seguranca e consentimento claro.</p>
           <label>
@@ -2120,7 +2224,7 @@ export function App() {
       {!settings.lightweightMode && <div className="page-noise" />}
       <aside className="app-sidebar">
         <div className="sidebar-brand">
-          <div className="product logo">
+          <div className="product logo" translate="no">
             <div className="product-icon">
               <span>N</span>
             </div>
@@ -2275,7 +2379,9 @@ export function App() {
           onConfirm={() => disconnectSession(confirmDisconnectId, true)}
         />
       )}
-      {standby && <StandbyScreen />}
+      {standby && (settings.threeDimensionalStandby
+        ? <Suspense fallback={<StandbyScreen />}><Standby3D /></Suspense>
+        : <StandbyScreen />)}
       </div>
     </div>
   );
@@ -2664,10 +2770,10 @@ function ConnectBox({
   const [targetQuery, setTargetQuery] = useState(targetId);
   const normalizedQuery = targetQuery.replace(/\D/g, "");
   const query = targetQuery.trim().toLocaleLowerCase();
-  const deviceMatches = useMemo(() => query ? recentDevices.filter((device) => {
+  const deviceMatches = useMemo(() => query && !outgoingRequest && !recentDevices.some((device) => device.nodusId === normalizedQuery) ? recentDevices.filter((device) => {
     const names = [device.alias, device.deviceName].filter((name): name is string => Boolean(name)).map((name) => name.toLocaleLowerCase());
     return names.some((name) => name.includes(query)) || (normalizedQuery.length > 0 && device.nodusId.includes(normalizedQuery));
-  }).slice(0, 5) : [], [normalizedQuery, query, recentDevices]);
+  }).slice(0, 5) : [], [normalizedQuery, outgoingRequest, query, recentDevices]);
 
   useEffect(() => {
     if (targetId && normalizeNodusId(targetQuery) !== normalizeNodusId(targetId)) setTargetQuery(targetId);
@@ -3059,7 +3165,7 @@ function RemoteSessionPanel({
             ref={viewerSurfaceRef}
             tabIndex={0}
           >
-            <video ref={remoteVideoRef} autoPlay playsInline />
+            <video ref={remoteVideoRef} autoPlay disablePictureInPicture playsInline />
             {!hasRemoteStream && <p>Aguardando imagem do outro computador...</p>}
           </div>
           {activeTool && <aside className="viewer-tool-popover">
@@ -3069,7 +3175,7 @@ function RemoteSessionPanel({
             {activeTool === "monitor" && <div className="viewer-tool-fields"><label><span>Monitor remoto</span><select defaultValue="" disabled={remoteDisplays.length < 2} onChange={(event) => event.target.value && onDisplayChange(event.target.value)}><option value="">{remoteDisplays.length > 1 ? "Selecionar monitor" : "Monitor principal"}</option>{remoteDisplays.map((display, index) => <option key={display.id} value={display.id}>Monitor {index + 1}</option>)}</select></label></div>}
             {activeTool === "quality" && <div className="viewer-tool-fields"><label><span>Perfil de qualidade</span><select value={connectionQuality} onChange={(event) => onQualityChange(event.target.value as LocalSettings["connectionQuality"])}><option value="auto">Automática</option><option value="high">Alta</option><option value="balanced">Equilibrada</option><option value="economy">Economia</option></select></label><label><span>Resolução</span><select value={remoteResolution} onChange={(event) => onResolutionChange(event.target.value as RemoteResolution)}><option value="1920x1080">1920 × 1080</option><option value="1366x768">1366 × 768</option><option value="1280x720">1280 × 720</option><option value="1024x768">1024 × 768</option></select></label><label><span>Taxa de quadros</span><select value={maxFps} onChange={(event) => onFpsChange(Number(event.target.value) as LocalSettings["maxFps"])}><option value={60}>60 FPS</option><option value={120}>120 FPS</option></select></label></div>}
             {activeTool === "actions" && <div className="viewer-tool-actions"><button onClick={enterFullscreen} type="button"><Maximize2 aria-hidden="true" size={18} /><span>Tela cheia</span></button><button onClick={onRecord} type="button"><Radio aria-hidden="true" size={18} /><span>{recording ? "Parar gravação" : "Gravar sessão"}</span></button><button onClick={onClipboard} type="button"><Clipboard aria-hidden="true" size={18} /><span>Sincronizar texto</span></button></div>}
-            {activeTool === "connection" && <dl className="viewer-connection-details"><div><dt>Rota</dt><dd>{metrics.route === "relay" ? "Relay TURN" : metrics.route === "direct" ? "P2P direta" : "Verificando"}</dd></div><div><dt>Latência</dt><dd>{metrics.latencyMs ? `${metrics.latencyMs} ms` : "-"}</dd></div><div><dt>FPS exibido</dt><dd>{metrics.decodedFps || metrics.fps || "-"}</dd></div><div><dt>FPS recebido</dt><dd>{metrics.receivedFps || "-"}</dd></div><div><dt>Quadros descartados</dt><dd>{metrics.droppedFrames}</dd></div><div><dt>Decodificação</dt><dd>{metrics.decodeMs ? `${metrics.decodeMs} ms/quadro` : "-"}</dd></div><div><dt>Bitrate</dt><dd>{metrics.bitrateKbps ? formatBitrate(metrics.bitrateKbps) : "-"}</dd></div><div><dt>Perda</dt><dd>{metrics.packetLossPct ? `${metrics.packetLossPct}%` : "0%"}</dd></div><div><dt>Codec</dt><dd>{metrics.codec || "Negociando"}</dd></div></dl>}
+            {activeTool === "connection" && <dl className="viewer-connection-details"><div><dt>Rota</dt><dd>{metrics.route === "relay" ? "Relay TURN" : metrics.route === "direct" ? "P2P direta" : "Verificando"}</dd></div><div><dt>Rede / controle</dt><dd>{metrics.latencyMs ? `${metrics.latencyMs} ms` : "-"} / {metrics.controlLatencyMs ? `${metrics.controlLatencyMs} ms` : "-"}</dd></div><div><dt>FPS exibido</dt><dd>{metrics.renderFps || metrics.decodedFps || metrics.fps || "-"}</dd></div><div><dt>FPS recebido</dt><dd>{metrics.receivedFps || "-"}</dd></div><div><dt>Buffer de vídeo</dt><dd>{metrics.jitterBufferMs ? `${metrics.jitterBufferMs} ms` : "-"}</dd></div><div><dt>Quadros descartados</dt><dd>{metrics.droppedFrames}</dd></div><div><dt>Decodificação</dt><dd>{metrics.decodeMs ? `${metrics.decodeMs} ms/quadro` : "-"}</dd></div><div><dt>Bitrate</dt><dd>{metrics.bitrateKbps ? formatBitrate(metrics.bitrateKbps) : "-"}</dd></div><div><dt>Perda</dt><dd>{metrics.packetLossPct ? `${metrics.packetLossPct}%` : "0%"}</dd></div><div><dt>Codec</dt><dd>{metrics.codec || "Negociando"}</dd></div></dl>}
           </aside>}
           {error && <p className="viewer-session-error">{error}</p>}
         </div>
@@ -3112,7 +3218,7 @@ function HostSessionView({
   return (
     <section className="remote-session host-session">
       <header className="host-session-header">
-        <div className="remote-brand"><div className="remote-mark">N</div><strong>NODUS <span>Connect</span></strong></div>
+        <div className="remote-brand" translate="no"><div className="remote-mark">N</div><strong>NODUS <span>Connect</span></strong></div>
         <div className="host-session-state"><i /> Sessão remota ativa</div>
       </header>
       <main className="host-session-main">
@@ -3136,6 +3242,7 @@ function HostSessionView({
                 <div><dt>Status</dt><dd>{session.status}</dd></div>
                 <div><dt>Qualidade</dt><dd>{qualityLabel(metrics.quality)}</dd></div>
                 <div><dt>Latência</dt><dd>{metrics.latencyMs ? `${metrics.latencyMs} ms` : "Calculando..."}</dd></div>
+                <div><dt>Fila de envio</dt><dd>{metrics.packetSendDelayMs ? `${metrics.packetSendDelayMs} ms` : "Calculando..."}</dd></div>
                 <div><dt>Captura / envio</dt><dd>{metrics.captureFps || "-"} / {metrics.sentFps || "-"} FPS</dd></div>
                 <div><dt>Codificação</dt><dd>{metrics.encodeMs ? `${metrics.encodeMs} ms/quadro` : "Calculando..."}</dd></div>
                 <div><dt>Limitação</dt><dd>{metrics.limitation === "cpu" ? "Processador" : metrics.limitation === "bandwidth" ? "Rede" : metrics.limitation === "none" ? "Nenhuma" : "Verificando"}</dd></div>
@@ -3379,6 +3486,7 @@ function Settings({
             <Switch checked={draft.startMinimized} icon={Monitor} label="Iniciar minimizado" description="Abrir o Nodus na bandeja do sistema." onChange={(value) => updateDraft({ startMinimized: value })} />
             <Switch checked={draft.minimizeToTray} icon={ChevronDown} label="Minimizar para bandeja" description="Ao fechar a janela, manter o Nodus em execução." onChange={(value) => updateDraft({ minimizeToTray: value })} />
             <Switch checked={draft.lightweightMode} icon={Zap} label="Modo leve" description="Reduz o uso de memória e efeitos gráficos." onChange={(value) => updateDraft({ lightweightMode: value })} />
+            <Switch checked={draft.threeDimensionalStandby} icon={MonitorUp} label="Tela de espera 3D" description="Ativa a animação 3D até reiniciar o Nodus." onChange={(value) => updateDraft({ threeDimensionalStandby: value })} />
             <Switch checked={draft.notifyIncomingRequests} icon={BellRing} label="Notificar pedidos recebidos" description="Exibe notificações de novas conexões." onChange={(value) => updateDraft({ notifyIncomingRequests: value })} />
             <Switch checked={draft.playRequestSound} icon={Volume2} label="Som ao receber pedido" description="Reproduz um som quando alguém solicitar acesso." onChange={(value) => updateDraft({ playRequestSound: value })} />
           </SettingsGroup>
@@ -3505,7 +3613,7 @@ function formatBytes(value: number): string {
 }
 
 function emptyMetrics(): SessionMetrics {
-  return { bitrateKbps: 0, fps: 0, captureFps: 0, encodedFps: 0, sentFps: 0, receivedFps: 0, decodedFps: 0, renderFps: 0, renderDroppedFrames: 0, latencyMs: 0, route: "unknown", quality: "balanced", codec: "", packetLossPct: 0, jitterMs: 0, availableKbps: 0, captureWidth: 0, captureHeight: 0, encodeMs: 0, decodeMs: 0, droppedFrames: 0, limitation: "none", encoder: "", decoder: "" };
+  return { bitrateKbps: 0, fps: 0, captureFps: 0, encodedFps: 0, sentFps: 0, receivedFps: 0, decodedFps: 0, renderFps: 0, renderDroppedFrames: 0, latencyMs: 0, controlLatencyMs: 0, route: "unknown", quality: "balanced", codec: "", packetLossPct: 0, jitterMs: 0, jitterBufferMs: 0, packetSendDelayMs: 0, freezes: 0, availableKbps: 0, captureWidth: 0, captureHeight: 0, encodeMs: 0, decodeMs: 0, droppedFrames: 0, limitation: "none", encoder: "", decoder: "" };
 }
 
 function hasTurnServer(iceServers: RTCIceServer[]): boolean {
@@ -3521,15 +3629,65 @@ function candidateType(candidate: string): string {
 }
 
 function preferDesktopCodecs(transceiver: RTCRtpTransceiver) {
-  const capabilities = RTCRtpReceiver.getCapabilities("video");
+  const capabilities = RTCRtpSender.getCapabilities("video") ?? RTCRtpReceiver.getCapabilities("video");
   if (!capabilities?.codecs.length || !transceiver.setCodecPreferences) return;
   const preferred = ["h264", "vp8", "vp9", "av1"];
-  const rank = (codec: { mimeType: string }) => {
+  const rank = (codec: { mimeType: string; sdpFmtpLine?: string }) => {
     const name = codec.mimeType.split("/")[1]?.toLowerCase() ?? "";
     const index = preferred.indexOf(name);
-    return index < 0 ? preferred.length : index;
+    if (name === "h264") {
+      const hardwareFriendly = /packetization-mode=1/i.test(codec.sdpFmtpLine ?? "") && /profile-level-id=42/i.test(codec.sdpFmtpLine ?? "");
+      return hardwareFriendly ? 0 : 1;
+    }
+    return index < 0 ? preferred.length + 2 : index + 1;
   };
   transceiver.setCodecPreferences([...capabilities.codecs].sort((a, b) => rank(a) - rank(b)));
+}
+
+function configureLowLatencyReceiver(receiver: RTCRtpReceiver) {
+  const configurable = receiver as RTCRtpReceiver & { jitterBufferTarget?: number | null };
+  if ("jitterBufferTarget" in configurable) configurable.jitterBufferTarget = 20;
+}
+
+function smoothQualitySample(previous: QualitySample | undefined, sample: QualitySample): QualitySample {
+  if (!previous) return sample;
+  const average = (before: number | undefined, current: number | undefined, zeroIsMissing = false) => {
+    if (current === undefined || (zeroIsMissing && current <= 0)) return before ?? 0;
+    if (before === undefined) return current;
+    return before * 0.65 + current * 0.35;
+  };
+  return {
+    ...sample,
+    rttMs: average(previous.rttMs, sample.rttMs, true),
+    jitterMs: average(previous.jitterMs, sample.jitterMs),
+    lossPct: average(previous.lossPct, sample.lossPct),
+    availableKbps: average(previous.availableKbps, sample.availableKbps, true),
+    bitrateKbps: average(previous.bitrateKbps, sample.bitrateKbps, true),
+    captureFps: average(previous.captureFps, sample.captureFps, true),
+    encodedFps: average(previous.encodedFps, sample.encodedFps, true),
+    encodeMs: average(previous.encodeMs, sample.encodeMs, true),
+    jitterBufferMs: average(previous.jitterBufferMs, sample.jitterBufferMs),
+    packetSendDelayMs: average(previous.packetSendDelayMs, sample.packetSendDelayMs),
+    renderFps: average(previous.renderFps, sample.renderFps, true),
+  };
+}
+
+function encodePointerMessage(x: number, y: number): ArrayBuffer {
+  const buffer = new ArrayBuffer(9);
+  const view = new DataView(buffer);
+  view.setUint8(0, 1);
+  view.setFloat32(1, x, true);
+  view.setFloat32(5, y, true);
+  return buffer;
+}
+
+function decodePointerMessage(buffer: ArrayBuffer): Extract<RemoteInputMessage, { type: "mouseMove" }> | null {
+  if (buffer.byteLength !== 9) return null;
+  const view = new DataView(buffer);
+  if (view.getUint8(0) !== 1) return null;
+  const x = view.getFloat32(1, true);
+  const y = view.getFloat32(5, true);
+  return Number.isFinite(x) && Number.isFinite(y) ? { type: "mouseMove", x, y } : null;
 }
 
 function allowedPermissions(request: SessionRequestRecord, settings: LocalSettings): SessionPermission[] {

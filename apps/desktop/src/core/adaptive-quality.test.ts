@@ -18,6 +18,17 @@ describe("adaptive quality", () => {
     expect(recommendedStage({ ...good, encodeMs: 24, captureFps: 1, encodedFps: 1, activePicture: false })).toBe(0);
   });
 
+  it("responds to sender queues and receiver buffering", () => {
+    expect(recommendedStage({ ...good, packetSendDelayMs: 55 })).toBe(2);
+    expect(recommendedStage({ ...good, jitterBufferMs: 130 })).toBe(3);
+    expect(recommendedStage({ ...good, freezes: 1, jitterBufferMs: 90 })).toBe(3);
+    expect(recommendedStage({ ...good, renderFps: 30 })).toBe(2);
+  });
+
+  it("does not treat a static desktop as a frozen stream", () => {
+    expect(recommendedStage({ ...good, activePicture: false, renderFps: 2, freezes: 1 })).toBe(0);
+  });
+
   it("degrades quickly and only restores after stable samples", () => {
     expect(advanceStage(0, 4, 0)).toEqual({ stage: 2, stableSamples: 0 });
     let state = { stage: 2 as const, stableSamples: 0 };
