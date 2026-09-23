@@ -19,6 +19,9 @@ contextBridge.exposeInMainWorld("nodusDesktop", {
   getNativeCaptureStatus() {
     return ipcRenderer.invoke("nodus:get-native-capture-status");
   },
+  getGpuDiagnostics() {
+    return ipcRenderer.invoke("nodus:get-gpu-diagnostics");
+  },
   getServiceStatus() {
     return ipcRenderer.invoke("nodus:get-service-status");
   },
@@ -36,6 +39,18 @@ contextBridge.exposeInMainWorld("nodusDesktop", {
   },
   setRemoteControlActive(active) {
     return ipcRenderer.invoke("nodus:set-remote-control-active", Boolean(active));
+  },
+  setRemoteKeyboardCapture(active) {
+    return ipcRenderer.invoke("nodus:set-remote-keyboard-capture", Boolean(active));
+  },
+  toggleFullScreen(enabled) {
+    return ipcRenderer.invoke("nodus:toggle-full-screen", enabled);
+  },
+  checkForUpdates() {
+    return ipcRenderer.invoke("nodus:check-for-updates");
+  },
+  restartComputer() {
+    return ipcRenderer.invoke("nodus:restart-computer");
   },
   setStartupOptions(options) {
     return ipcRenderer.invoke("nodus:set-startup-options", options);
@@ -86,5 +101,10 @@ contextBridge.exposeInMainWorld("nodusDesktop", {
     const listener = (_event, result) => callback(result);
     ipcRenderer.on("nodus:google-login-result", listener);
     return () => ipcRenderer.removeListener("nodus:google-login-result", listener);
+  },
+  onRemoteKeyInput(callback) {
+    const listener = (_event, type, input) => callback(type, input);
+    ipcRenderer.on("nodus:remote-key-input", listener);
+    return () => ipcRenderer.removeListener("nodus:remote-key-input", listener);
   },
 });

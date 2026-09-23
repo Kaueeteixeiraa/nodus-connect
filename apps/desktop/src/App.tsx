@@ -1,7 +1,6 @@
 import {
   type ClipboardEvent as ReactClipboardEvent,
   type FormEvent,
-  type KeyboardEvent as ReactKeyboardEvent,
   type MouseEvent as ReactMouseEvent,
   type RefObject,
   lazy,
@@ -12,6 +11,7 @@ import {
   useState,
   type WheelEvent as ReactWheelEvent,
 } from "react";
+import { createPortal } from "react-dom";
 import {
   Activity,
   ArrowRight,
@@ -98,8 +98,9 @@ import {
   addAccessLog,
   clearUser,
   createFolder,
-  deleteRecent,
   loadAccessLog,
+  hideDeviceFromCatalog,
+  loadHiddenCatalogDevices,
   loadFolders,
   loadFavorites,
   loadRecents,
@@ -121,8 +122,9 @@ import {
 } from "./core/storage";
 import { createFileCryptoSession, decryptFileChunk, deriveFileCryptoKey, encryptFileChunk, type FileCryptoSession } from "./core/file-crypto";
 import { CapturePool, type CaptureLease, type PooledCapture } from "./core/capture-pool";
-import { advanceStage, recommendedStage, STAGE_LIMITS, type AdaptiveStage, type QualitySample } from "./core/adaptive-quality";
-import { diagnosePipeline, smoothPipelineSample, type EncoderKind, type EncoderVendor, type PipelineBottleneck, type PipelineSample } from "./core/performance-monitor";
+import nodusLogo from "./assets/nodus-logo.png?inline";
+import { advanceStage, assessQuality, nextBitrate, STAGE_LIMITS, type AdaptiveStage, type AdaptiveState, type QualitySample } from "./core/adaptive-quality";
+import { classifyDecoderImplementation, contentMotion, counterDelta, cumulativeMeanMs, diagnosePipeline, encoderFallbackReason, rtpJitterMs, smoothPipelineSample, type EncoderKind, type EncoderVendor, type PipelineBottleneck, type PipelineSample } from "./core/performance-monitor";
 
 const releaseNotes = [
   { version: "0.4.19", changes: ["Status dos dispositivos atualizado em tempo real.", "Tela de espera 3D opcional."] },
@@ -134,7 +136,6 @@ const Standby3D = lazy(() => import("./Standby3D"));
 
 type ServiceState = "connecting" | "online" | "offline" | "error";
 type SettingsSection = "general" | "access" | "connection" | "appearance";
-type WindowsServiceStatus = { installed: boolean; running: boolean };
 type View = "connection" | "devices" | "recents" | "favorites" | "files" | "settings";
 const themeOptions: { id: LocalSettings["theme"]; label: string; description: string }[] = [
   { id: "dark", label: "Padrão", description: "Visual Nodus atual" },
@@ -174,12 +175,28 @@ type SessionMetrics = {
   controlLatencyMs: number;
   route: "direct" | "relay" | "unknown";
   quality: "high" | "balanced" | "economy";
+  requestedQuality: LocalSettings["connectionQuality"];
+  contentMotion: "LOW" | "MEDIUM" | "HIGH" | "UNKNOWN";
+  appliedFps: number;
+  appliedWidth: number;
+  appliedHeight: number;
+  appliedBitrateKbps: number;
+  profileChangeCount: number;
+  timeSinceLastProfileChangeMs: number | null;
+  adaptationReason: string;
+  controlBufferedBytes: number;
+  fileBufferedBytes: number;
   codec: string;
+  codecProfile: string;
   packetLossPct: number;
   jitterMs: number;
   jitterBufferMs: number;
+  jitterBufferMsValid: boolean;
+  jitterBufferTargetMs: number | null;
+  jitterBufferMinimumMs: number | null;
   packetSendDelayMs: number;
   freezes: number;
+  freezeDurationMs: number | null;
   availableKbps: number;
   captureWidth: number;
   captureHeight: number;
@@ -188,6 +205,7 @@ type SessionMetrics = {
   droppedFrames: number;
   limitation: string;
   encoder: string;
+  encoderFallbackReason?: string;
   decoder: string;
   bottleneck: PipelineBottleneck;
   bottleneckConfidence: number;
@@ -198,18 +216,23 @@ type RemoteInputMessage =
   | { type: "mouseMove"; x: number; y: number }
   | { type: "mouseDown" | "mouseUp"; button: number; x: number; y: number }
   | { type: "wheel"; delta: number }
-  | { type: "keyDown" | "keyUp"; keyCode: number }
+  | ({ type: "keyDown" | "keyUp" } & RemoteKeyInput)
   | { type: "clipboard"; text: string }
   | { type: "resolution"; resolution: RemoteResolution }
   | { type: "quality"; quality: LocalSettings["connectionQuality"]; maxFps: RemoteFrameRate }
   | { type: "display"; displayId: string }
   | { type: "screen-options"; displays: CaptureSource[] }
   | { type: "latency-ping" | "latency-pong"; sentAt: number }
-  | { type: "receiver-stats"; jitterBufferMs: number; renderFps: number; droppedFrames: number; freezes: number }
-  | { type: "sender-stats"; captureFps: number; encodedFps: number; sentFps: number; encodeMs: number; limitation: string; encoder: string }
+  | { type: "receiver-stats"; jitterBufferMs: number; jitterBufferMsValid: boolean; jitterBufferTargetMs: number | null; jitterBufferMinimumMs: number | null; renderFps: number; droppedFrames: number; freezes: number }
+  | { type: "sender-stats"; captureFps: number; encodedFps: number; sentFps: number; encodeMs: number; limitation: string; encoder: string; fallbackReason?: string; appliedFps?: number; appliedWidth?: number; appliedHeight?: number; appliedBitrateKbps?: number; profileChangeCount?: number; timeSinceLastProfileChangeMs?: number | null; adaptationReason?: string; quality?: SessionMetrics["quality"] }
   | { type: "admin-request" }
-  | { type: "admin-status"; status: "approved" | "denied" | "unavailable" };
+  | { type: "admin-status"; status: "approved" | "denied" | "unavailable" }
+  | { type: "restart-request" }
+  | { type: "restart-status"; status: "approved" | "denied" | "unavailable" };
+type RemoteKeyInput = { keyCode: number; code: string; location: number; repeat: boolean };
 type CaptureSource = { id: string; name: string; displayId: string; width: number; height: number };
+type GpuDiagnostics = Awaited<ReturnType<NonNullable<Window["nodusDesktop"]>["getGpuDiagnostics"]>>;
+type NativeCaptureStatus = Awaited<ReturnType<NonNullable<Window["nodusDesktop"]>["getNativeCaptureStatus"]>>;
 type FileTransferRecord = {
   id: string;
   sessionId: string;
@@ -261,6 +284,7 @@ export function App() {
   const [activeView, setActiveView] = useState<View>("connection");
   const [settingsSection, setSettingsSection] = useState<SettingsSection>("general");
   const [recents, setRecents] = useState<RecentDevice[]>(() => loadRecents());
+  const [hiddenCatalogDevices, setHiddenCatalogDevices] = useState<string[]>(() => loadHiddenCatalogDevices());
   const [favorites, setFavorites] = useState<string[]>(() => loadFavorites());
   const [settings, setSettings] = useState<LocalSettings>(() => loadSettings());
   const [currentUser, setCurrentUser] = useState<LocalUser | null>(() => loadUser());
@@ -268,7 +292,7 @@ export function App() {
   const [accessLog, setAccessLog] = useState<AccessLogEntry[]>(() => loadAccessLog());
   const [appVersion, setAppVersion] = useState("0.4.1");
   const [nativeGoogleClient, setNativeGoogleClient] = useState(false);
-  const [windowsServiceStatus, setWindowsServiceStatus] = useState<WindowsServiceStatus>({ installed: false, running: false });
+  const [gpuDiagnostics, setGpuDiagnostics] = useState<GpuDiagnostics | null>(null);
   const [serverIceServers, setServerIceServers] = useState<RTCIceServer[]>([]);
   const [loginError, setLoginError] = useState("");
   const [incomingRequests, setIncomingRequests] = useState<SessionRequestRecord[]>([]);
@@ -283,6 +307,7 @@ export function App() {
   const [sessionResolutions, setSessionResolutions] = useState<Record<string, RemoteResolution>>({});
   const [remoteAudioMuted, setRemoteAudioMuted] = useState<Record<string, boolean>>({});
   const [adminRequests, setAdminRequests] = useState<Record<string, string>>({});
+  const [restartRequests, setRestartRequests] = useState<Record<string, string>>({});
   const [recordingSessionId, setRecordingSessionId] = useState<string | null>(null);
   const [standby, setStandby] = useState(false);
   const recentPresenceIds = useMemo(() => recents.map((item) => item.nodusId).sort().join(","), [recents]);
@@ -302,8 +327,10 @@ export function App() {
   const reconnectAttemptsRef = useRef(new Map<string, number>());
   const hostInputRateRef = useRef(new Map<string, { at: number; count: number }>());
   const controlLatencyRef = useRef(new Map<string, number>());
-  const receiverFeedbackRef = useRef(new Map<string, { jitterBufferMs: number; renderFps: number; droppedFrames: number; freezes: number }>());
-  const senderFeedbackRef = useRef(new Map<string, { captureFps: number; encodedFps: number; sentFps: number; encodeMs: number; limitation: string; encoder: string }>());
+  const receiverFeedbackRef = useRef(new Map<string, Extract<RemoteInputMessage, { type: "receiver-stats" }>>());
+  const senderFeedbackRef = useRef(new Map<string, Extract<RemoteInputMessage, { type: "sender-stats" }>>());
+  const gpuDiagnosticsRef = useRef<GpuDiagnostics | null>(null);
+  const nativeCaptureStatusRef = useRef<NativeCaptureStatus | null>(null);
   const qualityTimersRef = useRef(new Map<string, number>());
   const statsRef = useRef(new Map<string, {
     bytes: number;
@@ -317,15 +344,19 @@ export function App() {
     packetSendDelay: number;
     packetsSent: number;
     jitterBufferDelay: number;
+    jitterBufferTargetDelay: number;
+    jitterBufferMinimumDelay: number;
     jitterBufferEmitted: number;
     freezes: number;
+    freezeDuration: number;
     dropped: number;
     lost: number;
     receivedPackets: number;
     at: number;
   }>());
   const qualityTierRef = useRef(new Map<string, string>());
-  const adaptiveStateRef = useRef(new Map<string, { stage: AdaptiveStage; stableSamples: number; startedAt: number }>());
+  const adaptiveStateRef = useRef(new Map<string, AdaptiveState & { startedAt: number; reason: string; source: "network" | "local" | "none" }>());
+  const appliedVideoRef = useRef(new Map<string, { fps: number; width: number; height: number; bitrate: number; at: number }>());
   const smoothedQualityRef = useRef(new Map<string, QualitySample>());
   const smoothedPipelineRef = useRef(new Map<string, PipelineSample>());
   const lastMetricsUiAtRef = useRef(new Map<string, number>());
@@ -344,7 +375,7 @@ export function App() {
   const outgoingRequestRef = useRef<SessionRequestRecord | null>(null);
   const sessionsRef = useRef<SessionRuntime[]>([]);
   const remoteVideoRef = useRef<HTMLVideoElement | null>(null);
-  const renderStatsRef = useRef(new Map<string, { fps: number; dropped: number }>());
+  const renderStatsRef = useRef(new Map<string, { fps: number; dropped: number; presented: number }>());
   const activeRuntime = useMemo(
     () => sessionRuntimes.find((item) => item.session.sessionId === selectedSessionId) ?? sessionRuntimes[0] ?? null,
     [selectedSessionId, sessionRuntimes],
@@ -453,32 +484,15 @@ export function App() {
       setNativeGoogleClient(Boolean(info.googleClientConfigured));
     }).catch(() => undefined);
     window.nodusDesktop?.getNativeCaptureStatus().then((status) => {
+      nativeCaptureStatusRef.current = status;
       window.nodusDesktop?.writeDiagnostic(`capture-backend=${status.backend || "chromium-getdisplaymedia"} wgc-supported=${status.supported} d3d11=${Boolean(status.d3d11Hardware)} hardware-h264=${Boolean(status.hardwareH264)} encoders=${status.hardwareH264Encoders || 0} adapter=${status.adapter || "unknown"}`);
     }).catch(() => undefined);
-    window.nodusDesktop?.getServiceStatus().then(setWindowsServiceStatus).catch(() => undefined);
+    window.nodusDesktop?.getGpuDiagnostics().then((status) => {
+      gpuDiagnosticsRef.current = status;
+      setGpuDiagnostics(status);
+      window.nodusDesktop?.writeDiagnostic(`gpu adapter=${status.adapter || "unknown"} process=${status.gpuProcessAvailable} compositing=${status.gpuCompositing} encode=${status.videoEncode} decode=${status.videoDecode}`);
+    }).catch(() => undefined);
   }, []);
-
-  async function changeWindowsService(action: "install" | "uninstall") {
-    const result = action === "install"
-      ? await window.nodusDesktop?.installService()
-      : await window.nodusDesktop?.uninstallService();
-    if (!result?.ok) {
-      setFeedback(result?.error || "Nao foi possivel alterar o servico do Windows.");
-      return;
-    }
-    setWindowsServiceStatus(window.nodusDesktop ? await window.nodusDesktop.getServiceStatus() : { installed: false, running: false });
-    setFeedback(action === "install" ? "Servico do Windows instalado." : "Servico do Windows removido.");
-  }
-
-  async function setWindowsServiceRunning(running: boolean) {
-    const result = running ? await window.nodusDesktop?.startService() : await window.nodusDesktop?.stopService();
-    if (!result?.ok) {
-      setFeedback(result?.error || "Nao foi possivel alterar o estado do servico.");
-      return;
-    }
-    setWindowsServiceStatus(window.nodusDesktop ? await window.nodusDesktop.getServiceStatus() : { installed: false, running: false });
-    setFeedback(running ? "Servico do Windows iniciado." : "Servico do Windows parado.");
-  }
 
   useEffect(() => {
     configureApiBase(settings.coordinationUrl);
@@ -695,7 +709,7 @@ export function App() {
       if (lastPresented) dropped += Math.max(0, metadata.presentedFrames - lastPresented - 1);
       lastPresented = metadata.presentedFrames;
       if (sessionId && now - started >= 1000) {
-        renderStatsRef.current.set(sessionId, { fps: Math.round(frames * 1000 / (now - started)), dropped });
+        renderStatsRef.current.set(sessionId, { fps: Math.round(frames * 1000 / (now - started)), dropped, presented: metadata.presentedFrames });
         started = now;
         frames = 0;
         dropped = 0;
@@ -928,7 +942,7 @@ export function App() {
       const sender = peer.addTrack(track, stream);
       logDiagnostic(`track-added id=${request.sessionId} kind=${track.kind} state=${track.readyState}`);
       const transceiver = peer.getTransceivers().find((item) => item.sender === sender);
-      if (track.kind === "video" && transceiver) preferDesktopCodecs(transceiver);
+      if (track.kind === "video" && transceiver) preferDesktopCodecs(transceiver, "send");
       if (track.kind === "video") {
         const resolution = request.preferredResolution ?? settings.preferredResolution;
         const frameRate = request.preferredFps ?? settings.maxFps;
@@ -967,7 +981,7 @@ export function App() {
     const permissions = request.grantedPermissions ?? ["screen:view", "mouse:control", "keyboard:control", "clipboard:sync", "files:transfer"];
     const peer = createPeer(request.sessionId, identity.nodusId, remoteNodusId, "viewer", getEffectiveIceServers());
     const videoTransceiver = peer.addTransceiver("video", { direction: "recvonly" });
-    preferDesktopCodecs(videoTransceiver);
+    preferDesktopCodecs(videoTransceiver, "receive");
     configureLowLatencyReceiver(videoTransceiver.receiver);
     if (permissions.includes("audio:remote")) peer.addTransceiver("audio", { direction: "recvonly" });
     if (permissions.some((item) => item === "mouse:control" || item === "keyboard:control" || item === "clipboard:sync")) {
@@ -1139,11 +1153,19 @@ export function App() {
         let packetSendDelay = 0;
         let packetsSent = 0;
         let jitterBufferDelay = 0;
+        let jitterBufferTargetDelay = 0;
+        let jitterBufferMinimumDelay = 0;
+        let hasJitterBufferTarget = false;
+        let hasJitterBufferMinimum = false;
         let jitterBufferEmitted = 0;
         let freezes = 0;
+        let freezeDuration = 0;
+        let hasFreezeDuration = false;
         let dropped = 0;
         let captureWidth = 0;
         let captureHeight = 0;
+        let encodedWidth = 0;
+        let encodedHeight = 0;
         let latencyMs = 0;
         let jitterMs = 0;
         let availableKbps = 0;
@@ -1152,16 +1174,17 @@ export function App() {
         let route: SessionMetrics["route"] = "unknown";
         let codecId = "";
         let codec = "";
+        let codecProfile = "";
         let limitation = "none";
         let encoder = "";
         let decoder = "";
-        const codecs = new Map<string, string>();
-        const candidates = new Map<string, string>();
+        const codecs = new Map<string, { name: string; profile: string }>();
+        const candidates = new Map<string, { type: string; protocol: string }>();
         let selectedPair: { localCandidateId?: string; remoteCandidateId?: string; currentRoundTripTime?: number; availableOutgoingBitrate?: number } | undefined;
         for (const report of reports.values()) {
           const item = report as RTCStats & Record<string, number | string | boolean | undefined>;
-          if (item.type === "codec") codecs.set(item.id, String(item.mimeType || "").split("/").pop()?.toUpperCase() || "");
-          if (item.type === "local-candidate" || item.type === "remote-candidate") candidates.set(item.id, String(item.candidateType || ""));
+          if (item.type === "codec") codecs.set(item.id, { name: String(item.mimeType || "").split("/").pop()?.toUpperCase() || "", profile: String(item.sdpFmtpLine || "") });
+          if (item.type === "local-candidate" || item.type === "remote-candidate") candidates.set(item.id, { type: String(item.candidateType || ""), protocol: String(item.protocol || "").toUpperCase() });
           if (item.type === "candidate-pair" && item.state === "succeeded" && (item.nominated || item.selected)) {
             selectedPair = {
               localCandidateId: String(item.localCandidateId || ""),
@@ -1177,12 +1200,15 @@ export function App() {
             decodeTime += Number(item.totalDecodeTime || 0);
             dropped += Number(item.framesDropped || 0);
             jitterBufferDelay += Number(item.jitterBufferDelay || 0);
+            if (typeof item.jitterBufferTargetDelay === "number") { jitterBufferTargetDelay += item.jitterBufferTargetDelay; hasJitterBufferTarget = true; }
+            if (typeof item.jitterBufferMinimumDelay === "number") { jitterBufferMinimumDelay += item.jitterBufferMinimumDelay; hasJitterBufferMinimum = true; }
             jitterBufferEmitted += Number(item.jitterBufferEmittedCount || 0);
             freezes = Math.max(freezes, Number(item.freezeCount || 0));
+            if (typeof item.totalFreezesDuration === "number") { freezeDuration = Math.max(freezeDuration, item.totalFreezesDuration); hasFreezeDuration = true; }
             decoder = String(item.decoderImplementation || decoder);
             lost += Number(item.packetsLost || 0);
             received += Number(item.packetsReceived || 0);
-            jitterMs = Math.max(jitterMs, Number(item.jitter || 0) * 1000);
+            jitterMs = Math.max(jitterMs, rtpJitterMs(Number(item.jitter)) ?? 0);
             codecId = String(item.codecId || codecId);
           }
           if (item.type === "outbound-rtp" && item.kind === "video" && role === "host") {
@@ -1192,6 +1218,8 @@ export function App() {
             encodeTime += Number(item.totalEncodeTime || 0);
             packetSendDelay += Number(item.totalPacketSendDelay || 0);
             packetsSent += Number(item.packetsSent || 0);
+            encodedWidth = Math.max(encodedWidth, Number(item.frameWidth || 0));
+            encodedHeight = Math.max(encodedHeight, Number(item.frameHeight || 0));
             limitation = String(item.qualityLimitationReason || limitation);
             encoder = String(item.encoderImplementation || encoder);
             codecId = String(item.codecId || codecId);
@@ -1199,7 +1227,7 @@ export function App() {
           if (item.type === "remote-inbound-rtp" && item.kind === "video" && role === "host") {
             lost += Number(item.packetsLost || 0);
             received += Number(item.packetsReceived || 0);
-            jitterMs = Math.max(jitterMs, Number(item.jitter || 0) * 1000);
+            jitterMs = Math.max(jitterMs, rtpJitterMs(Number(item.jitter)) ?? 0);
           }
           if (item.type === "media-source" && item.kind === "video" && role === "host") {
             captured += Number(item.frames || 0);
@@ -1208,11 +1236,16 @@ export function App() {
             captureHeight = Math.max(captureHeight, Number(item.height || 0));
           }
         }
-        codec = codecs.get(codecId) || "";
+        codec = codecs.get(codecId)?.name || "";
+        codecProfile = codecs.get(codecId)?.profile || "";
+        let transport = "unknown";
         if (selectedPair) {
           latencyMs = Math.round(Number(selectedPair.currentRoundTripTime || 0) * 1000);
           availableKbps = Math.round(Number(selectedPair.availableOutgoingBitrate || 0) / 1000);
-          route = candidates.get(String(selectedPair.localCandidateId)) === "relay" || candidates.get(String(selectedPair.remoteCandidateId)) === "relay" ? "relay" : "direct";
+          const local = candidates.get(String(selectedPair.localCandidateId));
+          const remote = candidates.get(String(selectedPair.remoteCandidateId));
+          route = local?.type === "relay" || remote?.type === "relay" ? "relay" : local?.type && remote?.type ? "direct" : "unknown";
+          transport = local?.protocol || remote?.protocol || "unknown";
         }
         const now = performance.now();
         const previous = statsRef.current.get(sessionId);
@@ -1223,33 +1256,40 @@ export function App() {
         const sentFps = stageFps(sent, previous?.sent ?? 0);
         const receivedFps = stageFps(receivedFrames, previous?.received ?? 0);
         const decodedFps = stageFps(decoded, previous?.decoded ?? 0);
-        const encodeMs = previous && encoded > previous.encoded ? Math.round(((encodeTime - previous.encodeTime) * 1000 / (encoded - previous.encoded)) * 10) / 10 : 0;
-        const decodeMs = previous && decoded > previous.decoded ? Math.round(((decodeTime - previous.decodeTime) * 1000 / (decoded - previous.decoded)) * 10) / 10 : 0;
-        const packetSendDelayMs = previous && packetsSent > previous.packetsSent ? Math.round(((packetSendDelay - previous.packetSendDelay) * 1000 / (packetsSent - previous.packetsSent)) * 10) / 10 : 0;
-        const jitterBufferMs = previous && jitterBufferEmitted > previous.jitterBufferEmitted ? Math.round(((jitterBufferDelay - previous.jitterBufferDelay) * 1000 / (jitterBufferEmitted - previous.jitterBufferEmitted)) * 10) / 10 : 0;
-        const freezeDelta = previous ? Math.max(0, freezes - previous.freezes) : 0;
+        const encodeMs = cumulativeMeanMs(encodeTime, previous?.encodeTime, encoded, previous?.encoded) ?? 0;
+        const decodeMs = cumulativeMeanMs(decodeTime, previous?.decodeTime, decoded, previous?.decoded) ?? 0;
+        const packetSendDelayMs = cumulativeMeanMs(packetSendDelay, previous?.packetSendDelay, packetsSent, previous?.packetsSent) ?? 0;
+        const measuredJitterBufferMs = cumulativeMeanMs(jitterBufferDelay, previous?.jitterBufferDelay, jitterBufferEmitted, previous?.jitterBufferEmitted);
+        const jitterBufferTargetMs = hasJitterBufferTarget ? cumulativeMeanMs(jitterBufferTargetDelay, previous?.jitterBufferTargetDelay, jitterBufferEmitted, previous?.jitterBufferEmitted) : null;
+        const jitterBufferMinimumMs = hasJitterBufferMinimum ? cumulativeMeanMs(jitterBufferMinimumDelay, previous?.jitterBufferMinimumDelay, jitterBufferEmitted, previous?.jitterBufferEmitted) : null;
+        const jitterBufferMs = measuredJitterBufferMs ?? 0;
+        const freezeDelta = counterDelta(freezes, previous?.freezes) ?? 0;
+        const freezeDurationMs = hasFreezeDuration ? Math.round((counterDelta(freezeDuration, previous?.freezeDuration) ?? 0) * 1000) : null;
         const droppedFrames = previous ? Math.max(0, dropped - previous.dropped) : 0;
         const fps = role === "host" ? encodedFps || sentFps || captureFps : decodedFps || receivedFps;
         const lostDelta = Math.max(0, lost - (previous?.lost ?? lost));
         const receivedDelta = Math.max(0, received - (previous?.receivedPackets ?? received));
         const lossPct = lostDelta / Math.max(1, lostDelta + receivedDelta) * 100;
-        statsRef.current.set(sessionId, { bytes, captured, encoded, sent, received: receivedFrames, decoded, encodeTime, decodeTime, packetSendDelay, packetsSent, jitterBufferDelay, jitterBufferEmitted, freezes, dropped, lost, receivedPackets: received, at: now });
+        statsRef.current.set(sessionId, { bytes, captured, encoded, sent, received: receivedFrames, decoded, encodeTime, decodeTime, packetSendDelay, packetsSent, jitterBufferDelay, jitterBufferTargetDelay, jitterBufferMinimumDelay, jitterBufferEmitted, freezes, freezeDuration, dropped, lost, receivedPackets: received, at: now });
         const targetFps = requestedFpsRef.current.get(sessionId) ?? settings.maxFps;
         const receiverFeedback = receiverFeedbackRef.current.get(sessionId);
         const senderFeedback = senderFeedbackRef.current.get(sessionId);
         const render = renderStatsRef.current.get(sessionId);
         const renderFps = role === "host" ? receiverFeedback?.renderFps ?? 0 : render?.fps ?? 0;
-        const activePicture = bitrateKbps >= 200 && [captureFps, encodedFps, receivedFps, decodedFps, renderFps].some((value) => value >= targetFps * 0.25)
-          || limitation === "cpu";
+        const motion = contentMotion(role === "host" ? captureFps : senderFeedback?.captureFps || receivedFps, targetFps);
+        const activePicture = motion !== "LOW" && bitrateKbps >= 200 || limitation === "cpu";
         const sample: QualitySample = {
           rttMs: latencyMs, jitterMs, lossPct, availableKbps, bitrateKbps, captureFps, encodedFps, encodeMs, targetFps,
           activePicture, limitation,
-          jitterBufferMs: role === "host" ? receiverFeedback?.jitterBufferMs : jitterBufferMs,
+          jitterBufferMs: role === "host" ? receiverFeedback?.jitterBufferMs : measuredJitterBufferMs ?? undefined,
           packetSendDelayMs,
           renderFps,
           freezes: role === "host" ? receiverFeedback?.freezes : freezeDelta,
         };
         const quality = await applyAdaptiveQuality(sessionId, peer, role, sample);
+        const applied = appliedVideoRef.current.get(sessionId);
+        const adaptive = adaptiveStateRef.current.get(sessionId);
+        const requestedQuality = requestedQualitiesRef.current.get(sessionId) ?? settings.connectionQuality;
         const pipelineSample: PipelineSample = {
           role,
           targetFps,
@@ -1273,19 +1313,32 @@ export function App() {
         const smoothedPipeline = smoothPipelineSample(smoothedPipelineRef.current.get(sessionId), pipelineSample);
         smoothedPipelineRef.current.set(sessionId, smoothedPipeline);
         const diagnosis = diagnosePipeline(smoothedPipeline);
+        const fallbackReason = role === "host"
+          ? encoderFallbackReason(encoder, { ...gpuDiagnosticsRef.current ?? {}, hardwareH264: nativeCaptureStatusRef.current?.hardwareH264 })
+          : senderFeedback?.fallbackReason ?? "";
         const metrics: SessionMetrics = {
           bitrateKbps, fps,
           captureFps: pipelineSample.captureFps,
           encodedFps: pipelineSample.encodedFps,
           sentFps: pipelineSample.sentFps,
           receivedFps, decodedFps, renderFps, renderDroppedFrames: render?.dropped ?? 0,
-          latencyMs, controlLatencyMs: controlLatencyRef.current.get(sessionId) ?? 0, route, quality, codec,
+          latencyMs, controlLatencyMs: controlLatencyRef.current.get(sessionId) ?? 0, route, quality, codec, codecProfile,
+          requestedQuality, contentMotion: motion, appliedFps: applied?.fps ?? senderFeedback?.appliedFps ?? 0,
+          appliedWidth: encodedWidth || applied?.width || senderFeedback?.appliedWidth || 0,
+          appliedHeight: encodedHeight || applied?.height || senderFeedback?.appliedHeight || 0,
+          appliedBitrateKbps: applied ? Math.round(applied.bitrate / 1000) : senderFeedback?.appliedBitrateKbps ?? 0,
+          profileChangeCount: adaptive?.changeCount ?? senderFeedback?.profileChangeCount ?? 0, timeSinceLastProfileChangeMs: adaptive?.changeCount ? Math.round(now - adaptive.changedAt) : senderFeedback?.timeSinceLastProfileChangeMs ?? null,
+          adaptationReason: adaptive?.reason ?? senderFeedback?.adaptationReason ?? "awaiting host feedback",
+          controlBufferedBytes: controlChannelsRef.current.get(sessionId)?.bufferedAmount ?? 0,
+          fileBufferedBytes: fileChannelsRef.current.get(sessionId)?.bufferedAmount ?? 0,
           packetLossPct: Math.round(lossPct * 10) / 10, jitterMs: Math.round(jitterMs),
-          jitterBufferMs: pipelineSample.jitterBufferMs, packetSendDelayMs,
-          freezes: role === "host" ? receiverFeedback?.freezes ?? 0 : freezeDelta,
+          jitterBufferMs: pipelineSample.jitterBufferMs, jitterBufferMsValid: role === "host" ? receiverFeedback?.jitterBufferMsValid ?? false : measuredJitterBufferMs !== null,
+          jitterBufferTargetMs: role === "viewer" ? jitterBufferTargetMs : receiverFeedback?.jitterBufferTargetMs ?? null,
+          jitterBufferMinimumMs: role === "viewer" ? jitterBufferMinimumMs : receiverFeedback?.jitterBufferMinimumMs ?? null, packetSendDelayMs,
+          freezes: role === "host" ? receiverFeedback?.freezes ?? 0 : freezeDelta, freezeDurationMs: role === "viewer" ? freezeDurationMs : null,
           availableKbps, captureWidth, captureHeight,
           encodeMs: pipelineSample.encodeMs, decodeMs, droppedFrames,
-          limitation: pipelineSample.limitation, encoder: pipelineSample.encoder, decoder,
+          limitation: pipelineSample.limitation, encoder: pipelineSample.encoder, encoderFallbackReason: fallbackReason, decoder,
           bottleneck: diagnosis.bottleneck, bottleneckConfidence: diagnosis.confidence,
           encoderKind: diagnosis.encoderKind, encoderVendor: diagnosis.encoderVendor,
         };
@@ -1293,11 +1346,16 @@ export function App() {
           const channel = controlChannelsRef.current.get(sessionId);
           if (channel?.readyState === "open" && channel.bufferedAmount < 16_384) {
             channel.send(JSON.stringify({ type: "latency-ping", sentAt: Date.now() } satisfies RemoteInputMessage));
-            channel.send(JSON.stringify({ type: "receiver-stats", jitterBufferMs, renderFps: render?.fps ?? 0, droppedFrames, freezes: freezeDelta } satisfies RemoteInputMessage));
+            channel.send(JSON.stringify({ type: "receiver-stats", jitterBufferMs, jitterBufferMsValid: measuredJitterBufferMs !== null,
+              jitterBufferTargetMs, jitterBufferMinimumMs, renderFps: render?.fps ?? 0, droppedFrames, freezes: freezeDelta } satisfies RemoteInputMessage));
           }
         }
         logMediaDiagnostic(`media-stats id=${sessionId} role=${role} capture=${captureFps} encoded=${encodedFps} sent=${sentFps} received=${receivedFps} decoded=${decodedFps} bitrate=${bitrateKbps} encodeMs=${encodeMs} dropped=${droppedFrames} limit=${limitation} encoder=${encoder || "pending"}`);
-        window.nodusDesktop?.writePerformance?.(JSON.stringify({ at: new Date().toISOString(), sessionId, role, ...metrics })).catch(() => undefined);
+        window.nodusDesktop?.writePerformance?.(JSON.stringify({ at: new Date().toISOString(), sessionId, role, ...metrics,
+          targetFps, activePicture, transport,
+          gpu: { adapter: gpuDiagnosticsRef.current?.adapter || "", videoEncode: gpuDiagnosticsRef.current?.videoEncode || "unknown", videoDecode: gpuDiagnosticsRef.current?.videoDecode || "unknown", gpuCompositing: gpuDiagnosticsRef.current?.gpuCompositing || "unknown", gpuProcessAvailable: gpuDiagnosticsRef.current?.gpuProcessAvailable ?? null, hardwareH264Available: nativeCaptureStatusRef.current?.hardwareH264 ?? null },
+          counters: role === "host" ? { captured, encoded, sent, packetsSent } : { received: receivedFrames, decoded, rendered: render?.presented ?? 0, dropped },
+        })).catch(() => undefined);
         const previousEventState = performanceEventStateRef.current.get(sessionId);
         const eventState = { bottleneck: metrics.bottleneck, quality, route, encoder: metrics.encoder };
         if (previousEventState) {
@@ -1316,7 +1374,11 @@ export function App() {
           if (role === "host") {
             const channel = controlChannelsRef.current.get(sessionId);
             if (channel?.readyState === "open" && channel.bufferedAmount < 16_384) {
-              channel.send(JSON.stringify({ type: "sender-stats", captureFps, encodedFps, sentFps, encodeMs, limitation, encoder } satisfies RemoteInputMessage));
+              channel.send(JSON.stringify({ type: "sender-stats", captureFps, encodedFps, sentFps, encodeMs, limitation, encoder, fallbackReason,
+                appliedFps: applied?.fps, appliedWidth: encodedWidth || applied?.width, appliedHeight: encodedHeight || applied?.height,
+                appliedBitrateKbps: applied ? Math.round(applied.bitrate / 1000) : undefined,
+                profileChangeCount: adaptive?.changeCount, timeSinceLastProfileChangeMs: adaptive?.changeCount ? Math.round(now - adaptive.changedAt) : null,
+                adaptationReason: adaptive?.reason, quality } satisfies RemoteInputMessage));
             }
           }
           updateRuntime(sessionId, { metrics });
@@ -1335,34 +1397,44 @@ export function App() {
   ): Promise<SessionMetrics["quality"]> {
     const requestedQuality = requestedQualitiesRef.current.get(sessionId) ?? settings.connectionQuality;
     const requestedFps = requestedFpsRef.current.get(sessionId) ?? settings.maxFps;
-    if (role !== "host") return requestedQuality === "economy" ? "economy" : requestedQuality === "high" ? "high" : "balanced";
+    if (role !== "host") return senderFeedbackRef.current.get(sessionId)?.quality ?? (requestedQuality === "economy" ? "economy" : requestedQuality === "high" ? "high" : "balanced");
     const sender = peer.getSenders().find((item) => item.track?.kind === "video");
     if (!sender) return "balanced";
     const minimum = requestedQuality === "economy" ? 2 : requestedQuality === "balanced" ? 1 : 0;
-    const current = adaptiveStateRef.current.get(sessionId) ?? { stage: minimum as AdaptiveStage, stableSamples: 0, startedAt: performance.now() };
+    const now = performance.now();
+    const current = adaptiveStateRef.current.get(sessionId) ?? { stage: minimum as AdaptiveStage, badSamples: 0, stableSamples: 0, changedAt: now, changeCount: 0, startedAt: now, reason: "initial profile", source: "none" as const };
     const smoothed = smoothQualitySample(smoothedQualityRef.current.get(sessionId), sample);
     smoothedQualityRef.current.set(sessionId, smoothed);
-    const immediate = sample.lossPct >= 5;
-    const target = Math.max(minimum, recommendedStage(smoothed), immediate ? recommendedStage(sample) : 0) as AdaptiveStage;
-    const next = performance.now() - current.startedAt < 4_000
-      ? { stage: minimum as AdaptiveStage, stableSamples: 0 }
-      : advanceStage(current.stage, target, current.stableSamples);
-    adaptiveStateRef.current.set(sessionId, { ...next, startedAt: current.startedAt });
+    const critical = sample.lossPct >= 10 || sample.rttMs >= 320;
+    const pressure = assessQuality(critical ? sample : smoothed);
+    const target = Math.max(minimum, pressure.stage) as AdaptiveStage;
+    const next = now - current.startedAt < 4_000 && !critical ? current : advanceStage(current, target, now, critical);
+    const changed = next.stage !== current.stage;
+    const reason = changed ? pressure.reason : current.reason;
+    const nextState = { ...next, startedAt: current.startedAt, reason, source: changed ? pressure.source : current.source };
     const limits = STAGE_LIMITS[next.stage];
-    const quality: SessionMetrics["quality"] = next.stage >= 3 ? "economy" : next.stage >= 1 ? "balanced" : "high";
+    const quality: SessionMetrics["quality"] = requestedQuality === "auto"
+      ? next.stage >= 3 ? "economy" : next.stage >= 1 ? "balanced" : "high"
+      : requestedQuality;
     const requestedResolution = requestedResolutionsRef.current.get(sessionId);
     const [targetWidth, targetHeight] = (requestedResolution ?? settings.preferredResolution).split("x").map(Number);
     const source = sender.track?.getSettings();
-    const scale = Math.max(1, (source?.width ?? targetWidth) / targetWidth, (source?.height ?? targetHeight) / Math.min(targetHeight, limits.height));
-    const fps = next.stage === 0 ? requestedFps : Math.min(requestedFps, limits.fps);
-    const desiredBitrate = next.stage === 0 && requestedFps > 60 ? 24_000_000 : limits.bitrate;
-    const bandwidthBound = sample.activePicture && sample.availableKbps > 0 && sample.bitrateKbps >= sample.availableKbps * 0.7;
-    const bitrate = sample.availableKbps > 0 && (bandwidthBound || sample.limitation === "bandwidth")
+    const networkConstrained = nextState.source === "network";
+    const height = networkConstrained ? Math.min(targetHeight, limits.height) : targetHeight;
+    const scale = Math.max(1, (source?.width ?? targetWidth) / targetWidth, (source?.height ?? targetHeight) / height);
+    const fps = Math.min(requestedFps, limits.fps);
+    const desiredBitrate = Math.min(18_000_000, Math.round(14_000_000 * (height / 1080) ** 1.5 * (fps / 60) ** 0.65));
+    const bandwidthBound = networkConstrained && sample.availableKbps > 0 && sample.bitrateKbps >= sample.availableKbps * 0.7;
+    const bitrate = sample.availableKbps > 0 && (bandwidthBound || networkConstrained && sample.limitation === "bandwidth")
       ? Math.min(desiredBitrate, Math.max(300_000, Math.round(sample.availableKbps * 850)))
       : desiredBitrate;
-    const roundedBitrate = Math.max(300_000, Math.round(bitrate / 250_000) * 250_000);
+    const previousApplied = appliedVideoRef.current.get(sessionId);
+    const roundedBitrate = nextBitrate(bitrate, previousApplied?.bitrate);
     const tier = `${next.stage}:${scale.toFixed(2)}:${fps}:${roundedBitrate}`;
-    if (qualityTierRef.current.get(sessionId) === tier) return quality;
+    if (qualityTierRef.current.get(sessionId) === tier || previousApplied && !changed && previousApplied.fps === fps && previousApplied.height === height && now - previousApplied.at < 2_000) {
+      adaptiveStateRef.current.set(sessionId, nextState);
+      return quality;
+    }
     try {
       const parameters = sender.getParameters();
       if (!parameters.encodings.length) parameters.encodings = [{}];
@@ -1375,8 +1447,17 @@ export function App() {
       prioritized.networkPriority = "high";
       await sender.setParameters(parameters);
       qualityTierRef.current.set(sessionId, tier);
-      logMediaDiagnostic(`quality-stage id=${sessionId} stage=${next.stage} scale=${scale.toFixed(2)} fps=${fps} bitrate=${roundedBitrate}`);
-    } catch {}
+      adaptiveStateRef.current.set(sessionId, nextState);
+      appliedVideoRef.current.set(sessionId, { fps, width: Math.round((source?.width ?? targetWidth) / scale), height: Math.round((source?.height ?? targetHeight) / scale), bitrate: roundedBitrate, at: now });
+      if (changed) window.nodusDesktop?.writePerformance?.(JSON.stringify({ at: new Date().toISOString(), sessionId, role, event: "profile-change", from: current.stage, to: next.stage,
+        reason: pressure.reason, source: pressure.source, rttMs: sample.rttMs, lossPct: sample.lossPct, rtpJitterMs: sample.jitterMs,
+        playoutMs: sample.jitterBufferMs ?? null, encodeMs: sample.encodeMs, packetSendDelayMs: sample.packetSendDelayMs ?? null,
+        profileChangeCount: next.changeCount })).catch(() => undefined);
+      logMediaDiagnostic(`quality-stage id=${sessionId} stage=${next.stage} scale=${scale.toFixed(2)} fps=${fps} bitrate=${roundedBitrate} reason=${reason}`);
+    } catch {
+      logMediaDiagnostic(`quality-stage-failed id=${sessionId} stage=${next.stage}`);
+      return requestedQuality === "auto" ? current.stage >= 3 ? "economy" : current.stage >= 1 ? "balanced" : "high" : requestedQuality;
+    }
     return quality;
   }
 
@@ -1425,6 +1506,10 @@ export function App() {
         }
         if (message.type === "admin-request") {
           setAdminRequests((current) => ({ ...current, [sessionId]: sessionsRef.current.find((item) => item.session.sessionId === sessionId)?.session.remoteName ?? "O outro computador" }));
+          return;
+        }
+        if (message.type === "restart-request") {
+          setRestartRequests((current) => ({ ...current, [sessionId]: sessionsRef.current.find((item) => item.session.sessionId === sessionId)?.session.remoteName ?? "O outro computador" }));
           return;
         }
         if (message.type === "resolution" || message.type === "display") {
@@ -1496,6 +1581,7 @@ export function App() {
           const label = message.status === "approved" ? "O proprietário autorizou a solicitação no Windows." : message.status === "denied" ? "O proprietário recusou a solicitação de administrador." : "A solicitação de administrador não pôde ser concluída.";
           updateRuntime(sessionId, { error: label });
         }
+        if (message.type === "restart-status") updateRuntime(sessionId, { error: message.status === "approved" ? "Reinicialização autorizada; o Windows iniciará em 15 segundos." : message.status === "denied" ? "O proprietário recusou a reinicialização." : "O Windows não permitiu reiniciar este computador." });
       } catch {}
     };
   }
@@ -1636,11 +1722,11 @@ export function App() {
       const key = await keyPromise;
       const chunkSize = 16 * 1024;
       for (let offset = 0; offset < file.size; offset += chunkSize) {
-        await waitForFileChannel(channel);
+        await waitForFileChannel(channel, activeSession.sessionId);
         channel.send(await encryptFileChunk(key, await file.slice(offset, offset + chunkSize).arrayBuffer()));
         patchFileTransfer(id, { progress: Math.min(99, Math.round(((offset + chunkSize) / file.size) * 100)) });
       }
-      await waitForFileChannel(channel);
+      await waitForFileChannel(channel, activeSession.sessionId);
       channel.send(JSON.stringify({ type: "file-end", id } satisfies FileControlMessage));
       patchFileTransfer(id, { status: "sent", progress: 100 });
       setFeedback("Arquivo enviado.");
@@ -1658,8 +1744,10 @@ export function App() {
     setFileTransfers((current) => current.map((item) => (item.id === id ? { ...item, ...patch } : item)));
   }
 
-  async function waitForFileChannel(channel: RTCDataChannel) {
-    while (channel.readyState === "open" && channel.bufferedAmount > 256 * 1024) {
+  async function waitForFileChannel(channel: RTCDataChannel, sessionId: string) {
+    while (channel.readyState === "open") {
+      const control = controlChannelsRef.current.get(sessionId);
+      if (channel.bufferedAmount <= 128 * 1024 && (control?.readyState !== "open" || control.bufferedAmount <= 8 * 1024)) break;
       await new Promise((resolve) => window.setTimeout(resolve, 16));
     }
     if (channel.readyState !== "open") throw new Error("Conexao encerrada.");
@@ -1821,6 +1909,7 @@ export function App() {
     renderStatsRef.current.delete(sessionId);
     qualityTierRef.current.delete(sessionId);
     adaptiveStateRef.current.delete(sessionId);
+    appliedVideoRef.current.delete(sessionId);
     smoothedQualityRef.current.delete(sessionId);
     smoothedPipelineRef.current.delete(sessionId);
     lastMetricsUiAtRef.current.delete(sessionId);
@@ -1887,9 +1976,14 @@ export function App() {
   }
 
   function onDeleteDevice(nodusId: string) {
-    setRecents(deleteRecent(nodusId));
-    setFavorites(loadFavorites());
-    setFeedback("Dispositivo excluido.");
+    setHiddenCatalogDevices(hideDeviceFromCatalog(nodusId));
+    setFeedback("Dispositivo removido da aba Dispositivos.");
+  }
+
+  function onDeleteFavorite(nodusId: string) {
+    if (!favorites.includes(nodusId)) return;
+    onToggleFavorite(nodusId);
+    setFeedback("Dispositivo removido dos favoritos.");
   }
 
   function onRenameDevice(nodusId: string, alias: string) {
@@ -2204,6 +2298,18 @@ export function App() {
     updateRuntime(sessionId, { error: result?.ok ? "Serviço do Windows autorizado localmente." : result?.error || "Não foi possível concluir a autorização no Windows." });
   }
 
+  async function resolveRestartRequest(sessionId: string, approved: boolean) {
+    setRestartRequests((current) => { const { [sessionId]: _removed, ...next } = current; return next; });
+    const channel = controlChannelsRef.current.get(sessionId);
+    if (!approved) {
+      channel?.readyState === "open" && channel.send(JSON.stringify({ type: "restart-status", status: "denied" } satisfies RemoteInputMessage));
+      return;
+    }
+    const result = await window.nodusDesktop?.restartComputer();
+    const status = result?.ok ? "approved" : "unavailable";
+    channel?.readyState === "open" && channel.send(JSON.stringify({ type: "restart-status", status } satisfies RemoteInputMessage));
+  }
+
   function toggleRecording(sessionId = selectedSessionId) {
     if (!sessionId) return;
     const active = recordingRef.current.get(sessionId);
@@ -2260,18 +2366,16 @@ export function App() {
     sendRemoteInput({ type: "wheel", delta: -event.deltaY });
   }
 
-  function sendKey(type: "keyDown" | "keyUp", event: ReactKeyboardEvent<HTMLElement>) {
+  function sendKey(type: "keyDown" | "keyUp", input: RemoteKeyInput) {
     if (!activeSession || activeSession.role !== "viewer") return;
-    if (!event.keyCode) return;
-    event.preventDefault();
-    sendRemoteInput({ type, keyCode: event.keyCode });
+    sendRemoteInput({ type, ...input });
   }
 
   if (!identity.deviceNameConfirmed) {
     return (
       <main className="onboarding">
         <div className="brand-mark">
-          <span>N</span>
+          <img src={nodusLogo} alt="" />
         </div>
         <form className="onboarding-panel" onSubmit={completeOnboarding}>
           <p className="eyebrow" translate="no">Nodus Connect</p>
@@ -2308,7 +2412,7 @@ export function App() {
         <div className="sidebar-brand">
           <div className="product logo" translate="no">
             <div className="product-icon">
-              <span>N</span>
+              <img src={nodusLogo} alt="" />
             </div>
             <div>
               <strong>NODUS</strong>
@@ -2375,6 +2479,7 @@ export function App() {
               error={sessionError}
               fileReady={activeFileReady}
               metrics={activeRuntime?.metrics ?? emptyMetrics()}
+              gpuDiagnostics={gpuDiagnostics}
               recording={recordingSessionId === activeSession.sessionId}
               transfers={fileTransfers.filter((item) => item.sessionId === activeSession.sessionId)}
               remoteResolution={activeSession.role === "viewer" ? settings.preferredResolution : sessionResolutions[activeSession.sessionId] ?? settings.preferredResolution}
@@ -2434,19 +2539,14 @@ export function App() {
               targetPassword={targetPassword}
               rememberTargetPassword={rememberTargetPassword}
             />}
-            {activeView === "devices" && <Devices identity={identity} items={recents} favorites={favorites} nodusIdLabel={visibleNodusId} onAddDevice={() => setFeedback("Digite o Nodus ID no campo acima para adicionar um dispositivo.")} onConnect={connectToDevice} onDeleteDevice={onDeleteDevice} onRenameDevice={onRenameDevice} onToggleFavorite={onToggleFavorite} statusLabel={statusLabel} />}
-            {activeView === "favorites" && <FavoritesPage favorites={favorites} items={recents.filter((item) => favorites.includes(item.nodusId))} onConnect={connectToDevice} onDeleteDevice={onDeleteDevice} onRenameDevice={onRenameDevice} onOpenDevices={() => setActiveView("devices")} onToggleFavorite={onToggleFavorite} />}
+            {activeView === "devices" && <Devices identity={identity} items={recents.filter((item) => !hiddenCatalogDevices.includes(item.nodusId))} favorites={favorites} nodusIdLabel={visibleNodusId} onConnect={connectToDevice} onDeleteDevice={onDeleteDevice} onRenameDevice={onRenameDevice} onToggleFavorite={onToggleFavorite} statusLabel={statusLabel} />}
+            {activeView === "favorites" && <FavoritesPage favorites={favorites} items={recents.filter((item) => favorites.includes(item.nodusId))} onConnect={connectToDevice} onDeleteDevice={onDeleteFavorite} onRenameDevice={onRenameDevice} onOpenDevices={() => setActiveView("devices")} onToggleFavorite={onToggleFavorite} />}
             {activeView === "recents" && <DeviceList empty="Nenhum dispositivo recente." favorites={favorites} items={recents} folders={folders} onCreateFolder={(name) => setFolders(createFolder(name))} onMove={setRecents} onRename={setRecents} onUpdate={setRecents} onWake={wakeDevice} onToggleFavorite={onToggleFavorite} />}
             {activeView === "files" && <FileTransferPanel activeSession={activeSession} channelReady={activeFileReady} transfers={fileTransfers} onSendFile={sendFile} />}
             {activeView === "settings" && <Settings
               appVersion={appVersion}
               captureSources={captureSources}
               initialSection={settingsSection}
-              serviceStatus={windowsServiceStatus}
-              onInstallService={() => changeWindowsService("install")}
-              onUninstallService={() => changeWindowsService("uninstall")}
-              onStartService={() => setWindowsServiceRunning(true)}
-              onStopService={() => setWindowsServiceRunning(false)}
               settings={settings}
               updateSettings={updateSettings}
             />}
@@ -2477,7 +2577,7 @@ function StandbyScreen() {
           <i />
           <i />
           <b />
-          <span>N</span>
+          <img src={nodusLogo} alt="" />
         </div>
         <div className="standby-copy">
           <small>Canal Nodus pronto</small>
@@ -2521,10 +2621,10 @@ function remoteWindowMarkup(session: RemoteSession) {
     header,footer{position:relative;z-index:1;display:flex;align-items:center;justify-content:space-between;gap:16px;padding:12px 24px;border-color:rgba(110,197,255,.2);background:rgba(5,8,17,.94);backdrop-filter:blur(18px)}
     header{border-bottom:1px solid rgba(110,197,255,.2)}footer{border-top:1px solid rgba(110,197,255,.16);color:#9aa9bc;font-size:13px}
     small{display:block;color:#6ec5ff;text-transform:uppercase;letter-spacing:.14em;font-weight:800;font-size:11px}strong{font-size:18px}.actions{display:flex;flex-wrap:wrap;justify-content:flex-end;gap:8px}button{border:1px solid rgba(81,169,255,.34);border-radius:8px;background:#0a1a2d;color:#fff;font-weight:800;padding:10px 14px;cursor:pointer}button[data-disconnect]{border-color:rgba(255,119,142,.38);background:linear-gradient(135deg,#5e1726,#d94463)}
-    .brand{display:flex;align-items:center;gap:12px}.mark{display:grid;place-items:center;width:46px;height:46px;border:1px solid #37c6ff;border-radius:9px;background:linear-gradient(145deg,#1aafff,#0768c9);font-size:25px;font-weight:900}.brand small{color:#dff5ff;font-size:15px;letter-spacing:.08em}.brand small span{display:block;color:#26baff;font-size:12px;letter-spacing:0}.peer{flex:1}.peer b{display:block;font-size:16px}.peer span{color:#9ec9e8;font-size:12px}.workspace{display:grid;grid-template-columns:minmax(0,1fr) 342px;min-height:0;gap:12px;padding:9px 12px 12px}.remote-screen{position:relative;z-index:1;display:grid;place-items:center;min-width:0;min-height:0;outline:none;border:1px solid rgba(48,152,226,.36);border-radius:9px;background:#02050b;cursor:crosshair}.side{padding:18px;border:1px solid rgba(48,152,226,.36);border-radius:10px;background:linear-gradient(145deg,rgba(6,26,46,.95),rgba(2,13,24,.95))}.side h3{margin:0 0 17px;font-size:16px}.quality{padding:0 0 14px;border-bottom:1px solid rgba(65,161,226,.17);color:#20dba0;font-weight:800}.quality span{display:block;margin-top:5px;color:#a6c7df;font-size:12px;font-weight:400}.metrics{display:grid;gap:0;margin:12px 0}.metrics div{display:flex;justify-content:space-between;padding:6px 0;color:#9fc4e2;font-size:12px}.metrics b{color:#d7edff;font-weight:600}.filebox{margin-top:16px;padding-top:14px;border-top:1px solid rgba(65,161,226,.17);color:#9fc4e2;font-size:12px}.filebox strong{display:block;margin-bottom:5px;color:#e6f5ff;font-size:13px}
+    .brand{display:flex;align-items:center;gap:12px}.mark{display:grid;place-items:center;width:46px;height:46px;border:1px solid #37c6ff;border-radius:9px;background:linear-gradient(145deg,#1aafff,#0768c9);font-size:25px;font-weight:900}.brand small{color:#dff5ff;font-size:15px;letter-spacing:.08em}.brand small span{display:block;color:#26baff;font-size:12px;letter-spacing:0}.peer{flex:1}.peer b{display:block;font-size:16px}.peer span{color:#9ec9e8;font-size:12px}.workspace{display:grid;grid-template-columns:minmax(0,1fr) 342px;min-height:0;gap:12px;padding:9px 12px 12px}.remote-screen{position:relative;z-index:1;display:grid;place-items:center;min-width:0;min-height:0;outline:none;border:1px solid rgba(48,152,226,.36);border-radius:9px;background:#02050b;cursor:default}.side{padding:18px;border:1px solid rgba(48,152,226,.36);border-radius:10px;background:linear-gradient(145deg,rgba(6,26,46,.95),rgba(2,13,24,.95))}.side h3{margin:0 0 17px;font-size:16px}.quality{padding:0 0 14px;border-bottom:1px solid rgba(65,161,226,.17);color:#20dba0;font-weight:800}.quality span{display:block;margin-top:5px;color:#a6c7df;font-size:12px;font-weight:400}.metrics{display:grid;gap:0;margin:12px 0}.metrics div{display:flex;justify-content:space-between;padding:6px 0;color:#9fc4e2;font-size:12px}.metrics b{color:#d7edff;font-weight:600}.filebox{margin-top:16px;padding-top:14px;border-top:1px solid rgba(65,161,226,.17);color:#9fc4e2;font-size:12px}.filebox strong{display:block;margin-bottom:5px;color:#e6f5ff;font-size:13px}
     video{width:100%;height:100%;object-fit:contain}.waiting{position:absolute;color:#9aa9bc;font-weight:800}body[data-ready="true"] .waiting{display:none}
     @media (max-width:760px){body{grid-template-rows:auto minmax(280px,1fr) auto}header,footer{align-items:flex-start;flex-direction:column}.actions{justify-content:flex-start}button{padding:9px 11px}}
-  </style></head><body data-ready="false"><header><div class="brand"><div class="mark">N</div><small>NODUS <span>Connect</span></small></div><div class="peer"><b>${escapeMarkup(session.remoteName)}</b><span>Acesso remoto em andamento</span></div><div class="actions"><button data-clipboard>Area de transf.</button><button data-record>Gravar</button><button data-disconnect>Encerrar sessao</button></div></header><main class="workspace"><div class="remote-screen" tabindex="0"><video autoplay playsinline></video><p class="waiting">Aguardando imagem do outro computador...</p></div><aside class="side"><h3>Status da conexao</h3><div class="quality">Conectado<span data-control>Aguardando controle</span></div><div class="metrics"><div><span>Status</span><b data-status>${escapeMarkup(session.status)}</b></div><div><span>Rota</span><b>Verificando</b></div><div><span>Qualidade</span><b>Adaptativa</b></div><div><span>Seguranca</span><b>Criptografada</b></div></div><div class="filebox"><strong>Transferencia de arquivos</strong>Use o painel principal para enviar arquivos nesta sessao.</div></aside></main><footer><span>Clique na tela para controlar mouse e teclado.</span><span>Conexao criptografada</span></footer></body></html>`;
+  </style></head><body data-ready="false"><header><div class="brand"><div class="mark"><img src="${nodusLogo}" alt="" style="width:82%;height:82%;object-fit:contain"></div><small>NODUS <span>Connect</span></small></div><div class="peer"><b>${escapeMarkup(session.remoteName)}</b><span>Acesso remoto em andamento</span></div><div class="actions"><button data-clipboard>Area de transf.</button><button data-record>Gravar</button><button data-disconnect>Encerrar sessao</button></div></header><main class="workspace"><div class="remote-screen" tabindex="0"><video autoplay playsinline></video><p class="waiting">Aguardando imagem do outro computador...</p></div><aside class="side"><h3>Status da conexao</h3><div class="quality">Conectado<span data-control>Aguardando controle</span></div><div class="metrics"><div><span>Status</span><b data-status>${escapeMarkup(session.status)}</b></div><div><span>Rota</span><b>Verificando</b></div><div><span>Qualidade</span><b>Adaptativa</b></div><div><span>Seguranca</span><b>Criptografada</b></div></div><div class="filebox"><strong>Transferencia de arquivos</strong>Use o painel principal para enviar arquivos nesta sessao.</div></aside></main><footer><span>Clique na tela para controlar mouse e teclado.</span><span>Conexao criptografada</span></footer></body></html>`;
 }
 
 function pendingRemoteWindowMarkup(targetLabel: string) {
@@ -2534,13 +2634,13 @@ function pendingRemoteWindowMarkup(targetLabel: string) {
     main{position:relative;z-index:1;display:grid;place-items:center;padding:28px}.console{position:relative;display:grid;justify-items:center;gap:13px;width:min(420px,calc(100vw - 44px));padding:38px 34px 30px;overflow:hidden;border:1px solid rgba(61,173,245,.36);border-radius:14px;background:linear-gradient(145deg,rgba(6,27,48,.9),rgba(2,12,24,.94));box-shadow:0 30px 80px rgba(0,0,0,.4),inset 0 1px rgba(222,244,255,.08);text-align:center;animation:enter .36s ease-out both}.console:before{position:absolute;top:0;width:68%;height:1px;background:linear-gradient(90deg,transparent,#31c8ff,transparent);box-shadow:0 0 16px rgba(47,194,255,.7);content:""}
     .signal{position:relative;display:grid;width:126px;height:126px;place-items:center;border-radius:50%;animation:pulse 2.2s ease-in-out infinite}.signal i,.signal b{position:absolute;inset:0;border:1px solid rgba(110,197,255,.35);border-radius:50%}.signal i:first-child{animation:ring 2.4s ease-out infinite}.signal i:nth-child(2){animation:ring 2.4s ease-out .8s infinite}.signal b{inset:21px;display:grid;place-items:center;background:linear-gradient(145deg,rgba(8,20,38,.96),rgba(5,10,20,.98));box-shadow:0 0 0 10px rgba(19,140,255,.08),0 0 46px rgba(19,140,255,.34);color:#6ec5ff;font-size:38px}.signal:after{position:absolute;right:13px;bottom:28px;width:44px;height:2px;border-radius:99px;background:#2bd0ff;box-shadow:0 0 14px #2bd0ff;content:"";animation:scan 1.4s ease-in-out infinite alternate}
     small{color:#6ec5ff;text-transform:uppercase;font-weight:900;font-size:11px;letter-spacing:.14em}strong{font-size:24px}span{color:#a7c8e1;font-size:13px;font-weight:700}.secure{display:flex;align-items:center;gap:8px;margin-top:3px;color:#a9d6ee;font-size:12px}.secure i{width:8px;height:8px;border-radius:50%;background:#1ce69b;box-shadow:0 0 12px rgba(28,230,155,.9)}@keyframes enter{from{opacity:0;transform:translateY(10px) scale(.985)}to{opacity:1;transform:translateY(0) scale(1)}}@keyframes pulse{0%,100%{transform:scale(.96);opacity:.72}50%{transform:scale(1.04);opacity:1}}@keyframes ring{0%{transform:scale(.55);opacity:.9}100%{transform:scale(1.3);opacity:0}}@keyframes scan{from{opacity:.45;transform:scaleX(.55);transform-origin:right}to{opacity:1;transform:scaleX(1);transform-origin:right}}@keyframes ambient{from{opacity:.58;transform:scale(.94)}to{opacity:1;transform:scale(1.08)}}
-  </style></head><body><main><section class="console"><div class="signal"><i></i><i></i><b>N</b></div><small>Canal Nodus pronto</small><strong data-remote>${escapeMarkup(targetLabel)}</strong><span data-status>Localizando dispositivo...</span><div class="secure"><i></i>Conexao segura disponivel</div></section></main></body></html>`;
+  </style></head><body><main><section class="console"><div class="signal"><i></i><i></i><b><img src="${nodusLogo}" alt="" style="width:72%;height:72%;object-fit:contain"></b></div><small>Canal Nodus pronto</small><strong data-remote>${escapeMarkup(targetLabel)}</strong><span data-status>Localizando dispositivo...</span><div class="secure"><i></i>Conexao segura disponivel</div></section></main></body></html>`;
 }
 
 function standbyPendingWindowMarkup(targetLabel: string) {
   return `<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><title>Nodus Connect - Conectando</title><style>
     *{box-sizing:border-box}body{margin:0;height:100vh;display:grid;place-items:center;overflow:hidden;background:#030812;color:#f4f8ff;font-family:Segoe UI,system-ui,sans-serif}body:before,body:after{position:fixed;inset:0;content:"";pointer-events:none}body:before{background:linear-gradient(rgba(72,168,235,.07) 1px,transparent 1px),linear-gradient(90deg,rgba(72,168,235,.07) 1px,transparent 1px);background-size:56px 56px;mask-image:linear-gradient(90deg,transparent,#000 24%,#000 76%,transparent)}body:after{background:radial-gradient(circle at 50% 48%,rgba(14,165,255,.22),transparent 26%);animation:ambient 4s ease-in-out infinite alternate}main{position:relative;z-index:1;display:grid;place-items:center;padding:28px}.console{position:relative;display:grid;justify-items:center;gap:12px;width:min(420px,calc(100vw - 44px));padding:36px 34px 30px;overflow:hidden;border:1px solid rgba(61,173,245,.36);border-radius:14px;background:linear-gradient(145deg,rgba(6,27,48,.9),rgba(2,12,24,.94));box-shadow:0 30px 80px rgba(0,0,0,.4),inset 0 1px rgba(222,244,255,.08);text-align:center}.console:before{position:absolute;top:0;width:68%;height:1px;background:linear-gradient(90deg,transparent,#31c8ff,transparent);box-shadow:0 0 16px rgba(47,194,255,.7);content:""}.symbol{position:relative;display:grid;width:126px;height:126px;place-items:center;border-radius:50%;animation:pulse 2.2s ease-in-out infinite}.symbol i,.symbol b{position:absolute;inset:0;border:1px solid rgba(110,197,255,.35);border-radius:50%}.symbol i:first-child{animation:ring 2.4s ease-out infinite}.symbol i:nth-child(2){animation:ring 2.4s ease-out .8s infinite}.symbol b{inset:21px;display:grid;place-items:center;background:linear-gradient(145deg,rgba(8,20,38,.96),rgba(5,10,20,.98));box-shadow:0 0 0 10px rgba(19,140,255,.08),0 0 46px rgba(19,140,255,.34);color:#6ec5ff;font-size:38px}small{color:#6ec5ff;text-transform:uppercase;font-weight:900;font-size:11px;letter-spacing:.14em}strong{font-size:24px}.target,.status{color:#a7c8e1;font-size:13px;font-weight:700}.status{display:flex;align-items:center;gap:8px}.status i{width:8px;height:8px;border-radius:50%;background:#1ce69b;box-shadow:0 0 12px rgba(28,230,155,.9)}@keyframes pulse{0%,100%{transform:scale(.96);opacity:.72}50%{transform:scale(1.04);opacity:1}}@keyframes ring{0%{transform:scale(.55);opacity:.9}100%{transform:scale(1.3);opacity:0}}@keyframes ambient{from{opacity:.58;transform:scale(.94)}to{opacity:1;transform:scale(1.08)}}
-  </style></head><body><main><section class="console"><div class="symbol"><i></i><i></i><b>N</b></div><small>Canal Nodus pronto</small><strong>Aguardando conexão</strong><span class="target" data-remote>${escapeMarkup(targetLabel)}</span><span class="status"><i></i><span data-status>Localizando dispositivo...</span></span></section></main></body></html>`;
+  </style></head><body><main><section class="console"><div class="symbol"><i></i><i></i><b><img src="${nodusLogo}" alt="" style="width:72%;height:72%;object-fit:contain"></b></div><small>Canal Nodus pronto</small><strong>Aguardando conexão</strong><span class="target" data-remote>${escapeMarkup(targetLabel)}</span><span class="status"><i></i><span data-status>Localizando dispositivo...</span></span></section></main></body></html>`;
 }
 
 function escapeMarkup(value: string) {
@@ -2554,7 +2654,7 @@ function NetworkPulse() {
       <i />
       <i />
       <b />
-      <strong>N</strong>
+      <strong><img src={nodusLogo} alt="" /></strong>
     </div>
   );
 }
@@ -2659,14 +2759,14 @@ function RecentDeviceList({
   return (
     <section className="recent-device-panel">
       <div className="section-heading"><h2>Dispositivos recentes</h2><button className="panel-action" onClick={onViewAll} type="button">Ver todos <ArrowRight aria-hidden="true" size={15} /></button></div>
-      {items.length ? <div className="recent-device-list">{items.map((item, index) => <RecentDeviceRow favorite={favorites.includes(item.nodusId)} item={item} key={item.nodusId} onConnect={onConnect} onDeleteDevice={onDeleteDevice} onRenameDevice={onRenameDevice} onToggleFavorite={onToggleFavorite} tone={["blue", "red", "sunset", "forest"][index % 4] as DeviceTone} />)}</div> : <p className="note">Os computadores acessados aparecerão aqui para conexões mais rápidas.</p>}
+      {items.length ? <div className="recent-device-list">{items.map((item, index) => <RecentDeviceRow favorite={favorites.includes(item.nodusId)} item={item} key={item.nodusId} onConnect={onConnect} onDeleteDevice={onDeleteDevice} onRenameDevice={onRenameDevice} onToggleFavorite={onToggleFavorite} showMenu={false} tone={["blue", "red", "sunset", "forest"][index % 4] as DeviceTone} />)}</div> : <p className="note">Os computadores acessados aparecerão aqui para conexões mais rápidas.</p>}
     </section>
   );
 }
 
 type DeviceTone = "blue" | "red" | "sunset" | "forest";
 
-function RecentDeviceRow({ favorite, item, onConnect, onDeleteDevice, onRenameDevice, onToggleFavorite, tone }: { favorite?: boolean; item: RecentDevice; onConnect: (nodusId: string) => void; onDeleteDevice: (nodusId: string) => void; onRenameDevice: (nodusId: string, currentName: string) => void; onToggleFavorite?: (nodusId: string) => void; tone: DeviceTone }) {
+function RecentDeviceRow({ favorite, item, onConnect, onDeleteDevice, onRenameDevice, onToggleFavorite, showMenu = true, tone }: { favorite?: boolean; item: RecentDevice; onConnect: (nodusId: string) => void; onDeleteDevice: (nodusId: string) => void; onRenameDevice: (nodusId: string, currentName: string) => void; onToggleFavorite?: (nodusId: string) => void; showMenu?: boolean; tone: DeviceTone }) {
   const online = item.status === "online";
   const lastAccess = new Date(item.lastConnectionAt).toLocaleDateString(currentLocale());
   return (
@@ -2676,7 +2776,7 @@ function RecentDeviceRow({ favorite, item, onConnect, onDeleteDevice, onRenameDe
       <div className={online ? "recent-device-status online" : "recent-device-status"}><span><i /> {online ? "Online" : "Offline"}</span><small><Clock3 aria-hidden="true" size={15} /> Último acesso: {lastAccess}</small></div>
       <button className="secondary-button recent-device-connect" onClick={() => onConnect(item.nodusId)} type="button">Conectar <ArrowRight aria-hidden="true" size={16} /></button>
       {onToggleFavorite && <button className={favorite ? "favorite-row active" : "favorite-row"} onClick={() => onToggleFavorite(item.nodusId)} title={favorite ? "Remover dos favoritos" : "Adicionar aos favoritos"} type="button"><Star aria-hidden="true" fill={favorite ? "currentColor" : "none"} size={18} /></button>}
-      <DeviceMenu className="row-menu" name={item.alias || item.deviceName} onDelete={() => onDeleteDevice(item.nodusId)} onRename={(name) => onRenameDevice(item.nodusId, name)} />
+      {showMenu && <DeviceMenu className="row-menu" name={item.alias || item.deviceName} onDelete={() => onDeleteDevice(item.nodusId)} onRename={(name) => onRenameDevice(item.nodusId, name)} />}
     </article>
   );
 }
@@ -2684,13 +2784,56 @@ function RecentDeviceRow({ favorite, item, onConnect, onDeleteDevice, onRenameDe
 function DeviceMenu({ className, name, onDelete, onRename }: { className: string; name: string; onDelete: () => void; onRename?: (name: string) => void }) {
   const [editing, setEditing] = useState(false);
   const [draftName, setDraftName] = useState(name);
-  return <details className={`${className} device-menu-control`}>
+  const [open, setOpen] = useState(false);
+  const [position, setPosition] = useState({ left: 8, top: 8 });
+  const detailsRef = useRef<HTMLDetailsElement | null>(null);
+  const menuRef = useRef<HTMLDivElement | null>(null);
+  const updatePlacement = () => {
+    const details = detailsRef.current;
+    const trigger = details?.querySelector("summary");
+    if (!details?.open || !trigger) return;
+    const triggerRect = trigger.getBoundingClientRect();
+    const gap = 6;
+    const width = Math.min(menuRef.current?.offsetWidth || 168, window.innerWidth - gap * 2);
+    const height = menuRef.current?.offsetHeight || 88;
+    const fitsBelow = window.innerHeight - triggerRect.bottom >= height + gap;
+    const fitsAbove = triggerRect.top >= height + gap;
+    const nextPlacement = fitsBelow || !fitsAbove ? "below" : "above";
+    setPosition({
+      left: Math.max(gap, Math.min(triggerRect.right - width, window.innerWidth - width - gap)),
+      top: nextPlacement === "below" ? triggerRect.bottom + gap : Math.max(gap, triggerRect.top - height - gap),
+    });
+  };
+  useEffect(() => {
+    if (!open) return;
+    window.addEventListener("resize", updatePlacement);
+    window.addEventListener("scroll", updatePlacement, true);
+    const closeOnOutsidePress = (event: PointerEvent) => {
+      const target = event.target as Node;
+      if (!detailsRef.current?.contains(target) && !menuRef.current?.contains(target)) detailsRef.current && (detailsRef.current.open = false);
+    };
+    document.addEventListener("pointerdown", closeOnOutsidePress, true);
+    return () => {
+      window.removeEventListener("resize", updatePlacement);
+      window.removeEventListener("scroll", updatePlacement, true);
+      document.removeEventListener("pointerdown", closeOnOutsidePress, true);
+    };
+  }, [open]);
+  const closeMenu = () => {
+    if (detailsRef.current) detailsRef.current.open = false;
+    setOpen(false);
+    setEditing(false);
+  };
+  return <><details className={`${className} device-menu-control`} onToggle={() => {
+    const isOpen = Boolean(detailsRef.current?.open);
+    setOpen(isOpen);
+    if (isOpen) window.requestAnimationFrame(updatePlacement);
+  }} ref={detailsRef}>
     <summary title="Mais ações"><MoreHorizontal aria-hidden="true" size={18} /></summary>
-    <div className="device-menu-actions">
-      {onRename && (editing ? <form onSubmit={(event) => { event.preventDefault(); onRename(draftName); setEditing(false); }}><input aria-label="Novo nome do dispositivo" autoFocus onChange={(event) => setDraftName(event.target.value)} value={draftName} /><button type="submit">Salvar</button></form> : <button onClick={() => setEditing(true)} type="button">Renomear</button>)}
-      <button className="device-menu-delete" onClick={onDelete} type="button">Excluir dispositivo</button>
-    </div>
-  </details>;
+  </details>{open && createPortal(<div className="device-menu-actions" ref={menuRef} style={position}>
+    {onRename && (editing ? <form onSubmit={(event) => { event.preventDefault(); onRename(draftName); closeMenu(); }}><input aria-label="Novo nome do dispositivo" autoFocus onChange={(event) => setDraftName(event.target.value)} value={draftName} /><button type="submit">Salvar</button></form> : <button onClick={() => setEditing(true)} type="button">Renomear</button>)}
+    <button className="device-menu-delete" onClick={() => { onDelete(); closeMenu(); }} type="button">Excluir dispositivo</button>
+  </div>, document.body)}</>;
 }
 
 function FavoritesPage({ favorites, items, onConnect, onDeleteDevice, onRenameDevice, onOpenDevices, onToggleFavorite }: { favorites: string[]; items: RecentDevice[]; onConnect: (nodusId: string) => void; onDeleteDevice: (nodusId: string) => void; onRenameDevice: (nodusId: string, currentName: string) => void; onOpenDevices: () => void; onToggleFavorite: (nodusId: string) => void }) {
@@ -2709,7 +2852,6 @@ function Devices({
   items,
   favorites,
   nodusIdLabel,
-  onAddDevice,
   onConnect,
   onDeleteDevice,
   onRenameDevice,
@@ -2720,7 +2862,6 @@ function Devices({
   items: RecentDevice[];
   favorites: string[];
   nodusIdLabel: string;
-  onAddDevice: () => void;
   onConnect: (nodusId: string) => void;
   onDeleteDevice: (nodusId: string) => void;
   onRenameDevice: (nodusId: string, currentName: string) => void;
@@ -2744,7 +2885,6 @@ function Devices({
           </div>
         </div>
         <div className="catalog-actions">
-          <button className="add-device" onClick={onAddDevice} type="button"><Plus aria-hidden="true" size={16} /> Adicionar dispositivo</button>
           <button className={`view-toggle ${layout === "grid" ? "active" : ""}`} onClick={() => setLayout("grid")} title="Exibição em grade" type="button"><Grid2X2 aria-hidden="true" size={16} /></button>
           <button className={`view-toggle ${layout === "list" ? "active" : ""}`} onClick={() => setLayout("list")} title="Exibição em lista" type="button"><List aria-hidden="true" size={17} /></button>
         </div>
@@ -3081,7 +3221,7 @@ function IncomingRequest({
     <div className="request-backdrop">
       <section className="incoming-request-panel" role="dialog" aria-modal="true" aria-label="Pedido de acesso remoto">
         <div className="request-orbit" aria-hidden="true">
-          <span>N</span>
+          <img src={nodusLogo} alt="" />
         </div>
         <p className="eyebrow">Pedido de acesso remoto</p>
         <h2>{request.requesterName}</h2>
@@ -3119,6 +3259,7 @@ function RemoteSessionPanel({
   onRecord,
   onSendFile,
   metrics,
+  gpuDiagnostics,
   maxFps,
   recording,
   remoteVideoRef,
@@ -3145,10 +3286,11 @@ function RemoteSessionPanel({
   error: string;
   fileReady: boolean;
   metrics: SessionMetrics;
+  gpuDiagnostics: GpuDiagnostics | null;
   maxFps: LocalSettings["maxFps"];
   recording: boolean;
   hasRemoteStream: boolean;
-  onKeyInput: (type: "keyDown" | "keyUp", event: ReactKeyboardEvent<HTMLElement>) => void;
+  onKeyInput: (type: "keyDown" | "keyUp", input: RemoteKeyInput) => void;
   onClipboard: () => void;
   onDisconnect: () => void;
   onPointerButton: (type: "mouseDown" | "mouseUp", event: ReactMouseEvent<HTMLElement>) => void;
@@ -3177,14 +3319,51 @@ function RemoteSessionPanel({
   const isViewer = session.role === "viewer";
   type SessionTool = "control" | "transfer" | "monitor" | "quality" | "actions" | "connection";
   const [activeTool, setActiveTool] = useState<SessionTool | null>(null);
-  const [mouseControlEnabled, setMouseControlEnabled] = useState(true);
-  const [keyboardControlEnabled, setKeyboardControlEnabled] = useState(true);
   const [nextNodusId, setNextNodusId] = useState("");
   const viewerSurfaceRef = useRef<HTMLDivElement | null>(null);
+  const pressedKeysRef = useRef(new Map<string, RemoteKeyInput>());
+  const onKeyInputRef = useRef(onKeyInput);
+  const canControlMouse = controlReady && session.permissions.includes("mouse:control");
+  const canControlKeyboard = controlReady && session.permissions.includes("keyboard:control");
+  useEffect(() => { onKeyInputRef.current = onKeyInput; }, [onKeyInput]);
   useEffect(() => {
-    setMouseControlEnabled(true);
-    setKeyboardControlEnabled(true);
-  }, [session.sessionId]);
+    if (!isViewer || !canControlKeyboard) return;
+    const releasePressedKeys = () => {
+      pressedKeysRef.current.forEach((input) => onKeyInputRef.current("keyUp", { ...input, repeat: false }));
+      pressedKeysRef.current.clear();
+    };
+    const forward = (type: "keyDown" | "keyUp", event: KeyboardEvent) => {
+      const input = toRemoteKeyInput(event);
+      if (!input) return;
+      const keyId = `${input.code}:${input.location}:${input.keyCode}`;
+      const remoteFocused = document.activeElement === viewerSurfaceRef.current || Boolean(viewerSurfaceRef.current?.contains(document.activeElement));
+      if (!remoteFocused && !(type === "keyUp" && pressedKeysRef.current.has(keyId))) return;
+      event.preventDefault();
+      event.stopPropagation();
+      if (type === "keyDown") pressedKeysRef.current.set(keyId, input);
+      else pressedKeysRef.current.delete(keyId);
+      onKeyInputRef.current(type, input);
+    };
+    const onKeyDown = (event: KeyboardEvent) => forward("keyDown", event);
+    const onKeyUp = (event: KeyboardEvent) => forward("keyUp", event);
+    const removeNativeListener = window.nodusDesktop?.onRemoteKeyInput?.((type, input) => {
+      const keyId = `${input.code}:${input.location}:${input.keyCode}`;
+      if (type === "keyDown") pressedKeysRef.current.set(keyId, input);
+      else pressedKeysRef.current.delete(keyId);
+      onKeyInputRef.current(type, input);
+    });
+    window.addEventListener("keydown", onKeyDown, true);
+    window.addEventListener("keyup", onKeyUp, true);
+    window.addEventListener("blur", releasePressedKeys);
+    return () => {
+      releasePressedKeys();
+      window.removeEventListener("keydown", onKeyDown, true);
+      window.removeEventListener("keyup", onKeyUp, true);
+      window.removeEventListener("blur", releasePressedKeys);
+      window.nodusDesktop?.setRemoteKeyboardCapture(false).catch(() => undefined);
+      removeNativeListener?.();
+    };
+  }, [canControlKeyboard, isViewer, session.sessionId]);
   if (!isViewer) {
     return <HostSessionView
       adminRequest={adminRequest}
@@ -3196,12 +3375,15 @@ function RemoteSessionPanel({
     />;
   }
   const toggleTool = (tool: SessionTool) => setActiveTool((current) => current === tool ? null : tool);
-  const canControlMouse = controlReady && session.permissions.includes("mouse:control");
-  const canControlKeyboard = controlReady && session.permissions.includes("keyboard:control");
   const viewerSessions = runtimes.filter((item) => item.session.role === "viewer");
-  const enterFullscreen = () => {
-    if (document.fullscreenElement) document.exitFullscreen().catch(() => undefined);
-    else viewerSurfaceRef.current?.requestFullscreen().catch(() => undefined);
+  const enterFullscreen = async () => {
+    if (window.nodusDesktop?.toggleFullScreen) {
+      await window.nodusDesktop.toggleFullScreen().catch(() => undefined);
+    } else if (document.fullscreenElement) {
+      document.exitFullscreen().catch(() => undefined);
+    } else {
+      viewerSurfaceRef.current?.requestFullscreen().catch(() => undefined);
+    }
   };
   const toolbar: Array<{ id?: SessionTool; label: string; icon: LucideIcon; disabled?: boolean }> = [
     { id: "control", label: "Controle", icon: MonitorCog },
@@ -3238,12 +3420,16 @@ function RemoteSessionPanel({
           <div
             className="video-shell control-surface remote-viewer-surface"
             onContextMenu={(event) => event.preventDefault()}
-            onKeyDown={(event) => keyboardControlEnabled && canControlKeyboard && onKeyInput("keyDown", event)}
-            onKeyUp={(event) => keyboardControlEnabled && canControlKeyboard && onKeyInput("keyUp", event)}
-            onMouseDown={(event) => mouseControlEnabled && canControlMouse && onPointerButton("mouseDown", event)}
-            onMouseMove={(event) => mouseControlEnabled && canControlMouse && onPointerMove(event)}
-            onMouseUp={(event) => mouseControlEnabled && canControlMouse && onPointerButton("mouseUp", event)}
-            onWheel={(event) => mouseControlEnabled && canControlMouse && onWheelInput(event)}
+            onMouseDown={(event) => {
+              viewerSurfaceRef.current?.focus({ preventScroll: true });
+              window.nodusDesktop?.setRemoteKeyboardCapture(true).catch(() => undefined);
+              if (canControlMouse) onPointerButton("mouseDown", event);
+            }}
+            onBlur={() => window.nodusDesktop?.setRemoteKeyboardCapture(false).catch(() => undefined)}
+            onFocus={() => window.nodusDesktop?.setRemoteKeyboardCapture(true).catch(() => undefined)}
+            onMouseMove={(event) => canControlMouse && onPointerMove(event)}
+            onMouseUp={(event) => canControlMouse && onPointerButton("mouseUp", event)}
+            onWheel={(event) => canControlMouse && onWheelInput(event)}
             ref={viewerSurfaceRef}
             tabIndex={0}
           >
@@ -3252,12 +3438,26 @@ function RemoteSessionPanel({
           </div>
           {activeTool && <aside className="viewer-tool-popover">
             <div className="viewer-tool-title"><strong>{toolbar.find((item) => item.id === activeTool)?.label ?? "Conexão"}</strong><button aria-label="Fechar painel" onClick={() => setActiveTool(null)} type="button"><X aria-hidden="true" size={17} /></button></div>
-            {activeTool === "control" && <div className="viewer-tool-actions control-options"><button className={mouseControlEnabled && canControlMouse ? "active" : ""} disabled={!canControlMouse} onClick={() => setMouseControlEnabled((value) => !value)} type="button"><MousePointer2 aria-hidden="true" size={18} /><span>Mouse {mouseControlEnabled ? "ativo" : "bloqueado"}</span></button><button className={keyboardControlEnabled && canControlKeyboard ? "active" : ""} disabled={!canControlKeyboard} onClick={() => setKeyboardControlEnabled((value) => !value)} type="button"><Keyboard aria-hidden="true" size={18} /><span>Teclado {keyboardControlEnabled ? "ativo" : "bloqueado"}</span></button><button onClick={onToggleRemoteAudio} type="button">{remoteAudioMuted ? <VolumeX aria-hidden="true" size={18} /> : <Volume2 aria-hidden="true" size={18} />}<span>{remoteAudioMuted ? "Ativar áudio" : "Silenciar áudio"}</span></button><button onClick={onClipboard} type="button"><Clipboard aria-hidden="true" size={18} /><span>Enviar texto copiado</span></button><button onClick={onRequestAdmin} type="button"><ShieldCheck aria-hidden="true" size={18} /><span>Solicitar administrador</span></button><button onClick={() => { setMouseControlEnabled(false); setKeyboardControlEnabled(false); }} type="button"><LockKeyhole aria-hidden="true" size={18} /><span>Somente visualizar</span></button><span className="viewer-control-state"><i className={controlReady ? "online" : ""} />{controlReady ? "Canal de controle conectado" : "Preparando controles"}</span></div>}
+            {activeTool === "control" && <div className="viewer-tool-actions control-options"><span className={`viewer-control-indicator ${canControlMouse ? "active" : ""}`}><MousePointer2 aria-hidden="true" size={18} /><span>Mouse remoto {canControlMouse ? "autorizado" : "indisponível"}</span></span><span className={`viewer-control-indicator ${canControlKeyboard ? "active" : ""}`}><Keyboard aria-hidden="true" size={18} /><span>Teclado remoto {canControlKeyboard ? "autorizado" : "indisponível"}</span></span><button onClick={onToggleRemoteAudio} type="button">{remoteAudioMuted ? <VolumeX aria-hidden="true" size={18} /> : <Volume2 aria-hidden="true" size={18} />}<span>{remoteAudioMuted ? "Ativar áudio" : "Silenciar áudio"}</span></button><button onClick={onClipboard} type="button"><Clipboard aria-hidden="true" size={18} /><span>Enviar texto copiado</span></button><button onClick={onRequestAdmin} type="button"><ShieldCheck aria-hidden="true" size={18} /><span>Solicitar administrador</span></button><span className="viewer-control-state"><i className={controlReady ? "online" : ""} />{controlReady ? "Canal de controle conectado" : "Preparando controles"}</span></div>}
             {activeTool === "transfer" && <div className="viewer-transfer-panel"><div className="viewer-transfer-destination"><FolderOpen aria-hidden="true" size={16} /><span><strong>Destino</strong>Documentos no computador remoto</span></div><label className={fileReady ? "session-upload" : "session-upload disabled"}><FileUp aria-hidden="true" size={18} />Enviar arquivo<input disabled={!fileReady} type="file" onChange={(event) => { const file = event.currentTarget.files?.[0]; if (file) onSendFile(file); event.currentTarget.value = ""; }} /></label><div className="viewer-transfer-list">{transfers.length === 0 ? <p>Nenhuma transferência nesta sessão.</p> : transfers.slice(0, 3).map((item) => <div className="session-transfer-item" key={item.id}><div><strong>{item.fileName}</strong><span>{fileStatusLabel(item)} · {formatBytes(item.size)}</span></div>{item.url && !item.savedPath && <a download={item.fileName} href={item.url}>Baixar</a>}</div>)}</div></div>}
             {activeTool === "monitor" && <div className="viewer-tool-fields"><label><span>Monitor remoto</span><select defaultValue="" disabled={remoteDisplays.length < 2} onChange={(event) => event.target.value && onDisplayChange(event.target.value)}><option value="">{remoteDisplays.length > 1 ? "Selecionar monitor" : "Monitor principal"}</option>{remoteDisplays.map((display, index) => <option key={display.id} value={display.id}>Monitor {index + 1}</option>)}</select></label></div>}
             {activeTool === "quality" && <div className="viewer-tool-fields"><label><span>Perfil de qualidade</span><select value={connectionQuality} onChange={(event) => onQualityChange(event.target.value as LocalSettings["connectionQuality"])}><option value="auto">Automática</option><option value="high">Alta</option><option value="balanced">Equilibrada</option><option value="economy">Economia</option></select></label><label><span>Resolução</span><select value={remoteResolution} onChange={(event) => onResolutionChange(event.target.value as RemoteResolution)}><option value="1920x1080">1920 × 1080</option><option value="1366x768">1366 × 768</option><option value="1280x720">1280 × 720</option><option value="1024x768">1024 × 768</option></select></label><label><span>Taxa de quadros</span><select value={maxFps} onChange={(event) => onFpsChange(Number(event.target.value) as LocalSettings["maxFps"])}><option value={60}>60 FPS</option><option value={120}>120 FPS</option></select></label></div>}
             {activeTool === "actions" && <div className="viewer-tool-actions"><button onClick={enterFullscreen} type="button"><Maximize2 aria-hidden="true" size={18} /><span>Tela cheia</span></button><button onClick={onRecord} type="button"><Radio aria-hidden="true" size={18} /><span>{recording ? "Parar gravação" : "Gravar sessão"}</span></button><button onClick={onClipboard} type="button"><Clipboard aria-hidden="true" size={18} /><span>Sincronizar texto</span></button></div>}
             {activeTool === "connection" && <div className="viewer-connection-inspector"><div className="pipeline-flow"><span>Captura <b>{metrics.captureFps || "-"}</b></span><i>›</i><span>Encoder <b>{metrics.encodedFps || "-"}</b></span><i>›</i><span>Rede <b>{metrics.receivedFps || metrics.sentFps || "-"}</b></span><i>›</i><span>Decoder <b>{metrics.decodedFps || "-"}</b></span><i>›</i><span>Render <b>{metrics.renderFps || "-"}</b></span></div><div className={`pipeline-bottleneck state-${metrics.bottleneck.toLowerCase()}`}><span>Gargalo</span><strong>{bottleneckLabel(metrics.bottleneck)}</strong></div><dl className="viewer-connection-details"><div><dt>Rota</dt><dd>{metrics.route === "relay" ? "Relay TURN" : metrics.route === "direct" ? "P2P direta" : "Verificando"}</dd></div><div><dt>Rede / controle</dt><dd>{metrics.latencyMs ? `${metrics.latencyMs} ms` : "-"} / {metrics.controlLatencyMs ? `${metrics.controlLatencyMs} ms` : "-"}</dd></div><div><dt>Buffer de vídeo</dt><dd>{metrics.jitterBufferMs ? `${metrics.jitterBufferMs} ms` : "-"}</dd></div><div><dt>Quadros descartados</dt><dd>{metrics.droppedFrames}</dd></div><div><dt>Codificação</dt><dd>{metrics.encodeMs ? `${metrics.encodeMs} ms/quadro` : "-"}</dd></div><div><dt>Decodificação</dt><dd>{metrics.decodeMs ? `${metrics.decodeMs} ms/quadro` : "-"}</dd></div><div><dt>Bitrate</dt><dd>{metrics.bitrateKbps ? formatBitrate(metrics.bitrateKbps) : "-"}</dd></div><div><dt>Perda</dt><dd>{metrics.packetLossPct ? `${metrics.packetLossPct}%` : "0%"}</dd></div><div><dt>Codec</dt><dd>{metrics.codec || "Negociando"}</dd></div><div><dt>Encoder</dt><dd>{encoderLabel(metrics)}</dd></div></dl></div>}
+            {activeTool === "connection" && <dl className="viewer-connection-details">
+              <div><dt>Perfil solicitado</dt><dd>{connectionQuality}</dd></div>
+              <div><dt>Aplicado</dt><dd>{metrics.appliedFps ? `${metrics.appliedFps} FPS · ${metrics.appliedWidth} × ${metrics.appliedHeight} · ${formatBitrate(metrics.appliedBitrateKbps)}` : "Aguardando host"}</dd></div>
+              <div><dt>Movimento estimado</dt><dd>{metrics.contentMotion}{metrics.contentMotion === "LOW" ? " · FPS não mede capacidade" : ""}</dd></div>
+              <div><dt>Jitter RTP</dt><dd>{metrics.jitterMs} ms</dd></div>
+              <div><dt>Playout alvo / mínimo</dt><dd>{metrics.jitterBufferTargetMs ?? "-"} / {metrics.jitterBufferMinimumMs ?? "-"} ms</dd></div>
+              <div><dt>Adaptações</dt><dd>{metrics.profileChangeCount} · {metrics.adaptationReason}</dd></div>
+              <div><dt>Fila controle / arquivos</dt><dd>{metrics.controlBufferedBytes} / {metrics.fileBufferedBytes} bytes</dd></div>
+              <div><dt>Perfil H.264</dt><dd>{metrics.codecProfile || "Não informado"}</dd></div>
+              <div><dt>Decoder</dt><dd>{metrics.decoder ? `${classifyDecoderImplementation(metrics.decoder) === "hardware" ? "Hardware" : classifyDecoderImplementation(metrics.decoder) === "software" ? "Software" : "Não identificado"} · ${metrics.decoder}` : "Não identificado"}</dd></div>
+              <div><dt>GPU deste PC</dt><dd>{gpuDiagnostics?.adapter || "Não identificada"}</dd></div>
+              <div><dt>Vídeo GPU local</dt><dd>{gpuDiagnostics ? `Encode ${gpuDiagnostics.videoEncode} · Decode ${gpuDiagnostics.videoDecode}` : "Não identificado"}</dd></div>
+              {metrics.encoderFallbackReason && <div><dt>Fallback</dt><dd>{metrics.encoderFallbackReason}</dd></div>}
+            </dl>}
           </aside>}
           {error && <p className="viewer-session-error">{error}</p>}
         </div>
@@ -3300,7 +3500,7 @@ function HostSessionView({
   return (
     <section className="remote-session host-session">
       <header className="host-session-header">
-        <div className="remote-brand" translate="no"><div className="remote-mark">N</div><strong>NODUS <span>Connect</span></strong></div>
+        <div className="remote-brand" translate="no"><div className="remote-mark"><img src={nodusLogo} alt="" /></div><strong>NODUS <span>Connect</span></strong></div>
         <div className="host-session-state"><i /> Sessão remota ativa</div>
       </header>
       <main className="host-session-main">
@@ -3508,28 +3708,32 @@ function Settings({
   appVersion,
   captureSources,
   initialSection,
-  serviceStatus,
-  onInstallService,
-  onUninstallService,
-  onStartService,
-  onStopService,
   settings,
   updateSettings,
 }: {
   appVersion: string;
   captureSources: CaptureSource[];
   initialSection: SettingsSection;
-  serviceStatus: WindowsServiceStatus;
-  onInstallService: () => void;
-  onUninstallService: () => void;
-  onStartService: () => void;
-  onStopService: () => void;
   settings: LocalSettings;
   updateSettings: (patch: Partial<LocalSettings>) => void;
 }) {
   const [draft, setDraft] = useState(settings);
   const [passwordDraft, setPasswordDraft] = useState("");
   const [section, setSection] = useState<SettingsSection>(initialSection);
+  const [updateStatus, setUpdateStatus] = useState("");
+  const [checkingUpdates, setCheckingUpdates] = useState(false);
+  async function checkForUpdates() {
+    setCheckingUpdates(true);
+    setUpdateStatus("Buscando atualizações...");
+    try {
+      const result = await window.nodusDesktop?.checkForUpdates();
+      setUpdateStatus(result?.ok ? (result.version === appVersion ? "Você já está na versão mais recente." : `Nova versão disponível: ${result.version}`) : result?.error || "Não foi possível buscar atualizações agora.");
+    } catch {
+      setUpdateStatus("Não foi possível buscar atualizações agora.");
+    } finally {
+      setCheckingUpdates(false);
+    }
+  }
   const dirty = JSON.stringify(draft) !== JSON.stringify(settings);
   const updateDraft = (patch: Partial<LocalSettings>) => setDraft((current) => ({ ...current, ...patch }));
 
@@ -3577,7 +3781,8 @@ function Settings({
             <Switch checked={draft.confirmBeforeDisconnect} icon={ShieldCheck} label="Confirmar antes de encerrar" description="Evita o encerramento acidental de uma sessão." onChange={(value) => updateDraft({ confirmBeforeDisconnect: value })} />
           </SettingsGroup>
           <SettingsGroup icon={RefreshCw} title="Atualizações" description="Mantenha o Nodus sempre atualizado.">
-            <div className="update-row"><span>Versão atual: {appVersion}</span></div>
+            <div className="update-row"><span>Versão atual: {appVersion}</span><button className="update-check" disabled={checkingUpdates} onClick={checkForUpdates} type="button"><RefreshCw aria-hidden="true" size={15} /> {checkingUpdates ? "Buscando..." : "Buscar atualizações"}</button></div>
+            {updateStatus && <p className="note">{updateStatus}</p>}
           </SettingsGroup>
         </>}
         {section === "access" && <>
@@ -3586,17 +3791,6 @@ function Settings({
           <Switch checked={draft.allowClipboard} label="Permitir texto copiado" onChange={(value) => updateDraft({ allowClipboard: value })} />
           <Switch checked={draft.shareAudio} label="Compartilhar som do computador" onChange={(value) => updateDraft({ shareAudio: value })} />
           <Switch checked={draft.unattendedAccess} label="Aceitar automaticamente computadores confiaveis" onChange={(value) => updateDraft({ unattendedAccess: value })} />
-          <div className="service-setting">
-            <strong>Servico do Windows</strong>
-            <span>{serviceStatus.running ? "Ativo" : serviceStatus.installed ? "Instalado, parado" : "Nao instalado"}</span>
-            <div>
-              {!serviceStatus.installed && <button className="secondary-button" onClick={onInstallService} type="button">Instalar servico</button>}
-              {serviceStatus.installed && !serviceStatus.running && <button className="secondary-button" onClick={onStartService} type="button">Iniciar servico</button>}
-              {serviceStatus.installed && serviceStatus.running && <button className="secondary-button" onClick={onStopService} type="button">Parar servico</button>}
-              {serviceStatus.installed && <button className="secondary-button" onClick={onUninstallService} type="button">Remover servico</button>}
-            </div>
-            <small className="note">O Windows solicitara permissao de administrador. O acesso continua sujeito a senha e permissoes.</small>
-          </div>
           <div className="settings-field">
             <span>Senha deste Nodus</span>
             <div className="password-setting">
@@ -3695,11 +3889,11 @@ function formatBytes(value: number): string {
 }
 
 function emptyMetrics(): SessionMetrics {
-  return { bitrateKbps: 0, fps: 0, captureFps: 0, encodedFps: 0, sentFps: 0, receivedFps: 0, decodedFps: 0, renderFps: 0, renderDroppedFrames: 0, latencyMs: 0, controlLatencyMs: 0, route: "unknown", quality: "balanced", codec: "", packetLossPct: 0, jitterMs: 0, jitterBufferMs: 0, packetSendDelayMs: 0, freezes: 0, availableKbps: 0, captureWidth: 0, captureHeight: 0, encodeMs: 0, decodeMs: 0, droppedFrames: 0, limitation: "none", encoder: "", decoder: "", bottleneck: "UNKNOWN", bottleneckConfidence: 0, encoderKind: "unknown", encoderVendor: "unknown" };
+  return { bitrateKbps: 0, fps: 0, captureFps: 0, encodedFps: 0, sentFps: 0, receivedFps: 0, decodedFps: 0, renderFps: 0, renderDroppedFrames: 0, latencyMs: 0, controlLatencyMs: 0, route: "unknown", quality: "balanced", requestedQuality: "auto", contentMotion: "UNKNOWN", appliedFps: 0, appliedWidth: 0, appliedHeight: 0, appliedBitrateKbps: 0, profileChangeCount: 0, timeSinceLastProfileChangeMs: null, adaptationReason: "", controlBufferedBytes: 0, fileBufferedBytes: 0, codec: "", codecProfile: "", packetLossPct: 0, jitterMs: 0, jitterBufferMs: 0, jitterBufferMsValid: false, jitterBufferTargetMs: null, jitterBufferMinimumMs: null, packetSendDelayMs: 0, freezes: 0, freezeDurationMs: null, availableKbps: 0, captureWidth: 0, captureHeight: 0, encodeMs: 0, decodeMs: 0, droppedFrames: 0, limitation: "none", encoder: "", decoder: "", bottleneck: "UNKNOWN", bottleneckConfidence: 0, encoderKind: "unknown", encoderVendor: "unknown" };
 }
 
 function bottleneckLabel(value: PipelineBottleneck): string {
-  return ({ CAPTURE: "Captura", ENCODER: "Encoder", NETWORK: "Rede", DECODER: "Decoder", RENDER: "Render", NONE: "Nenhum", UNKNOWN: "Analisando" })[value];
+  return ({ CAPTURE: "Captura", ENCODER: "Encoder", NETWORK: "Rede", DECODER: "Decoder", RENDER: "Render", BUFFER_QUEUE: "Buffer/fila", NONE: "Nenhum", UNKNOWN: "Analisando" })[value];
 }
 
 function encoderLabel(metrics: SessionMetrics): string {
@@ -3720,8 +3914,8 @@ function candidateType(candidate: string): string {
   return candidate.match(/\btyp\s+([a-z0-9-]+)/i)?.[1] ?? "unknown";
 }
 
-function preferDesktopCodecs(transceiver: RTCRtpTransceiver) {
-  const capabilities = RTCRtpSender.getCapabilities("video") ?? RTCRtpReceiver.getCapabilities("video");
+function preferDesktopCodecs(transceiver: RTCRtpTransceiver, direction: "send" | "receive") {
+  const capabilities = direction === "send" ? RTCRtpSender.getCapabilities("video") : RTCRtpReceiver.getCapabilities("video");
   if (!capabilities?.codecs.length || !transceiver.setCodecPreferences) return;
   const preferred = ["h264", "vp8", "vp9", "av1"];
   const rank = (codec: { mimeType: string; sdpFmtpLine?: string }) => {
@@ -3733,7 +3927,13 @@ function preferDesktopCodecs(transceiver: RTCRtpTransceiver) {
     }
     return index < 0 ? preferred.length + 2 : index + 1;
   };
-  transceiver.setCodecPreferences([...capabilities.codecs].sort((a, b) => rank(a) - rank(b)));
+  const codecs = [...capabilities.codecs].sort((a, b) => rank(a) - rank(b));
+  try {
+    transceiver.setCodecPreferences(codecs);
+    window.nodusDesktop?.writeDiagnostic(`video-codecs direction=${direction} h264=${codecs.filter((item) => item.mimeType.toLowerCase() === "video/h264").map((item) => item.sdpFmtpLine || "default").join("|") || "unavailable"}`).catch(() => undefined);
+  } catch (error) {
+    window.nodusDesktop?.writeDiagnostic(`video-codecs default-fallback direction=${direction} reason=${String(error)}`).catch(() => undefined);
+  }
 }
 
 function configureLowLatencyReceiver(receiver: RTCRtpReceiver) {
@@ -3830,6 +4030,29 @@ function resultLabel(value: AccessLogEntry["result"]): string {
     disconnected: "encerrado",
     error: "falhou",
   }[value];
+}
+
+function toRemoteKeyInput(event: KeyboardEvent): RemoteKeyInput | null {
+  const keyCode = event.keyCode || event.which || virtualKeyFromCode(event.code);
+  if (keyCode <= 0 || keyCode >= 256) return null;
+  return { keyCode, code: event.code || event.key, location: event.location, repeat: event.repeat };
+}
+
+function virtualKeyFromCode(code: string): number {
+  if (/^Key[A-Z]$/.test(code)) return code.charCodeAt(3);
+  if (/^Digit[0-9]$/.test(code)) return code.charCodeAt(5);
+  if (/^Numpad[0-9]$/.test(code)) return 96 + Number(code.slice(-1));
+  if (/^F(?:[1-9]|1[0-9]|2[0-4])$/.test(code)) return 111 + Number(code.slice(1));
+  return {
+    Backspace: 8, Tab: 9, Enter: 13, NumpadEnter: 13, ShiftLeft: 16, ShiftRight: 16,
+    ControlLeft: 17, ControlRight: 17, AltLeft: 18, AltRight: 18, Pause: 19, CapsLock: 20,
+    Escape: 27, Space: 32, PageUp: 33, PageDown: 34, End: 35, Home: 36, ArrowLeft: 37,
+    ArrowUp: 38, ArrowRight: 39, ArrowDown: 40, PrintScreen: 44, Insert: 45, Delete: 46,
+    MetaLeft: 91, MetaRight: 92, ContextMenu: 93, NumpadMultiply: 106, NumpadAdd: 107,
+    NumpadSubtract: 109, NumpadDecimal: 110, NumpadDivide: 111, NumLock: 144, ScrollLock: 145,
+    Semicolon: 186, Equal: 187, Comma: 188, Minus: 189, Period: 190, Slash: 191,
+    Backquote: 192, BracketLeft: 219, Backslash: 220, BracketRight: 221, Quote: 222,
+  }[code] ?? 0;
 }
 
 function SettingsGroup({ icon: Icon, title, description, children }: { icon: LucideIcon; title: string; description: string; children: React.ReactNode }) {

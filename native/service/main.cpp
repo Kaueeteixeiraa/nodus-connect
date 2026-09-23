@@ -60,7 +60,8 @@ int runInputHelper() {
       INPUT input{};
       input.type = INPUT_KEYBOARD;
       input.ki.wVk = static_cast<WORD>(packet.keyCode);
-      input.ki.dwFlags = packet.type == 6 ? KEYEVENTF_KEYUP : 0;
+      input.ki.dwFlags = packet.button & 1 ? KEYEVENTF_EXTENDEDKEY : 0;
+      if (packet.type == 6) input.ki.dwFlags |= KEYEVENTF_KEYUP;
       SendInput(1, &input, sizeof(input));
     }
   }

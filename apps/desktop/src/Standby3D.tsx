@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import * as THREE from "three";
+import nodusLogo from "./assets/nodus-logo.png?inline";
 
 function faceTexture(): THREE.CanvasTexture {
   const canvas = document.createElement("canvas");
@@ -24,21 +25,17 @@ function faceTexture(): THREE.CanvasTexture {
   context.fillStyle = "#b3dfff";
   context.font = "600 23px Segoe UI";
   context.fillText("N O D U S", 256, 90);
-  context.shadowColor = "#178dff";
-  context.shadowBlur = 34;
-  const gradient = context.createLinearGradient(160, 250, 350, 470);
-  gradient.addColorStop(0, "#eaf6ff");
-  gradient.addColorStop(0.48, "#8ac0ff");
-  gradient.addColorStop(1, "#188eff");
-  context.fillStyle = gradient;
-  context.font = "900 300px Segoe UI";
-  context.fillText("N", 256, 445);
-  context.shadowBlur = 0;
   context.fillStyle = "#a7c8e8";
   context.font = "600 18px Segoe UI";
   context.fillText("C O N N E C T", 256, 625);
   const texture = new THREE.CanvasTexture(canvas);
   texture.colorSpace = THREE.SRGBColorSpace;
+  const logo = new Image();
+  logo.onload = () => {
+    context.drawImage(logo, 88, 184, 336, 336);
+    texture.needsUpdate = true;
+  };
+  logo.src = nodusLogo;
   return texture;
 }
 
@@ -238,7 +235,7 @@ export default function Standby3D() {
         <div className="standby-3d-status"><i /> Conexão segura disponível</div>
       </div>
       <div className="standby-3d-corner">RÁPIDO<br />SEGURO<br />ESTÁVEL</div>
-      {!available && <span className="standby-3d-fallback" aria-hidden="true">N</span>}
+      {!available && <img className="standby-3d-fallback" src={nodusLogo} alt="" />}
     </div>
   );
 }

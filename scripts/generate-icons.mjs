@@ -1,31 +1,29 @@
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 const outDir = "build";
 mkdirSync(outDir, { recursive: true });
 
-const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">
-  <defs>
-    <linearGradient id="blue" x1="36" y1="28" x2="220" y2="232">
-      <stop stop-color="#27a8ff"/>
-      <stop offset=".55" stop-color="#0879dc"/>
-      <stop offset="1" stop-color="#03284f"/>
-    </linearGradient>
-    <linearGradient id="letter" x1="92" y1="62" x2="164" y2="194">
-      <stop stop-color="#fff"/>
-      <stop offset=".48" stop-color="#eaf3ff"/>
-      <stop offset="1" stop-color="#151b25"/>
-    </linearGradient>
-  </defs>
-  <rect width="256" height="256" rx="52" fill="url(#blue)"/>
-  <rect x="4" y="4" width="248" height="248" rx="48" fill="none" stroke="#8dd4ff" stroke-opacity=".55" stroke-width="4"/>
-  <path d="M76 188V68L180 188V68" fill="none" stroke="url(#letter)" stroke-width="27" stroke-linecap="round" stroke-linejoin="round"/>
-</svg>`;
+const logoPng = readFileSync("apps/desktop/src/assets/nodus-logo.png");
+const logoIconPng = readFileSync("apps/desktop/src/assets/nodus-logo-icon.png");
+const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256"><image width="256" height="256" href="data:image/png;base64,${logoPng.toString("base64")}"/></svg>`;
 
 writeFileSync(join(outDir, "icon.svg"), svg);
-writeFileSync(join(outDir, "icon.ico"), createIco([16, 24, 32, 48, 64, 128, 256]));
+writeFileSync(join(outDir, "icon.ico"), createPngIco(logoIconPng));
 writeFileSync(join(outDir, "installer-header.bmp"), createBmp(150, 57, headerColorAt));
 writeFileSync(join(outDir, "installer-sidebar.bmp"), createBmp(164, 314, sidebarColorAt));
+
+function createPngIco(png) {
+  const icon = Buffer.alloc(22 + png.length);
+  icon.writeUInt16LE(1, 2);
+  icon.writeUInt16LE(1, 4);
+  icon.writeUInt16LE(1, 10);
+  icon.writeUInt16LE(32, 12);
+  icon.writeUInt32LE(png.length, 14);
+  icon.writeUInt32LE(22, 18);
+  png.copy(icon, 22);
+  return icon;
+}
 
 function createIco(sizes) {
   const images = sizes.map((size) => ({ size, data: createDib(size) }));
@@ -198,11 +196,6 @@ function sidebarColorAt(x, y) {
     smoothstep(0.008, 0, Math.abs((y * 13) % 1) - 0.01),
   );
   color = mix(color, [24, 86, 148], grid * 0.2);
-
-  const lx = (x - 0.5) / 0.32;
-  const ly = (y - 0.24) / 0.17;
-  const logo = colorAt(lx, ly);
-  color = mix(color, [logo[0], logo[1], logo[2]], (logo[3] / 255) * 0.95);
 
   if (y > 0.62 && y < 0.64) color = mix(color, [37, 230, 255], 0.55);
   return color.map((value) => Math.round(Math.max(0, Math.min(255, value))));

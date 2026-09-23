@@ -19,33 +19,56 @@ export type QualitySample = {
 };
 
 export const STAGE_LIMITS = [
-  { height: 1080, fps: 60, bitrate: 14_000_000 },
-  { height: 900, fps: 60, bitrate: 8_000_000 },
-  { height: 720, fps: 60, bitrate: 5_000_000 },
-  { height: 720, fps: 45, bitrate: 3_000_000 },
-  { height: 720, fps: 30, bitrate: 1_600_000 },
+  { height: 1080, fps: 120 },
+  { height: 900, fps: 90 },
+  { height: 720, fps: 60 },
+  { height: 720, fps: 45 },
+  { height: 720, fps: 30 },
 ] as const;
 
-export function recommendedStage(sample: QualitySample): AdaptiveStage {
-  const { rttMs, jitterMs, lossPct, availableKbps } = sample;
+export type QualityPressure = { stage: AdaptiveStage; reason: string; source: "network" | "local" | "none" };
+
+export function assessQuality(sample: QualitySample): QualityPressure {
+  const { rttMs, lossPct, availableKbps } = sample;
   const bandwidthBound = sample.activePicture && availableKbps > 0 && sample.bitrateKbps >= availableKbps * 0.7;
-  if (lossPct >= 10 || rttMs >= 320 || jitterMs >= 80 || (bandwidthBound && availableKbps < 1500)) return 4;
-  if (lossPct >= 5 || rttMs >= 200 || jitterMs >= 45 || (bandwidthBound && availableKbps < 2500)) return 3;
-  let stage = lossPct >= 2 || rttMs >= 120 || jitterMs >= 25 || (bandwidthBound && availableKbps < 4500) ? 2 : 0;
-  if ((sample.activePicture && (sample.freezes ?? 0) > 0 && (sample.jitterBufferMs ?? 0) >= 80) || (sample.jitterBufferMs ?? 0) >= 120 || (sample.packetSendDelayMs ?? 0) >= 100) stage = Math.max(stage, 3);
-  else if ((sample.jitterBufferMs ?? 0) >= 60 || (sample.packetSendDelayMs ?? 0) >= 50) stage = Math.max(stage, 2);
-  if (sample.limitation === "bandwidth" || (bandwidthBound && availableKbps < 8000)) stage = Math.max(stage, 1);
-  if (sample.limitation === "cpu" || (sample.activePicture && sample.encodeMs > 1000 / sample.targetFps * 1.3 && sample.encodedFps < sample.targetFps * 0.9)) stage = Math.max(stage, 2);
-  if (sample.activePicture && sample.captureFps >= sample.targetFps * 0.8 && sample.encodedFps < sample.targetFps * 0.7) stage = Math.max(stage, 2);
-  if (sample.activePicture && sample.encodedFps >= sample.targetFps * 0.7 && (sample.renderFps ?? 0) > 0 && (sample.renderFps ?? 0) < sample.encodedFps * 0.65) stage = Math.max(stage, 2);
-  return stage as AdaptiveStage;
+  if (lossPct >= 10 || rttMs >= 320) return { stage: 4, reason: `network loss=${lossPct.toFixed(1)}% rtt=${rttMs}ms`, source: "network" };
+  if (lossPct >= 5 || rttMs >= 200) return { stage: 3, reason: `network loss=${lossPct.toFixed(1)}% rtt=${rttMs}ms`, source: "network" };
+  if (lossPct >= 2 || rttMs >= 120) return { stage: 2, reason: `network loss=${lossPct.toFixed(1)}% rtt=${rttMs}ms`, source: "network" };
+  if (sample.activePicture && (sample.limitation === "bandwidth" || (bandwidthBound && availableKbps < 8000))) {
+    const stage = availableKbps <= 0 ? 1 : availableKbps < 1500 ? 4 : availableKbps < 2500 ? 3 : availableKbps < 4500 ? 2 : 1;
+    return { stage, reason: `bandwidth available=${availableKbps}kbps used=${sample.bitrateKbps}kbps`, source: "network" };
+  }
+  if (!sample.activePicture) return { stage: 0, reason: "low motion: capacity unknown", source: "none" };
+  if ((sample.packetSendDelayMs ?? 0) >= 100) return { stage: 2, reason: `sender queue=${sample.packetSendDelayMs}ms`, source: "local" };
+  if (sample.limitation === "cpu" || (sample.encodeMs > 1000 / sample.targetFps * 1.3 && sample.encodedFps < sample.targetFps * 0.9)) {
+    return { stage: 2, reason: `encoder time=${sample.encodeMs}ms limitation=${sample.limitation}`, source: "local" };
+  }
+  if ((sample.jitterBufferMs ?? 0) >= 120 && (sample.freezes ?? 0) > 0) return { stage: 2, reason: `playout=${sample.jitterBufferMs}ms freezes=${sample.freezes}`, source: "local" };
+  if ((sample.jitterBufferMs ?? 0) >= 120) return { stage: 1, reason: `playout=${sample.jitterBufferMs}ms`, source: "local" };
+  if ((sample.renderFps ?? 0) > 0 && sample.encodedFps >= sample.targetFps * 0.7 && sample.renderFps! < sample.encodedFps * 0.65) {
+    return { stage: 1, reason: `render=${sample.renderFps}fps encoded=${sample.encodedFps}fps`, source: "local" };
+  }
+  return { stage: 0, reason: "stable", source: "none" };
 }
 
-export function advanceStage(current: AdaptiveStage, recommended: AdaptiveStage, stableSamples: number): { stage: AdaptiveStage; stableSamples: number } {
-  if (recommended > current) return { stage: Math.min(recommended, current + (recommended >= 3 ? 2 : 1)) as AdaptiveStage, stableSamples: 0 };
-  if (recommended === current) return { stage: current, stableSamples: 0 };
-  const nextStable = stableSamples + 1;
-  return nextStable >= 8
-    ? { stage: (current - 1) as AdaptiveStage, stableSamples: 0 }
-    : { stage: current, stableSamples: nextStable };
+export function recommendedStage(sample: QualitySample): AdaptiveStage {
+  return assessQuality(sample).stage;
+}
+
+export type AdaptiveState = { stage: AdaptiveStage; badSamples: number; stableSamples: number; changedAt: number; changeCount: number };
+
+export function nextBitrate(desired: number, previous?: number): number {
+  const capped = previous ? Math.max(previous * 0.8, Math.min(previous * 1.2, desired)) : desired;
+  const rounded = Math.round(capped / 50_000) * 50_000;
+  return Math.max(300_000, Math.round(previous ? Math.max(previous * 0.8, Math.min(previous * 1.2, rounded)) : rounded));
+}
+
+export function advanceStage(current: AdaptiveState, recommended: AdaptiveStage, now: number, critical = false): AdaptiveState {
+  const badSamples = recommended > current.stage ? current.badSamples + 1 : 0;
+  const stableSamples = recommended < current.stage ? current.stableSamples + 1 : 0;
+  const cooldown = now - current.changedAt < 5_000;
+  const worsen = recommended > current.stage && (critical || badSamples >= 4) && (!cooldown || critical);
+  const improve = recommended < current.stage && stableSamples >= 20 && !cooldown;
+  if (worsen || improve) return { stage: (current.stage + (worsen ? 1 : -1)) as AdaptiveStage, badSamples: 0, stableSamples: 0, changedAt: now, changeCount: current.changeCount + 1 };
+  return { ...current, badSamples, stableSamples };
 }

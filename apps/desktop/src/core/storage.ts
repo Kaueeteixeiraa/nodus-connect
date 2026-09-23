@@ -2,6 +2,7 @@ import type { CoordinationDevice } from "./api";
 
 const RECENTS_KEY = "nodus.recents.v1";
 const FAVORITES_KEY = "nodus.favorites.v1";
+const HIDDEN_CATALOG_DEVICES_KEY = "nodus.hidden-catalog-devices.v1";
 const SETTINGS_KEY = "nodus.settings.v1";
 const SETTINGS_VERSION_KEY = "nodus.settings.version";
 const FOLDERS_KEY = "nodus.folders.v1";
@@ -109,6 +110,16 @@ export function deleteRecent(nodusId: string): RecentDevice[] {
 
 export function loadFavorites(): string[] {
   return read<string[]>(FAVORITES_KEY, []);
+}
+
+export function loadHiddenCatalogDevices(): string[] {
+  return read<string[]>(HIDDEN_CATALOG_DEVICES_KEY, []);
+}
+
+export function hideDeviceFromCatalog(nodusId: string): string[] {
+  const next = [...new Set([...loadHiddenCatalogDevices(), nodusId])];
+  localStorage.setItem(HIDDEN_CATALOG_DEVICES_KEY, JSON.stringify(next));
+  return next;
 }
 
 export function toggleFavorite(nodusId: string): string[] {

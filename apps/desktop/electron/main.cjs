@@ -13,10 +13,12 @@ let tray;
 let isQuitting = false;
 let trayIdentity = { nodusId: "", deviceName: "Nodus Connect", status: "Online" };
 let remoteControlActive = false;
+let remoteKeyboardCaptureActive = false;
 let minimizeToTray = true;
 let inputHelper;
 let captureOptions = { sourceId: "", displayId: "", shareAudio: true };
 let powerSaveBlockerId = -1;
+let gpuInfoReady = false;
 
 const isDev = process.env.NODUS_DESKTOP_DEV === "1";
 const devUrl = process.env.NODUS_DESKTOP_URL || "http://127.0.0.1:5173";
@@ -31,8 +33,11 @@ const firebaseApiKey = process.env.NODUS_FIREBASE_API_KEY || "AIzaSyAN-UMMvnJlNF
 const firebaseAuthUrl = process.env.NODUS_FIREBASE_AUTH_URL || "https://nodus-connect-kau-2026.web.app/google-login.html";
 const startMinimized = process.argv.includes("--minimized");
 const userDataDir = process.env.NODUS_USER_DATA_DIR;
+const extendedKeyboardCodes = new Set(["AltRight", "ArrowDown", "ArrowLeft", "ArrowRight", "ArrowUp", "ContextMenu", "ControlRight", "Delete", "End", "Home", "Insert", "MetaLeft", "MetaRight", "NumpadDivide", "NumpadEnter", "PageDown", "PageUp", "PrintScreen"]);
 
 app.setName("Nodus Connect");
+app.setAppUserModelId("com.nodus.connect.desktop");
+app.on("gpu-info-update", () => { gpuInfoReady = true; });
 if (userDataDir) app.setPath("userData", userDataDir);
 app.commandLine.appendSwitch("enable-zero-copy");
 app.commandLine.appendSwitch("enable-gpu-rasterization");
@@ -52,7 +57,6 @@ if (!gotLock) app.quit();
 app.on("second-instance", () => showMainWindow());
 app.whenReady().then(() => {
   if (!gotLock) return;
-  app.setAppUserModelId("com.nodus.connect");
   session.defaultSession.setPermissionRequestHandler((_webContents, permission, callback) => {
     callback(permission === "media" || permission === "display-capture");
   });
@@ -147,6 +151,13 @@ function createMainWindow() {
   });
   mainWindow.webContents.on("console-message", (_event, level, message, line, sourceId) => {
     if (level >= 2) appendLog(`renderer-console ${message} ${sourceId}:${line}`);
+  });
+  mainWindow.webContents.on("before-input-event", (event, input) => {
+    if (!remoteKeyboardCaptureActive || (input.type !== "keyDown" && input.type !== "keyUp")) return;
+    const remoteInput = toRemoteKeyboardInput(input);
+    if (!remoteInput) return;
+    event.preventDefault();
+    mainWindow.webContents.send("nodus:remote-key-input", input.type, remoteInput);
   });
 
   if (isDev) {
@@ -274,6 +285,29 @@ function setupIpc() {
       powerSaveBlockerId = -1;
     }
   });
+  ipcMain.handle("nodus:set-remote-keyboard-capture", (_event, active) => {
+    remoteKeyboardCaptureActive = Boolean(active);
+  });
+  ipcMain.handle("nodus:toggle-full-screen", (_event, enabled) => {
+    if (!mainWindow) return false;
+    const next = typeof enabled === "boolean" ? enabled : !mainWindow.isFullScreen();
+    mainWindow.setFullScreen(next);
+    return next;
+  });
+  ipcMain.handle("nodus:check-for-updates", async () => {
+    try {
+      const response = await fetch("https://api.github.com/repos/Kaueeteixeiraa/nodus-connect/releases/latest", { headers: { Accept: "application/vnd.github+json", "User-Agent": "Nodus-Connect" } });
+      if (!response.ok) throw new Error("UPDATE_CHECK_FAILED");
+      const release = await response.json();
+      return { ok: true, version: String(release.tag_name || "").replace(/^v/i, ""), url: String(release.html_url || "") };
+    } catch {
+      return { ok: false, error: "Não foi possível buscar atualizações agora." };
+    }
+  });
+  ipcMain.handle("nodus:restart-computer", () => {
+    const result = spawnSync("shutdown.exe", ["/r", "/t", "15", "/c", "Reinicialização autorizada pelo Nodus Connect"], { windowsHide: true });
+    return result.status === 0 ? { ok: true } : { ok: false, error: "O Windows recusou a reinicialização." };
+  });
   ipcMain.handle("nodus:set-startup-options", (_event, options) => {
     minimizeToTray = options?.minimizeToTray !== false;
     app.setLoginItemSettings({
@@ -311,6 +345,7 @@ function setupIpc() {
   ipcMain.handle("nodus:open-diagnostics", () => shell.showItemInFolder(path.join(app.getPath("userData"), "logs", "desktop.log")));
   ipcMain.handle("nodus:write-diagnostic", (_event, message) => appendLog(String(message || "").slice(0, 2000)));
   ipcMain.handle("nodus:write-performance", (_event, message) => appendLog(String(message || "").slice(0, 2000), "performance.log"));
+  ipcMain.handle("nodus:get-gpu-diagnostics", () => getGpuDiagnostics());
   ipcMain.handle("nodus:google-login", (_event, options) => googleLogin(options));
 }
 
@@ -323,7 +358,7 @@ function getNativeCaptureStatus() {
     return {
       available: true,
       supported,
-      backend: supported ? "chromium-wgc-mf" : "chromium-dxgi",
+      backend: "chromium-getdisplaymedia",
       d3d11Hardware: capabilities.d3d11Hardware === true,
       hardwareH264: capabilities.hardwareH264 === true,
       hardwareH264Encoders: Number(capabilities.hardwareH264Encoders || 0),
@@ -332,6 +367,20 @@ function getNativeCaptureStatus() {
   } catch {
     return { available: false, supported: false, backend: "chromium-getdisplaymedia" };
   }
+}
+
+async function getGpuDiagnostics() {
+  const info = await app.getGPUInfo("basic").catch(() => null);
+  const devices = Array.isArray(info?.gpuDevice) ? info.gpuDevice : [];
+  const device = devices.find((entry) => entry.active) || devices[0];
+  const features = gpuInfoReady ? app.getGPUFeatureStatus() : {};
+  return {
+    adapter: String(device?.deviceString || "").slice(0, 200),
+    videoEncode: features.video_encode || "unknown",
+    videoDecode: features.video_decode || "unknown",
+    gpuCompositing: features.gpu_compositing || "unknown",
+    gpuProcessAvailable: app.getAppMetrics().some((metric) => metric.type === "GPU"),
+  };
 }
 
 function getServiceStatus() {
@@ -477,7 +526,7 @@ function applyRemoteInput(input) {
 function encodeRemoteInput(input) {
   const packet = Buffer.allocUnsafe(16);
   const type = { mouseMove: 1, mouseDown: 2, mouseUp: 3, wheel: 4, keyDown: 5, keyUp: 6 }[input.type] || 0;
-  const button = input.button === "right" ? 2 : input.button === "middle" ? 1 : 0;
+  const button = type === 5 || type === 6 ? (input.extended ? 1 : 0) : input.button === "right" ? 2 : input.button === "middle" ? 1 : 0;
   packet.writeUInt8(type, 0);
   packet.writeUInt8(button, 1);
   packet.writeUInt16LE(input.keyCode || 0, 2);
@@ -507,9 +556,25 @@ function normalizeRemoteInput(input, bounds) {
   if (input.type === "wheel") return { type: "wheel", delta: Math.max(-1200, Math.min(1200, Number(input.delta) || 0)) };
   if (input.type === "keyDown" || input.type === "keyUp") {
     const keyCode = Number(input.keyCode);
-    return keyCode > 0 && keyCode < 256 ? { type: input.type, keyCode } : null;
+    return keyCode > 0 && keyCode < 256 ? { type: input.type, keyCode, extended: extendedKeyboardCodes.has(String(input.code)) } : null;
   }
   return null;
+}
+
+function toRemoteKeyboardInput(input) {
+  const code = String(input.code || input.key || "");
+  const keyCode = Number(input.keyCode) || remoteVirtualKey(code);
+  if (keyCode <= 0 || keyCode >= 256) return null;
+  return { keyCode, code, location: Number(input.location) || 0, repeat: Boolean(input.isAutoRepeat) };
+}
+
+function remoteVirtualKey(code) {
+  if (/^Key[A-Z]$/.test(code)) return code.charCodeAt(3);
+  if (/^Digit[0-9]$/.test(code)) return code.charCodeAt(5);
+  if (/^[A-Z]$/.test(code)) return code.charCodeAt(0);
+  if (/^[0-9]$/.test(code)) return code.charCodeAt(0);
+  if (/^F(?:[1-9]|1[0-9]|2[0-4])$/.test(code)) return 111 + Number(code.slice(1));
+  return { Backspace: 8, Tab: 9, Enter: 13, ShiftLeft: 16, ShiftRight: 16, ControlLeft: 17, ControlRight: 17, AltLeft: 18, AltRight: 18, Escape: 27, Space: 32, PageUp: 33, PageDown: 34, End: 35, Home: 36, ArrowLeft: 37, ArrowUp: 38, ArrowRight: 39, ArrowDown: 40, Insert: 45, Delete: 46, Meta: 91, MetaLeft: 91, MetaRight: 92, ContextMenu: 93 }[code] || 0;
 }
 
 function ensureInputHelper() {
@@ -538,8 +603,8 @@ while (($line = [Console]::In.ReadLine()) -ne $null) {
     elseif ($m.type -eq "mouseDown") { $b = $map[$m.button]; [NodusInput]::mouse_event([uint32]$b[0], 0, 0, 0, [UIntPtr]::Zero) }
     elseif ($m.type -eq "mouseUp") { $b = $map[$m.button]; [NodusInput]::mouse_event([uint32]$b[1], 0, 0, 0, [UIntPtr]::Zero) }
     elseif ($m.type -eq "wheel") { [NodusInput]::mouse_event(0x0800, 0, 0, [int]$m.delta, [UIntPtr]::Zero) }
-    elseif ($m.type -eq "keyDown") { [NodusInput]::keybd_event([byte]$m.keyCode, 0, 0, [UIntPtr]::Zero) }
-    elseif ($m.type -eq "keyUp") { [NodusInput]::keybd_event([byte]$m.keyCode, 0, 2, [UIntPtr]::Zero) }
+    elseif ($m.type -eq "keyDown") { $flags = if ($m.extended) { 1 } else { 0 }; [NodusInput]::keybd_event([byte]$m.keyCode, 0, [uint32]$flags, [UIntPtr]::Zero) }
+    elseif ($m.type -eq "keyUp") { $flags = if ($m.extended) { 3 } else { 2 }; [NodusInput]::keybd_event([byte]$m.keyCode, 0, [uint32]$flags, [UIntPtr]::Zero) }
   } catch {}
 }
 `;
@@ -655,15 +720,17 @@ function emitGoogleLoginResult(result) {
 }
 
 function renderGoogleLoginPage(ok, title, message, script = "") {
+  const logo = fs.readFileSync(path.resolve(__dirname, "../../../build/icon.svg"), "utf8");
+  const logoUrl = `data:image/svg+xml;base64,${Buffer.from(logo).toString("base64")}`;
   return `<!doctype html><html><head><meta charset="utf-8"><title>Nodus Connect</title><style>
     body{margin:0;min-height:100vh;display:grid;place-items:center;background:#050811;color:#f4f8ff;font-family:Inter,Segoe UI,Arial,sans-serif}
     body:before{content:"";position:fixed;inset:0;background:linear-gradient(115deg,rgba(20,145,255,.2),transparent 52%),radial-gradient(circle at 75% 35%,rgba(37,230,255,.18),transparent 32%);pointer-events:none}
     .card{position:relative;width:min(460px,calc(100vw - 36px));padding:28px;border:1px solid rgba(75,160,255,.28);border-radius:18px;background:rgba(6,12,24,.86);box-shadow:0 24px 80px rgba(0,0,0,.42)}
-    .mark{width:46px;height:46px;display:grid;place-items:center;border:1px solid #2d9bff;border-radius:12px;color:#25e6ff;font-weight:900;margin-bottom:18px}
+    .mark{width:46px;height:46px;display:grid;place-items:center;border:1px solid #2d9bff;border-radius:12px;background:#0a1729;margin-bottom:18px}.mark img{width:88%;height:88%;object-fit:contain}
     .pill{display:inline-flex;gap:8px;align-items:center;color:${ok ? "#25e6ff" : "#ff9aac"};font-size:12px;font-weight:900;text-transform:uppercase;letter-spacing:.12em}
     .pill:before{content:"";width:8px;height:8px;border-radius:50%;background:currentColor;box-shadow:0 0 14px currentColor}
     h1{margin:10px 0 8px;font-size:28px}p{margin:0;color:#9fb0c7;line-height:1.5}.hint{margin-top:18px;color:#58b7ff;font-weight:800}
-  </style></head><body><main class="card"><div class="mark">N</div><span class="pill">${ok ? "Deu certo" : "Nao deu certo"}</span><h1>${escapeHtml(title)}</h1><p>${escapeHtml(message)}</p><p class="hint">Esta aba pode ser fechada.</p></main><script>${script || (ok ? "setTimeout(function(){window.close()},1200)" : "")}</script></body></html>`;
+  </style></head><body><main class="card"><div class="mark"><img src="${logoUrl}" alt=""></div><span class="pill">${ok ? "Deu certo" : "Nao deu certo"}</span><h1>${escapeHtml(title)}</h1><p>${escapeHtml(message)}</p><p class="hint">Esta aba pode ser fechada.</p></main><script>${script || (ok ? "setTimeout(function(){window.close()},1200)" : "")}</script></body></html>`;
 }
 
 function escapeHtml(value) {

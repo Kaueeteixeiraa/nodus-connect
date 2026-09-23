@@ -8,12 +8,17 @@ interface Window {
     getServerInfo(): Promise<{ port: number; urls: string[] }>;
     getAppInfo(): Promise<{ version: string; googleClientConfigured?: boolean }>;
     getNativeCaptureStatus(): Promise<{ available: boolean; supported: boolean; backend?: string; d3d11Hardware?: boolean; hardwareH264?: boolean; hardwareH264Encoders?: number; adapter?: string }>;
+    getGpuDiagnostics(): Promise<{ adapter: string; videoEncode: string; videoDecode: string; gpuCompositing: string; gpuProcessAvailable: boolean }>;
     getServiceStatus(): Promise<{ installed: boolean; running: boolean }>;
     installService(): Promise<{ ok: boolean; error?: string }>;
     uninstallService(): Promise<{ ok: boolean; error?: string }>;
     startService(): Promise<{ ok: boolean; error?: string }>;
     stopService(): Promise<{ ok: boolean; error?: string }>;
     setRemoteControlActive(active: boolean): Promise<void>;
+    setRemoteKeyboardCapture(active: boolean): Promise<void>;
+    toggleFullScreen(enabled?: boolean): Promise<boolean>;
+    checkForUpdates(): Promise<{ ok: boolean; version?: string; url?: string; error?: string }>;
+    restartComputer(): Promise<{ ok: boolean; error?: string }>;
     setStartupOptions(options: { startWithWindows: boolean; startMinimized: boolean; minimizeToTray: boolean }): Promise<void>;
     applyRemoteInput(input: unknown): void;
     getCaptureSources(): Promise<Array<{ id: string; name: string; displayId: string; width: number; height: number }>>;
@@ -39,5 +44,6 @@ interface Window {
           | { ok: false; error: string },
       ) => void,
     ): () => void;
+    onRemoteKeyInput?(callback: (type: "keyDown" | "keyUp", input: { keyCode: number; code: string; location: number; repeat: boolean }) => void): () => void;
   };
 }

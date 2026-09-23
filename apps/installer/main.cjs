@@ -258,9 +258,11 @@ function wait(ms) {
 
 function createShortcuts(options) {
   const exe = path.join(installDir, "Nodus Connect.exe");
+  const programsDir = path.join(process.env.APPDATA || path.join(os.homedir(), "AppData", "Roaming"), "Microsoft", "Windows", "Start Menu", "Programs");
   const desktop = path.join(os.homedir(), "Desktop", "Nodus Connect.lnk");
-  const startDir = path.join(process.env.APPDATA || path.join(os.homedir(), "AppData", "Roaming"), "Microsoft", "Windows", "Start Menu", "Programs", "Nodus Connect");
-  const startupDir = path.join(process.env.APPDATA || path.join(os.homedir(), "AppData", "Roaming"), "Microsoft", "Windows", "Start Menu", "Programs", "Startup");
+  const startDir = path.join(programsDir, "Nodus Connect");
+  const startupDir = path.join(programsDir, "Startup");
+  fs.rmSync(path.join(programsDir, "Nodus Connect Setup.lnk"), { force: true });
   if (options.desktopShortcut) fs.mkdirSync(path.dirname(desktop), { recursive: true });
   fs.mkdirSync(startDir, { recursive: true });
   if (options.desktopShortcut) createShortcut(desktop, exe);
