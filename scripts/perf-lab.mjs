@@ -59,6 +59,8 @@ async function printReport(reportArgs) {
   const distribution = Object.fromEntries([...new Set(bottlenecks)].map((name) => [name, bottlenecks.filter((item) => item === name).length]));
   const encoder = mode(sender.map((item) => item.encoder).filter(Boolean)) ?? "unknown";
   const activeRender = viewer.filter((item) => item.activePicture === true && item.renderFps > 0);
+  const presentedFps = counterRate(viewer, "rendered");
+  const callbackFps = round(average(viewer, "renderCallbacksFps")) ?? round(average(viewer, "renderFps"));
   const validPlayout = receiver.filter((item) => item.jitterBufferMsValid !== false);
   const motion = mode(receiver.map((item) => item.contentMotion).filter(Boolean)) ?? "UNKNOWN";
   const profileEvents = events.filter((item) => item.event === "profile-change");
@@ -67,11 +69,21 @@ async function printReport(reportArgs) {
   const bottleneckOrder = Object.entries(distribution).sort((a, b) => b[1] - a[1]);
   const report = {
     sessionId,
+    diagnostic: {
+      label: mode(windowSamples.map((item) => item.diagnosticLabel).filter(Boolean)) ?? null,
+      lightweightMode: Object.fromEntries(["host", "viewer"].map((role) => [role, mode(windowSamples.filter((item) => item.role === role).map((item) => item.lightweightMode).filter((value) => typeof value === "boolean")) ?? null])),
+      configured: [...host].reverse().find((item) => item.configuredVideo)?.configuredVideo ?? null,
+      actual: [...host].reverse().find((item) => item.actualVideo)?.actualVideo ?? null,
+      pixelsPerSecond: (() => {
+        const capture = [...host].reverse().find((item) => item.actualVideo?.capture)?.actualVideo.capture;
+        return capture?.width && capture?.height && capture?.frameRate ? Math.round(capture.width * capture.height * capture.frameRate) : null;
+      })(),
+    },
     windowSeconds: Math.round(Math.min(...Object.entries(latestByRole).map(([role, latest]) => (latest - Math.min(...windowSamples.filter((item) => item.role === role).map((item) => Date.parse(item.at)))) / 1000))),
     samples: windowSamples.length,
     roles: [...new Set(windowSamples.map((item) => item.role))],
-    fps: Object.fromEntries(["captureFps", "encodedFps", "sentFps", "receivedFps", "decodedFps", "renderFps"].map((key) => [key, round(average(["captureFps", "encodedFps", "sentFps"].includes(key) ? sender : key === "renderFps" ? receiver : viewer, key))])),
-    renderFps1PercentLow: activeRender.length >= 20 ? round(percentile(activeRender, "renderFps", 0.01)) : null,
+    fps: { ...Object.fromEntries(["captureFps", "encodedFps", "sentFps", "receivedFps", "decodedFps"].map((key) => [key, round(average(["captureFps", "encodedFps", "sentFps"].includes(key) ? sender : viewer, key))])), renderFps: presentedFps ?? callbackFps, renderCallbacksFps: callbackFps },
+    renderFps1PercentLow: activeRender.length >= 20 && activeRender.every((item) => item.renderMeasurement === "presentedFrames") ? round(percentile(activeRender, "renderFps", 0.01)) : null,
     network: {
       bitrateKbps: round(average(receiver, "bitrateKbps")),
       bitrateKbpsPeak: round(maximum(receiver, "bitrateKbps")),
@@ -92,6 +104,7 @@ async function printReport(reportArgs) {
       encoder,
       encoderKind: mode(sender.map((item) => item.encoderKind).filter(Boolean)) ?? classifyEncoder(encoder),
       encoderFallbackReason: mode(host.map((item) => item.encoderFallbackReason).filter(Boolean)) ?? "unknown",
+      qualityLimitation: mode(host.map((item) => item.limitation).filter(Boolean)) ?? "unknown",
       decoder: mode(viewer.map((item) => item.decoder).filter(Boolean)) ?? "unknown",
       decoderKind: classifyDecoder(mode(viewer.map((item) => item.decoder).filter(Boolean)) ?? ""),
       encodeMs: round(average(sender.filter((item) => item.encodedFps > 0), "encodeMs")),
@@ -111,6 +124,7 @@ async function printReport(reportArgs) {
       targetFps: round(average(sender, "targetFps")),
       contentMotion: motion,
       fpsInterpretation: motion === "LOW" ? "LOW MOTION INFERRED - FPS NOT SUITABLE FOR CAPACITY ANALYSIS" : motion === "UNKNOWN" ? "MOTION UNAVAILABLE" : "MOTION OBSERVED - COMPARE BOTH PEERS",
+      renderFpsSource: presentedFps !== null ? "presentedFrames counter" : "video frame callback rate",
       appliedFps: round(average(sender, "appliedFps")),
       appliedResolution: mode(sender.filter((item) => item.appliedWidth && item.appliedHeight).map((item) => `${item.appliedWidth}x${item.appliedHeight}`)) ?? "unknown",
       appliedBitrateKbps: round(average(sender, "appliedBitrateKbps")),
@@ -140,11 +154,12 @@ async function printReport(reportArgs) {
       viewer: gpuSummary(viewer),
     },
     warnings: [
-      average(viewer, "decodedFps") > 0 && average(viewer, "renderFps") < average(viewer, "decodedFps") * 0.85 ? "POSSIBLE RENDER BOTTLENECK" : null,
+      average(viewer, "decodedFps") > 0 && (presentedFps ?? average(viewer, "renderFps")) < average(viewer, "decodedFps") * 0.85 ? "POSSIBLE RENDER BOTTLENECK" : null,
+      presentedFps !== null && callbackFps !== null && callbackFps < presentedFps * 0.85 ? "FRAME CALLBACKS UNDERCOUNT PRESENTED FRAMES" : null,
       average(validPlayout, "jitterBufferMs") >= 150 ? "HIGH WEBRTC PLAYOUT DELAY (SOURCE UNDETERMINED)" : null,
     ].filter(Boolean),
     bottleneck: { predominant: mode(bottlenecks) ?? "UNKNOWN", secondary: bottleneckOrder[1]?.[0] ?? "UNKNOWN", confidence: round(average(windowSamples, "bottleneckConfidence")), distribution },
-    events: events.map(({ at, event, from, to, reason, source }) => ({ at, event, from, to, reason, source })),
+    events: events.map(({ at, event, from, to, reason, source, before, after }) => ({ at, event, from, to, reason, source, before, after })),
   };
   console.log(JSON.stringify(report, null, 2));
 }
@@ -161,6 +176,13 @@ function counterDelta(items, key) {
   const values = items.map((item) => item.counters?.[key]).filter((value) => typeof value === "number" && Number.isFinite(value));
   if (values.length < 2) return null;
   return values.slice(1).reduce((total, value, index) => total + Math.max(0, value - values[index]), 0);
+}
+
+function counterRate(items, key) {
+  const valid = items.filter((item) => typeof item.counters?.[key] === "number" && Number.isFinite(Date.parse(item.at)));
+  if (valid.length < 2 || valid.some((item, index) => index > 0 && item.counters[key] < valid[index - 1].counters[key])) return null;
+  const seconds = (Date.parse(valid.at(-1).at) - Date.parse(valid[0].at)) / 1000;
+  return seconds > 0 ? round((valid.at(-1).counters[key] - valid[0].counters[key]) / seconds) : null;
 }
 
 function maximum(items, key) {

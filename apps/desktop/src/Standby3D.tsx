@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import * as THREE from "three";
 import nodusLogo from "./assets/nodus-logo.png?inline";
 
-function faceTexture(): THREE.CanvasTexture {
+function faceTexture(logoFilter: string): THREE.CanvasTexture {
   const canvas = document.createElement("canvas");
   canvas.width = 512;
   canvas.height = 704;
@@ -32,7 +32,10 @@ function faceTexture(): THREE.CanvasTexture {
   texture.colorSpace = THREE.SRGBColorSpace;
   const logo = new Image();
   logo.onload = () => {
+    context.save();
+    context.filter = logoFilter;
     context.drawImage(logo, 88, 184, 336, 336);
+    context.restore();
     texture.needsUpdate = true;
   };
   logo.src = nodusLogo;
@@ -107,7 +110,8 @@ export default function Standby3D() {
     light.position.set(2, 2, 5);
     scene.add(light);
 
-    const texture = faceTexture();
+    const logoFilter = getComputedStyle(canvas.closest(".apex-app")!).getPropertyValue("--nodus-logo-filter").trim() || "none";
+    const texture = faceTexture(logoFilter);
     const glow = glowTexture();
     const aura = new THREE.Sprite(new THREE.SpriteMaterial({ map: glow, color: 0x167bff, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false, opacity: 0.48 }));
     aura.scale.set(5.5, 6.5, 1);

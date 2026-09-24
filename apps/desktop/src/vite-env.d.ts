@@ -7,6 +7,8 @@ interface Window {
     saveIdentity(identity: unknown): Promise<void>;
     getServerInfo(): Promise<{ port: number; urls: string[] }>;
     getAppInfo(): Promise<{ version: string; googleClientConfigured?: boolean }>;
+    setThemeIcon(theme: string, dataUrl: string): Promise<boolean>;
+    getPerformanceDiagnostic(): Promise<{ label: string; videoOnly: boolean; resolution?: string; fps?: number; bitrate?: number; maxFramerate?: number; scaleResolutionDownBy?: number; lockAdaptive: boolean } | null>;
     getNativeCaptureStatus(): Promise<{ available: boolean; supported: boolean; backend?: string; d3d11Hardware?: boolean; hardwareH264?: boolean; hardwareH264Encoders?: number; adapter?: string }>;
     getGpuDiagnostics(): Promise<{ adapter: string; videoEncode: string; videoDecode: string; gpuCompositing: string; gpuProcessAvailable: boolean }>;
     getServiceStatus(): Promise<{ installed: boolean; running: boolean }>;

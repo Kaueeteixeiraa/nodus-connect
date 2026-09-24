@@ -16,6 +16,12 @@ contextBridge.exposeInMainWorld("nodusDesktop", {
   getAppInfo() {
     return ipcRenderer.invoke("nodus:get-app-info");
   },
+  setThemeIcon(theme, dataUrl) {
+    return ipcRenderer.invoke("nodus:set-theme-icon", theme, dataUrl);
+  },
+  getPerformanceDiagnostic() {
+    return ipcRenderer.invoke("nodus:get-performance-diagnostic");
+  },
   getNativeCaptureStatus() {
     return ipcRenderer.invoke("nodus:get-native-capture-status");
   },

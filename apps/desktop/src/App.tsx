@@ -123,13 +123,14 @@ import {
 import { createFileCryptoSession, decryptFileChunk, deriveFileCryptoKey, encryptFileChunk, type FileCryptoSession } from "./core/file-crypto";
 import { CapturePool, type CaptureLease, type PooledCapture } from "./core/capture-pool";
 import nodusLogo from "./assets/nodus-logo.png?inline";
+import nodusIcon from "./assets/nodus-logo-icon.png?inline";
 import { advanceStage, assessQuality, nextBitrate, STAGE_LIMITS, type AdaptiveStage, type AdaptiveState, type QualitySample } from "./core/adaptive-quality";
 import { classifyDecoderImplementation, contentMotion, counterDelta, cumulativeMeanMs, diagnosePipeline, encoderFallbackReason, rtpJitterMs, smoothPipelineSample, type EncoderKind, type EncoderVendor, type PipelineBottleneck, type PipelineSample } from "./core/performance-monitor";
 
 const releaseNotes = [
+  { version: "0.4.20", changes: ["Acesso remoto aberto em janela própria.", "Tela principal permanece disponível durante a sessão."] },
   { version: "0.4.19", changes: ["Status dos dispositivos atualizado em tempo real.", "Tela de espera 3D opcional."] },
   { version: "0.4.18", changes: ["Espaço reduzido ao usar senha de acesso.", "Home mais compacta em telas menores."] },
-  { version: "0.4.17", changes: ["Painel de atualizações exibido acima da interface.", "Área superior da home mais compacta."] },
 ];
 
 const Standby3D = lazy(() => import("./Standby3D"));
@@ -153,6 +154,7 @@ type RemoteSession = {
   status: string;
   permissions: SessionPermission[];
 };
+type PerformanceDiagnostic = Awaited<ReturnType<NonNullable<Window["nodusDesktop"]>["getPerformanceDiagnostic"]>>;
 type SessionRuntime = {
   session: RemoteSession;
   remoteStream: MediaStream | null;
@@ -287,6 +289,8 @@ export function App() {
   const [hiddenCatalogDevices, setHiddenCatalogDevices] = useState<string[]>(() => loadHiddenCatalogDevices());
   const [favorites, setFavorites] = useState<string[]>(() => loadFavorites());
   const [settings, setSettings] = useState<LocalSettings>(() => loadSettings());
+  const [themePreview, setThemePreview] = useState<LocalSettings["theme"] | null>(null);
+  const [videoOnlyDiagnostic, setVideoOnlyDiagnostic] = useState(false);
   const [currentUser, setCurrentUser] = useState<LocalUser | null>(() => loadUser());
   const [folders, setFolders] = useState<DeviceFolder[]>(() => loadFolders());
   const [accessLog, setAccessLog] = useState<AccessLogEntry[]>(() => loadAccessLog());
@@ -299,6 +303,7 @@ export function App() {
   const [outgoingRequest, setOutgoingRequest] = useState<SessionRequestRecord | null>(null);
   const [sessionRuntimes, setSessionRuntimes] = useState<SessionRuntime[]>([]);
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
+  const [sessionWindowSessionId, setSessionWindowSessionId] = useState<string | null>(null);
   const [fileTransfers, setFileTransfers] = useState<FileTransferRecord[]>([]);
   const [fileChannelReady, setFileChannelReady] = useState<Record<string, boolean>>({});
   const [confirmDisconnectId, setConfirmDisconnectId] = useState<string | null>(null);
@@ -364,6 +369,7 @@ export function App() {
   const requestedResolutionsRef = useRef(new Map<string, RemoteResolution>());
   const requestedQualitiesRef = useRef(new Map<string, LocalSettings["connectionQuality"]>());
   const requestedFpsRef = useRef(new Map<string, RemoteFrameRate>());
+  const performanceDiagnosticRef = useRef<PerformanceDiagnostic>(null);
   const capturePoolRef = useRef(new CapturePool());
   const captureQueueRef = useRef<Promise<void>>(Promise.resolve());
   const captureCleanupRef = useRef(new Map<string, () => void>());
@@ -375,12 +381,16 @@ export function App() {
   const outgoingRequestRef = useRef<SessionRequestRecord | null>(null);
   const sessionsRef = useRef<SessionRuntime[]>([]);
   const remoteVideoRef = useRef<HTMLVideoElement | null>(null);
-  const renderStatsRef = useRef(new Map<string, { fps: number; dropped: number; presented: number }>());
+  const sessionWindowRef = useRef<Window | null>(null);
+  const sessionWindowIdRef = useRef<string | null>(null);
+  const renderStatsRef = useRef(new Map<string, { fps: number; callbackFps: number; dropped: number; presented: number }>());
   const activeRuntime = useMemo(
     () => sessionRuntimes.find((item) => item.session.sessionId === selectedSessionId) ?? sessionRuntimes[0] ?? null,
     [selectedSessionId, sessionRuntimes],
   );
   const activeSession = activeRuntime?.session ?? null;
+  const showSessionInMain = Boolean(activeSession && sessionWindowSessionId !== activeSession.sessionId);
+  const activeTheme = activeView === "settings" && !activeSession ? themePreview ?? settings.theme : settings.theme;
   const remoteStream = activeRuntime?.remoteStream ?? null;
   const controlReady = Boolean(activeRuntime?.controlReady);
   const sessionError = activeRuntime?.error ?? "";
@@ -411,8 +421,90 @@ export function App() {
   }, [outgoingRequest]);
 
   useEffect(() => {
-    document.documentElement.dataset.theme = settings.theme;
-  }, [settings.theme]);
+    if (!activeSession) {
+      const popup = sessionWindowRef.current;
+      sessionWindowRef.current = null;
+      sessionWindowIdRef.current = null;
+      setSessionWindowSessionId(null);
+      if (popup && !popup.closed) popup.close();
+      return;
+    }
+    const current = sessionWindowRef.current;
+    if (current && !current.closed && sessionWindowIdRef.current === activeSession.sessionId) return;
+    if (current && !current.closed) current.close();
+    const popup = window.open("about:blank", "nodus-remote-session", "popup=yes,width=1280,height=820");
+    if (!popup) return;
+    try {
+      popup.document.open();
+      popup.document.write(sessionWindowMarkup(activeSession));
+      popup.document.close();
+      sessionWindowRef.current = popup;
+      sessionWindowIdRef.current = activeSession.sessionId;
+      setSessionWindowSessionId(activeSession.sessionId);
+      popup.focus();
+    } catch {
+      popup.close();
+    }
+  }, [activeSession?.sessionId, activeSession?.role, activeSession?.remoteName]);
+
+  useEffect(() => {
+    const popup = sessionWindowRef.current;
+    if (!popup || popup.closed || !activeSession || activeSession.role !== "viewer" || sessionWindowIdRef.current !== activeSession.sessionId) return;
+    try {
+      const video = popup.document.querySelector("video");
+      if (video && video.srcObject !== remoteStream) {
+        video.srcObject = remoteStream;
+        video.play().catch(() => undefined);
+        popup.document.body.dataset.ready = remoteStream ? "true" : "false";
+      }
+    } catch {}
+  }, [activeSession?.sessionId, activeSession?.role, remoteStream, sessionWindowSessionId]);
+
+  useEffect(() => {
+    const onSessionWindowMessage = (event: MessageEvent) => {
+      const data = event.data as { source?: string; sessionId?: string; type?: string; input?: RemoteKeyInput; x?: number; y?: number; button?: number; delta?: number } | null;
+      if (!data || data.source !== "nodus-remote-session" || !data.sessionId) return;
+      const runtime = sessionsRef.current.find((item) => item.session.sessionId === data.sessionId);
+      if (!runtime) return;
+      if (data.type === "closed" || data.type === "disconnect") {
+        if (sessionWindowIdRef.current === data.sessionId) {
+          sessionWindowRef.current = null;
+          sessionWindowIdRef.current = null;
+          setSessionWindowSessionId(null);
+        }
+        disconnectSession(data.sessionId, true);
+        return;
+      }
+      if (runtime.session.role !== "viewer" || !runtime.controlReady) return;
+      if (data.type === "clipboard") return void sendClipboardToSession(data.sessionId);
+      if (data.type === "record") return void toggleRecording(data.sessionId);
+      if (data.type === "keyDown" || data.type === "keyUp") {
+        if (runtime.session.permissions.includes("keyboard:control") && data.input && Number.isInteger(data.input.keyCode)) sendRemoteInputToSession(data.sessionId, { type: data.type, ...data.input });
+        return;
+      }
+      if (data.type === "mouseMove" && runtime.session.permissions.includes("mouse:control")) sendRemoteInputToSession(data.sessionId, { type: "mouseMove", x: clampRatio(Number(data.x)), y: clampRatio(Number(data.y)) });
+      if ((data.type === "mouseDown" || data.type === "mouseUp") && runtime.session.permissions.includes("mouse:control")) sendRemoteInputToSession(data.sessionId, { type: data.type, button: Number(data.button) || 0, x: clampRatio(Number(data.x)), y: clampRatio(Number(data.y)) });
+      if (data.type === "wheel" && runtime.session.permissions.includes("mouse:control")) sendRemoteInputToSession(data.sessionId, { type: "wheel", delta: Number(data.delta) || 0 });
+    };
+    window.addEventListener("message", onSessionWindowMessage);
+    return () => window.removeEventListener("message", onSessionWindowMessage);
+  }, [identity.nodusId, settings.confirmBeforeDisconnect]);
+
+  useEffect(() => {
+    document.documentElement.dataset.theme = activeTheme;
+    const image = new Image();
+    image.onload = () => {
+      const canvas = document.createElement("canvas");
+      canvas.width = canvas.height = 256;
+      const context = canvas.getContext("2d");
+      if (!context) return;
+      context.filter = getComputedStyle(document.documentElement).getPropertyValue("--nodus-logo-filter").trim() || "none";
+      context.drawImage(image, 0, 0, 256, 256);
+      window.nodusDesktop?.setThemeIcon(activeTheme, canvas.toDataURL("image/png")).catch(() => undefined);
+    };
+    image.src = nodusIcon;
+    return () => { image.onload = null; };
+  }, [activeTheme]);
 
   useEffect(() => {
     applyLanguage(settings.language);
@@ -422,6 +514,10 @@ export function App() {
   useEffect(() => {
     document.documentElement.dataset.mode = settings.lightweightMode ? "simple" : "full";
   }, [settings.lightweightMode]);
+
+  useEffect(() => {
+    window.nodusDesktop?.getPerformanceDiagnostic().then((value) => { performanceDiagnosticRef.current = value; setVideoOnlyDiagnostic(value?.videoOnly === true); }).catch(() => undefined);
+  }, []);
 
   useEffect(() => {
     const shouldTrack = !settings.lightweightMode && sessionRuntimes.length === 0 && !incomingRequests.length && !outgoingRequest;
@@ -701,18 +797,27 @@ export function App() {
     const sessionId = activeSession?.sessionId;
     let callback = 0;
     let started = performance.now();
-    let frames = 0;
-    let dropped = 0;
-    let lastPresented = 0;
+    let callbacks = 0;
+    let baselinePresented: number | null = null;
+    let baselineDropped: number | null = null;
     const onFrame: VideoFrameRequestCallback = (now, metadata) => {
-      frames++;
-      if (lastPresented) dropped += Math.max(0, metadata.presentedFrames - lastPresented - 1);
-      lastPresented = metadata.presentedFrames;
-      if (sessionId && now - started >= 1000) {
-        renderStatsRef.current.set(sessionId, { fps: Math.round(frames * 1000 / (now - started)), dropped, presented: metadata.presentedFrames });
+      const playback = video.getVideoPlaybackQuality?.();
+      if (baselinePresented === null) {
+        baselinePresented = metadata.presentedFrames;
+        baselineDropped = playback?.droppedVideoFrames ?? null;
         started = now;
-        frames = 0;
-        dropped = 0;
+      } else callbacks++;
+      if (sessionId && now - started >= 1000) {
+        renderStatsRef.current.set(sessionId, {
+          fps: Math.round((metadata.presentedFrames - baselinePresented) * 1000 / (now - started)),
+          callbackFps: Math.round(callbacks * 1000 / (now - started)),
+          dropped: playback && baselineDropped !== null ? Math.max(0, playback.droppedVideoFrames - baselineDropped) : 0,
+          presented: metadata.presentedFrames,
+        });
+        started = now;
+        baselinePresented = metadata.presentedFrames;
+        baselineDropped = playback?.droppedVideoFrames ?? null;
+        callbacks = 0;
       }
       callback = video.requestVideoFrameCallback(onFrame);
     };
@@ -721,7 +826,7 @@ export function App() {
       video.removeEventListener("loadedmetadata", play);
       if (callback) video.cancelVideoFrameCallback(callback);
     };
-  }, [remoteStream, activeSession?.sessionId]);
+  }, [remoteStream, activeSession?.sessionId, showSessionInMain, videoOnlyDiagnostic]);
 
   useEffect(() => {
     if (!captureSources.length) return;
@@ -1176,6 +1281,8 @@ export function App() {
         let codec = "";
         let codecProfile = "";
         let limitation = "none";
+        let limitationDurations: Record<string, number> | null = null;
+        let outboundDropped: number | null = null;
         let encoder = "";
         let decoder = "";
         const codecs = new Map<string, { name: string; profile: string }>();
@@ -1221,6 +1328,8 @@ export function App() {
             encodedWidth = Math.max(encodedWidth, Number(item.frameWidth || 0));
             encodedHeight = Math.max(encodedHeight, Number(item.frameHeight || 0));
             limitation = String(item.qualityLimitationReason || limitation);
+            limitationDurations = (item as unknown as { qualityLimitationDurations?: Record<string, number> }).qualityLimitationDurations ?? limitationDurations;
+            if (typeof item.framesDropped === "number") outboundDropped = item.framesDropped;
             encoder = String(item.encoderImplementation || encoder);
             codecId = String(item.codecId || codecId);
           }
@@ -1351,8 +1460,23 @@ export function App() {
           }
         }
         logMediaDiagnostic(`media-stats id=${sessionId} role=${role} capture=${captureFps} encoded=${encodedFps} sent=${sentFps} received=${receivedFps} decoded=${decodedFps} bitrate=${bitrateKbps} encodeMs=${encodeMs} dropped=${droppedFrames} limit=${limitation} encoder=${encoder || "pending"}`);
+        const videoSender = role === "host" ? peer.getSenders().find((item) => item.track?.kind === "video") : undefined;
+        const senderParameters = videoSender?.getParameters();
+        const senderEncoding = senderParameters?.encodings?.[0];
+        const diagnostic = performanceDiagnosticRef.current;
         window.nodusDesktop?.writePerformance?.(JSON.stringify({ at: new Date().toISOString(), sessionId, role, ...metrics,
-          targetFps, activePicture, transport,
+          targetFps, activePicture, transport, lightweightMode: settings.lightweightMode, diagnosticLabel: diagnostic?.label ?? null,
+          renderMeasurement: role === "viewer" ? "presentedFrames" : null,
+          renderCallbacksFps: role === "viewer" ? render?.callbackFps ?? null : null,
+          configuredVideo: role === "host" ? { quality: requestedQuality, resolution: diagnostic?.resolution ?? requestedResolutionsRef.current.get(sessionId) ?? settings.preferredResolution, fps: diagnostic?.fps ?? targetFps, bitrate: diagnostic?.bitrate ?? null, diagnostic } : null,
+          actualVideo: videoSender ? {
+            capture: videoSender.track?.getSettings() ?? null, constraints: videoSender.track?.getConstraints() ?? null,
+            contentHint: videoSender.track?.contentHint ?? null,
+            sender: { maxBitrate: senderEncoding?.maxBitrate ?? null, maxFramerate: senderEncoding?.maxFramerate ?? null, scaleResolutionDownBy: senderEncoding?.scaleResolutionDownBy ?? null,
+              priority: senderEncoding?.priority ?? null, networkPriority: (senderEncoding as RTCRtpEncodingParameters & { networkPriority?: string } | undefined)?.networkPriority ?? null,
+              active: senderEncoding?.active ?? null, degradationPreference: senderParameters?.degradationPreference ?? null },
+            outbound: { width: encodedWidth || null, height: encodedHeight || null, framesDropped: outboundDropped, qualityLimitationDurations: limitationDurations },
+          } : null,
           gpu: { adapter: gpuDiagnosticsRef.current?.adapter || "", videoEncode: gpuDiagnosticsRef.current?.videoEncode || "unknown", videoDecode: gpuDiagnosticsRef.current?.videoDecode || "unknown", gpuCompositing: gpuDiagnosticsRef.current?.gpuCompositing || "unknown", gpuProcessAvailable: gpuDiagnosticsRef.current?.gpuProcessAvailable ?? null, hardwareH264Available: nativeCaptureStatusRef.current?.hardwareH264 ?? null },
           counters: role === "host" ? { captured, encoded, sent, packetsSent } : { received: receivedFrames, decoded, rendered: render?.presented ?? 0, dropped },
         })).catch(() => undefined);
@@ -1381,7 +1505,7 @@ export function App() {
                 adaptationReason: adaptive?.reason, quality } satisfies RemoteInputMessage));
             }
           }
-          updateRuntime(sessionId, { metrics });
+          if (!(role === "viewer" && performanceDiagnosticRef.current?.videoOnly)) updateRuntime(sessionId, { metrics });
         }
       } catch {} finally { inspecting = false; }
     };
@@ -1400,6 +1524,7 @@ export function App() {
     if (role !== "host") return senderFeedbackRef.current.get(sessionId)?.quality ?? (requestedQuality === "economy" ? "economy" : requestedQuality === "high" ? "high" : "balanced");
     const sender = peer.getSenders().find((item) => item.track?.kind === "video");
     if (!sender) return "balanced";
+    if (performanceDiagnosticRef.current?.lockAdaptive) return requestedQuality === "economy" ? "economy" : requestedQuality === "high" ? "high" : "balanced";
     const minimum = requestedQuality === "economy" ? 2 : requestedQuality === "balanced" ? 1 : 0;
     const now = performance.now();
     const current = adaptiveStateRef.current.get(sessionId) ?? { stage: minimum as AdaptiveStage, badSamples: 0, stableSamples: 0, changedAt: now, changeCount: 0, startedAt: now, reason: "initial profile", source: "none" as const };
@@ -1438,6 +1563,7 @@ export function App() {
     try {
       const parameters = sender.getParameters();
       if (!parameters.encodings.length) parameters.encodings = [{}];
+      const before = { ...parameters.encodings[0] };
       parameters.degradationPreference = "maintain-framerate";
       parameters.encodings[0].maxBitrate = roundedBitrate;
       parameters.encodings[0].maxFramerate = fps;
@@ -1452,7 +1578,7 @@ export function App() {
       if (changed) window.nodusDesktop?.writePerformance?.(JSON.stringify({ at: new Date().toISOString(), sessionId, role, event: "profile-change", from: current.stage, to: next.stage,
         reason: pressure.reason, source: pressure.source, rttMs: sample.rttMs, lossPct: sample.lossPct, rtpJitterMs: sample.jitterMs,
         playoutMs: sample.jitterBufferMs ?? null, encodeMs: sample.encodeMs, packetSendDelayMs: sample.packetSendDelayMs ?? null,
-        profileChangeCount: next.changeCount })).catch(() => undefined);
+        before, after: sender.getParameters().encodings[0], profileChangeCount: next.changeCount })).catch(() => undefined);
       logMediaDiagnostic(`quality-stage id=${sessionId} stage=${next.stage} scale=${scale.toFixed(2)} fps=${fps} bitrate=${roundedBitrate} reason=${reason}`);
     } catch {
       logMediaDiagnostic(`quality-stage-failed id=${sessionId} stage=${next.stage}`);
@@ -1463,14 +1589,15 @@ export function App() {
 
   async function tuneVideoSender(sender: RTCRtpSender, requestedFps = settings.maxFps, resolution = settings.preferredResolution) {
     try {
+      const diagnostic = performanceDiagnosticRef.current;
       const parameters = sender.getParameters();
       if (!parameters.encodings.length) parameters.encodings = [{}];
-      const [targetWidth, targetHeight] = resolution.split("x").map(Number);
+      const [targetWidth, targetHeight] = (diagnostic?.resolution ?? resolution).split("x").map(Number);
       const source = sender.track?.getSettings();
-      const scale = Math.max(1, (source?.width ?? targetWidth) / targetWidth, (source?.height ?? targetHeight) / targetHeight);
+      const scale = diagnostic?.scaleResolutionDownBy ?? Math.max(1, (source?.width ?? targetWidth) / targetWidth, (source?.height ?? targetHeight) / targetHeight);
       parameters.degradationPreference = "maintain-framerate";
-      parameters.encodings[0].maxBitrate = settings.connectionQuality === "high" ? (requestedFps > 60 ? 24_000_000 : 14_000_000) : 10_000_000;
-      parameters.encodings[0].maxFramerate = requestedFps;
+      parameters.encodings[0].maxBitrate = diagnostic?.bitrate ?? (settings.connectionQuality === "high" ? (requestedFps > 60 ? 24_000_000 : 14_000_000) : 10_000_000);
+      parameters.encodings[0].maxFramerate = diagnostic?.maxFramerate ?? diagnostic?.fps ?? requestedFps;
       parameters.encodings[0].scaleResolutionDownBy = scale;
       const prioritized = parameters.encodings[0] as RTCRtpEncodingParameters & { priority?: "very-low" | "low" | "medium" | "high"; networkPriority?: "very-low" | "low" | "medium" | "high" };
       prioritized.priority = "high";
@@ -2135,9 +2262,10 @@ export function App() {
   }
 
   function captureConstraints(value: LocalSettings, requestedResolution?: RemoteResolution, requestedFps?: RemoteFrameRate, source?: CaptureSource): MediaTrackConstraints {
-    const frameRate = requestedFps ?? value.maxFps;
-    const [width, height] = (requestedResolution ?? "1920x1080").split("x").map(Number);
-    const limit = value.connectionQuality === "economy" ? [Math.min(width, 1280), Math.min(height, 720)] : [width, height];
+    const diagnostic = performanceDiagnosticRef.current;
+    const frameRate = diagnostic?.fps ?? requestedFps ?? value.maxFps;
+    const [width, height] = (diagnostic?.resolution ?? requestedResolution ?? "1920x1080").split("x").map(Number);
+    const limit = value.connectionQuality === "economy" && !diagnostic?.resolution ? [Math.min(width, 1280), Math.min(height, 720)] : [width, height];
     if (source?.width && source?.height) {
       limit[0] = Math.min(limit[0], source.width);
       limit[1] = Math.min(limit[1], source.height);
@@ -2373,7 +2501,7 @@ export function App() {
 
   if (!identity.deviceNameConfirmed) {
     return (
-      <main className="onboarding">
+      <main className="onboarding" data-theme={activeTheme}>
         <div className="brand-mark">
           <img src={nodusLogo} alt="" />
         </div>
@@ -2406,8 +2534,8 @@ export function App() {
   }
 
   return (
-    <div className={`${settings.lightweightMode ? "apex-app simple-mode" : "apex-app"}${activeSession ? " remote-mode" : ""}`}>
-      {!settings.lightweightMode && <div className="page-noise" />}
+    <div data-theme={activeTheme} className={`${settings.lightweightMode ? "apex-app simple-mode" : "apex-app"}${showSessionInMain ? " remote-mode" : ""}${videoOnlyDiagnostic && showSessionInMain && activeSession?.role === "viewer" ? " video-only-diagnostic" : ""}`}>
+      {!settings.lightweightMode && !videoOnlyDiagnostic && <div className="page-noise" />}
       <aside className="app-sidebar">
         <div className="sidebar-brand">
           <div className="product logo" translate="no">
@@ -2438,8 +2566,8 @@ export function App() {
       <div className="app-workspace">
         <header className="workspace-header">
           <div>
-            <h1>{activeSession ? `Acessando ${activeSession.remoteName}` : activeView === "connection" ? `${pageTitle}, ${currentUser.name.split(" ")[0]}.` : pageTitle}</h1>
-            {!activeSession && <p className="workspace-subtitle">{pageSubtitle}</p>}
+            <h1>{showSessionInMain ? `Acessando ${activeSession?.remoteName}` : activeView === "connection" ? `${pageTitle}, ${currentUser.name.split(" ")[0]}.` : pageTitle}</h1>
+            {!showSessionInMain && <p className="workspace-subtitle">{pageSubtitle}</p>}
           </div>
           <div className="workspace-actions">
           <div className="release-notifications">
@@ -2465,17 +2593,18 @@ export function App() {
           </button>
           </div>
         </header>
-        <main className={activeSession ? "desktop-main session-main" : `desktop-main ${activeView}-main`}>
+        <main className={showSessionInMain ? "desktop-main session-main" : `desktop-main ${activeView}-main`}>
           {incomingRequests[0] && (
             <IncomingRequest request={incomingRequests[0]} onAccept={acceptIncoming} onDeny={denyIncoming} />
           )}
-        {activeSession ? (
+        {showSessionInMain && activeSession ? (
           <>
             <RemoteSessionPanel
               session={activeSession}
               remoteVideoRef={remoteVideoRef}
               controlReady={controlReady}
               hasRemoteStream={Boolean(remoteStream)}
+              videoOnlyDiagnostic={videoOnlyDiagnostic}
               error={sessionError}
               fileReady={activeFileReady}
               metrics={activeRuntime?.metrics ?? emptyMetrics()}
@@ -2547,13 +2676,15 @@ export function App() {
               appVersion={appVersion}
               captureSources={captureSources}
               initialSection={settingsSection}
+              onThemePreview={setThemePreview}
               settings={settings}
               updateSettings={updateSettings}
             />}
           </>
         )}
       </main>
-      {!activeSession && <footer className="workspace-footer"><div><span className="footer-online" /> Nodus conectado</div><div><LockKeyhole aria-hidden="true" size={15} /> Conexão criptografada</div></footer>}
+      {activeSession?.role === "viewer" && !showSessionInMain && <video aria-hidden="true" autoPlay className="session-render-monitor" muted playsInline ref={remoteVideoRef} />}
+      {!showSessionInMain && <footer className="workspace-footer"><div><span className="footer-online" /> Nodus conectado</div><div><LockKeyhole aria-hidden="true" size={15} /> Conexão criptografada</div></footer>}
       {confirmDisconnectId && (
         <ConfirmDialog
           remoteName={sessionsRef.current.find((item) => item.session.sessionId === confirmDisconnectId)?.session.remoteName ?? "este acesso"}
@@ -2612,6 +2743,17 @@ function ConfirmDialog({
       </section>
     </div>
   );
+}
+
+function sessionWindowMarkup(session: RemoteSession) {
+  const viewer = session.role === "viewer";
+  const config = JSON.stringify({ sessionId: session.sessionId, viewer });
+  const body = viewer
+    ? `<main class="workspace"><div class="screen" tabindex="0"><video autoplay playsinline></video><p class="waiting">Aguardando imagem do outro computador...</p></div><aside><h2>Status da conexão</h2><p class="live"><i></i> Conectado</p><dl><div><dt>Dispositivo</dt><dd>${escapeMarkup(session.remoteName)}</dd></div><div><dt>Segurança</dt><dd>Criptografada</dd></div><div><dt>Controle</dt><dd>Ativo</dd></div></dl></aside></main><footer><span>Clique na tela para controlar mouse e teclado.</span><span>Conexão criptografada</span></footer>`
+    : `<main class="host-main"><section class="sharing"><img class="sharing-icon" src="${nodusLogo}" alt="" /><p class="eyebrow">Compartilhamento em andamento</p><h1>Sua tela está sendo compartilhada com <strong>${escapeMarkup(session.remoteName)}</strong></h1><p>O acesso permanece visível enquanto esta janela estiver aberta.</p><div class="live"><i></i> Conectado e protegido</div><section class="permissions"><h2>Permissões desta sessão</h2><span>Visualizar sua tela</span><span>Controlar mouse e teclado</span><span>Transferir arquivos</span><span>Sincronizar texto copiado</span></section></section></main><footer><span>Nodus Connect | Compartilhamento autorizado</span><span>Conexão criptografada</span></footer>`;
+  return `<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><title>Nodus Connect - Acesso remoto</title><style>
+    *{box-sizing:border-box}body{margin:0;min-width:720px;height:100vh;display:grid;grid-template-rows:68px minmax(0,1fr) 30px;overflow:hidden;background:#030914;color:#eef8ff;font-family:"Segoe UI",system-ui,sans-serif}body:before{position:fixed;inset:0;content:"";pointer-events:none;background:linear-gradient(rgba(61,154,225,.06) 1px,transparent 1px),linear-gradient(90deg,rgba(61,154,225,.06) 1px,transparent 1px),radial-gradient(circle at 52% 38%,rgba(11,137,230,.16),transparent 35%);background-size:54px 54px,54px 54px,auto}header,footer{position:relative;z-index:1;display:flex;align-items:center;justify-content:space-between;gap:16px;padding:9px 22px;border-color:rgba(70,166,230,.25);background:rgba(2,10,20,.94)}header{border-bottom:1px solid rgba(70,166,230,.25)}footer{border-top:1px solid rgba(70,166,230,.18);color:#a7c8e2;font-size:12px}.brand{display:flex;align-items:center;gap:10px;font-size:16px;font-weight:900;letter-spacing:.08em}.brand img{width:42px;height:42px;object-fit:contain}.brand span{display:block;color:#4bcaff;font-size:12px;letter-spacing:0}.peer{flex:1;min-width:0}.peer b{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.peer small{color:#9bc0da}.actions{display:flex;gap:8px}button{border:1px solid rgba(66,168,235,.38);border-radius:7px;background:#07182b;color:#eaf6ff;padding:9px 12px;font:700 12px inherit;cursor:pointer}button:hover{border-color:#42c6ff}button[data-disconnect]{border-color:rgba(255,101,128,.46);background:#481521}.workspace{position:relative;z-index:1;display:grid;grid-template-columns:minmax(0,1fr) 292px;min-height:0;gap:12px;padding:12px}.screen{position:relative;min-width:0;min-height:0;outline:0;border:1px solid rgba(49,150,221,.44);border-radius:9px;background:#01050b;cursor:default}.screen:focus{border-color:#47c9ff;box-shadow:0 0 0 2px rgba(71,201,255,.15)}video{width:100%;height:100%;object-fit:contain}.waiting{position:absolute;top:50%;left:50%;margin:0;transform:translate(-50%,-50%);color:#9cb7ca;font-weight:700}body[data-ready="true"] .waiting{display:none}aside,.sharing{border:1px solid rgba(49,150,221,.42);border-radius:10px;background:rgba(4,18,33,.94);box-shadow:inset 0 1px rgba(221,243,255,.06)}aside{padding:18px}h2{margin:0 0 15px;font-size:15px}.live{display:flex;align-items:center;gap:8px;color:#20dfa2;font-size:12px;font-weight:800}.live i{width:8px;height:8px;border-radius:50%;background:#20dfa2;box-shadow:0 0 12px rgba(32,223,162,.8)}dl{margin:16px 0}dl div{display:flex;justify-content:space-between;gap:8px;padding:10px 0;border-top:1px solid rgba(72,155,216,.16);font-size:12px}dt{color:#9abbd3}dd{margin:0;color:#edf8ff;font-weight:700}.host-main{position:relative;z-index:1;display:grid;min-height:0;place-items:center;padding:24px}.sharing{width:min(760px,100%);padding:28px;text-align:center}.sharing-icon{width:70px;height:70px;object-fit:contain;margin:0 auto 10px}.eyebrow{margin:0 0 7px;color:#46caff;font-size:11px;font-weight:900;letter-spacing:.13em;text-transform:uppercase}.sharing h1{max-width:620px;margin:0 auto;color:#f6fbff;font-size:26px;line-height:1.25}.sharing h1 strong{color:#4ccaff}.sharing>p:not(.eyebrow){margin:10px auto 16px;color:#9fc2dc;font-size:13px}.sharing>.live{justify-content:center;padding:10px;border-top:1px solid rgba(72,155,216,.16);border-bottom:1px solid rgba(72,155,216,.16)}.permissions{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin-top:16px;text-align:left}.permissions h2{grid-column:1/-1;margin:0}.permissions span{padding:10px;border:1px solid rgba(72,155,216,.2);border-radius:7px;background:rgba(6,29,50,.7);color:#cce6f8;font-size:12px}.permissions span:before{content:"✓";margin-right:7px;color:#20dfa2;font-weight:900}@media(max-width:850px){body{min-width:0}.workspace{grid-template-columns:1fr}.workspace aside{display:none}.peer{display:none}.host-main{padding:14px}.sharing{padding:22px}.sharing h1{font-size:21px}}
+  </style></head><body data-ready="false"><header><div class="brand"><img src="${nodusLogo}" alt="" /><div>NODUS <span>Connect</span></div></div><div class="peer"><b>${escapeMarkup(session.remoteName)}</b><small>${viewer ? "Acesso remoto em andamento" : "Você está compartilhando sua tela"}</small></div><div class="actions">${viewer ? '<button data-clipboard>Área de transferência</button><button data-record>Gravar</button>' : ""}<button data-disconnect>Encerrar sessão</button></div></header>${body}<script>const config=${config};const post=(type,payload={})=>window.opener&&window.opener.postMessage({source:"nodus-remote-session",sessionId:config.sessionId,type,...payload},"*");document.querySelector("[data-disconnect]").addEventListener("click",()=>post("disconnect"));document.querySelector("[data-clipboard]")?.addEventListener("click",()=>post("clipboard"));document.querySelector("[data-record]")?.addEventListener("click",()=>post("record"));if(config.viewer){const surface=document.querySelector(".screen");const point=(event)=>{const box=surface.getBoundingClientRect(),video=surface.querySelector("video");let left=box.left,top=box.top,width=box.width,height=box.height;if(video.videoWidth&&video.videoHeight){const surfaceRatio=box.width/box.height,videoRatio=video.videoWidth/video.videoHeight;if(surfaceRatio>videoRatio){width=box.height*videoRatio;left+=(box.width-width)/2}else{height=box.width/videoRatio;top+=(box.height-height)/2}}return{x:Math.max(0,Math.min(1,(event.clientX-left)/width)),y:Math.max(0,Math.min(1,(event.clientY-top)/height))}};surface.addEventListener("mousemove",event=>post("mouseMove",point(event)));surface.addEventListener("mousedown",event=>{event.preventDefault();surface.focus();post("mouseDown",{button:event.button,...point(event)})});surface.addEventListener("mouseup",event=>{event.preventDefault();post("mouseUp",{button:event.button,...point(event)})});surface.addEventListener("wheel",event=>{event.preventDefault();post("wheel",{delta:-event.deltaY})},{passive:false});const keyboard=(type,event)=>{if(document.activeElement!==surface)return;const keyCode=event.keyCode||event.which;if(keyCode<=0||keyCode>=256)return;event.preventDefault();event.stopPropagation();post(type,{input:{keyCode,code:event.code||event.key,location:event.location,repeat:event.repeat}})};window.addEventListener("keydown",event=>keyboard("keyDown",event),true);window.addEventListener("keyup",event=>keyboard("keyUp",event),true);surface.addEventListener("focus",()=>window.nodusDesktop?.setRemoteKeyboardCapture(true));window.addEventListener("blur",()=>window.nodusDesktop?.setRemoteKeyboardCapture(false));window.nodusDesktop?.onRemoteKeyInput((type,input)=>post(type,{input}));}window.addEventListener("beforeunload",()=>{window.nodusDesktop?.setRemoteKeyboardCapture(false);post("closed")});</script></body></html>`;
 }
 
 function remoteWindowMarkup(session: RemoteSession) {
@@ -3250,6 +3392,7 @@ function RemoteSessionPanel({
   error,
   fileReady,
   hasRemoteStream,
+  videoOnlyDiagnostic,
   onKeyInput,
   onClipboard,
   onDisconnect,
@@ -3290,6 +3433,7 @@ function RemoteSessionPanel({
   maxFps: LocalSettings["maxFps"];
   recording: boolean;
   hasRemoteStream: boolean;
+  videoOnlyDiagnostic: boolean;
   onKeyInput: (type: "keyDown" | "keyUp", input: RemoteKeyInput) => void;
   onClipboard: () => void;
   onDisconnect: () => void;
@@ -3374,6 +3518,7 @@ function RemoteSessionPanel({
       session={session}
     />;
   }
+  if (videoOnlyDiagnostic) return <section className="video-only-session"><video ref={remoteVideoRef} autoPlay disablePictureInPicture playsInline /></section>;
   const toggleTool = (tool: SessionTool) => setActiveTool((current) => current === tool ? null : tool);
   const viewerSessions = runtimes.filter((item) => item.session.role === "viewer");
   const enterFullscreen = async () => {
@@ -3708,12 +3853,14 @@ function Settings({
   appVersion,
   captureSources,
   initialSection,
+  onThemePreview,
   settings,
   updateSettings,
 }: {
   appVersion: string;
   captureSources: CaptureSource[];
   initialSection: SettingsSection;
+  onThemePreview: (theme: LocalSettings["theme"] | null) => void;
   settings: LocalSettings;
   updateSettings: (patch: Partial<LocalSettings>) => void;
 }) {
@@ -3746,9 +3893,9 @@ function Settings({
   }, [initialSection]);
 
   useEffect(() => {
-    document.documentElement.dataset.theme = draft.theme;
-    return () => { document.documentElement.dataset.theme = settings.theme; };
-  }, [draft.theme, settings.theme]);
+    onThemePreview(draft.theme);
+    return () => onThemePreview(null);
+  }, [draft.theme, onThemePreview]);
 
   return (
     <section className="content-panel settings-panel">

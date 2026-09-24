@@ -3464,7 +3464,8 @@ button[type="submit"]:hover,
 .remote-mode .remote-session { display:grid; grid-template-rows:80px minmax(0,1fr) 34px; width:100%; height:100%; padding:0; margin:0; border:0; border-radius:0; background:#030914; }
 .remote-mode *, .remote-mode *::before, .remote-mode *::after { animation: none !important; transition: none !important; }
 .remote-header { display:flex; align-items:center; gap:24px; min-width:0; padding:10px 28px; border-bottom:1px solid rgba(45,157,234,.28); background:rgba(2,10,20,.96); }
-.remote-brand { display:flex; align-items:center; gap:12px; min-width:155px; color:#f5fbff; font-size:17px; letter-spacing:.06em; }.remote-brand strong span { display:block; color:#24baff; font-size:13px; letter-spacing:0; }.remote-mark { display:grid; place-items:center; width:46px; height:46px; border:1px solid #2dc6ff; border-radius:9px; background:linear-gradient(145deg,#1baeff,#0769c9); box-shadow:0 0 25px rgba(8,160,255,.3); color:#fff; font-size:26px; font-weight:900; }
+.remote-brand { display:flex; align-items:center; gap:12px; min-width:155px; color:#f5fbff; font-size:17px; letter-spacing:.06em; }.remote-brand strong span { display:block; color:#24baff; font-size:13px; letter-spacing:0; }.remote-mark { display:grid; place-items:center; width:46px; height:46px; background:transparent; color:#fff; font-size:26px; font-weight:900; }
+.session-render-monitor { position:fixed; width:1px; height:1px; opacity:0; pointer-events:none; }
 .remote-peer { display:flex; align-items:center; gap:10px; min-width:200px; color:#42bdff; }.remote-peer strong,.remote-peer small { display:block; }.remote-peer strong { color:#f1f7ff; font-size:16px; }.remote-peer small { margin-top:3px; color:#9cc3e7; font-size:12px; }
 .remote-chips { display:flex; align-items:center; gap:10px; min-width:0; flex:1; }.remote-chips span { display:inline-flex; align-items:center; gap:7px; min-height:39px; padding:0 13px; border:1px solid rgba(37,139,211,.35); border-radius:8px; color:#cfe8fb; font-size:12px; font-weight:800; white-space:nowrap; }.remote-chips span svg { color:#21dca0; }.remote-chips span:nth-child(2) svg,.remote-chips span:nth-child(3) svg,.remote-chips span:nth-child(4) svg { color:#27bfff; }
 .remote-top-actions { display:flex; align-items:center; gap:10px; }.remote-icon-button { display:grid; place-items:center; width:43px; height:40px; border:1px solid rgba(50,151,226,.36); border-radius:7px; background:#061526; color:#cbe9ff; cursor:pointer; }.remote-end { min-height:42px; padding:0 17px; border-radius:8px; font-size:12px; }
@@ -6149,40 +6150,22 @@ button[type="submit"]:hover,
 .request-orbit img { width: 58px; height: 58px; object-fit: contain; }
 .apex-app .network-pulse strong img { width: 74%; height: 74%; object-fit: contain; }
 
-:root[data-theme="japan"] .brand-mark img,
-:root[data-theme="japan"] .product-icon img,
-:root[data-theme="japan"] .remote-mark img,
-:root[data-theme="japan"] .standby-symbol img,
-:root[data-theme="japan"] .request-orbit img,
-:root[data-theme="japan"] .network-pulse strong img { filter: hue-rotate(138deg) saturate(1.3); }
+.apex-app.video-only-diagnostic { grid-template-columns: minmax(0, 1fr); background: #000; }
+.video-only-diagnostic .app-sidebar,
+.video-only-diagnostic .workspace-header { display: none; }
+.video-only-diagnostic .app-workspace { grid-template-rows: minmax(0, 1fr); }
+.video-only-diagnostic .desktop-main.session-main { padding: 0 !important; border: 0; background: #000; }
+.video-only-session { width: 100%; height: 100%; background: #000; }
+.video-only-session video { width: 100%; height: 100%; object-fit: contain; }
 
-:root[data-theme="sakura-night"] .brand-mark img,
-:root[data-theme="sakura-night"] .product-icon img,
-:root[data-theme="sakura-night"] .remote-mark img,
-:root[data-theme="sakura-night"] .standby-symbol img,
-:root[data-theme="sakura-night"] .request-orbit img,
-:root[data-theme="sakura-night"] .network-pulse strong img { filter: hue-rotate(112deg) saturate(1.25); }
-
-:root[data-theme="neo-tokyo"] .brand-mark img,
-:root[data-theme="neo-tokyo"] .product-icon img,
-:root[data-theme="neo-tokyo"] .remote-mark img,
-:root[data-theme="neo-tokyo"] .standby-symbol img,
-:root[data-theme="neo-tokyo"] .request-orbit img,
-:root[data-theme="neo-tokyo"] .network-pulse strong img { filter: hue-rotate(72deg) saturate(1.18); }
-
-:root[data-theme="cosmos"] .brand-mark img,
-:root[data-theme="cosmos"] .product-icon img,
-:root[data-theme="cosmos"] .remote-mark img,
-:root[data-theme="cosmos"] .standby-symbol img,
-:root[data-theme="cosmos"] .request-orbit img,
-:root[data-theme="cosmos"] .network-pulse strong img { filter: hue-rotate(38deg) saturate(1.12); }
-
-:root[data-theme="arctic"] .brand-mark img,
-:root[data-theme="arctic"] .product-icon img,
-:root[data-theme="arctic"] .remote-mark img,
-:root[data-theme="arctic"] .standby-symbol img,
-:root[data-theme="arctic"] .request-orbit img,
-:root[data-theme="arctic"] .network-pulse strong img { filter: hue-rotate(-12deg) saturate(.9) brightness(1.08); }
+:root[data-theme="japan"] { --nodus-logo-filter: hue-rotate(138deg) saturate(1.6) brightness(1.12); }
+:root[data-theme="sakura-night"] { --nodus-logo-filter: hue-rotate(112deg) saturate(1.1) brightness(1.8) contrast(.7); }
+:root[data-theme="neo-tokyo"] { --nodus-logo-filter: hue-rotate(72deg) saturate(1.45) brightness(1.1); }
+:root[data-theme="cosmos"] { --nodus-logo-filter: hue-rotate(38deg) saturate(1.4) brightness(1.1); }
+:root[data-theme="arctic"] { --nodus-logo-filter: hue-rotate(-25deg) saturate(.55) brightness(3.5); }
+:is(.apex-app, .onboarding) :is(.brand-mark img, .product-icon img, .remote-mark img, .standby-symbol img, .request-orbit img, .network-pulse strong img, .standby-3d-fallback) {
+  filter: var(--nodus-logo-filter, none);
+}
 
 :root[data-theme] .brand-mark,
 :root[data-theme] .product-icon {
@@ -6208,3 +6191,65 @@ button[type="submit"]:hover,
 .update-row .update-check:hover:not(:disabled) { background: color-mix(in srgb, var(--theme-accent, var(--blue)) 12%, var(--theme-control, var(--surface-light))); }
 .update-row .update-check:disabled { opacity: .6; cursor: wait; }
 .update-row .update-check:focus-visible { outline: 2px solid var(--theme-accent, var(--blue)); outline-offset: 2px; }
+
+.remote-mode[data-theme]:not([data-theme="dark"]) {
+  --remote-panel: var(--theme-panel, var(--surface));
+  --remote-raised: var(--theme-panel-raised, var(--surface-light));
+  --remote-control: var(--theme-control, var(--surface-light));
+  --remote-line: var(--theme-line, var(--line));
+  --remote-accent: var(--theme-accent, var(--blue-light));
+}
+.remote-mode[data-theme]:not([data-theme="dark"]) .remote-session {
+  background: var(--remote-panel) !important;
+  color: var(--text);
+}
+.remote-mode[data-theme]:not([data-theme="dark"]) :is(.viewer-topbar, .host-session-header, .remote-footer) {
+  border-color: var(--remote-line);
+  background: var(--remote-raised);
+  color: var(--text-soft);
+}
+.remote-mode[data-theme]:not([data-theme="dark"]) :is(.host-sharing-panel, .viewer-tool-popover) {
+  border-color: var(--remote-line);
+  background: var(--remote-raised);
+  color: var(--text);
+}
+.remote-mode[data-theme]:not([data-theme="dark"]) :is(.viewer-session-switcher select, .viewer-session-switcher form, .viewer-toolbar button, .viewer-live-metrics button, .viewer-tool-actions button, .viewer-control-indicator, .viewer-tool-fields select, .viewer-transfer-destination, .pipeline-flow, .host-permissions > div, .host-admin-request button) {
+  border-color: var(--remote-line);
+  background: var(--remote-control);
+  color: var(--text);
+}
+.remote-mode[data-theme]:not([data-theme="dark"]) :is(.viewer-toolbar button:hover, .viewer-toolbar button.active, .viewer-toolbar button[aria-pressed="true"], .viewer-tool-actions button:hover) {
+  border-color: var(--remote-accent);
+  background: color-mix(in srgb, var(--remote-accent) 14%, var(--remote-control));
+  color: var(--text);
+}
+.remote-mode[data-theme]:not([data-theme="dark"]) :is(.viewer-tool-actions button.active, .viewer-control-indicator.active) {
+  border-color: #20dca0;
+  background: color-mix(in srgb, #20dca0 14%, var(--remote-control));
+  color: var(--text);
+}
+.remote-mode[data-theme]:not([data-theme="dark"]) :is(.viewer-session-switcher form button, .viewer-tool-title button:hover) {
+  border-color: var(--remote-line);
+  background: color-mix(in srgb, var(--remote-accent) 12%, var(--remote-control));
+  color: var(--remote-accent);
+}
+.remote-mode[data-theme]:not([data-theme="dark"]) .host-sharing-symbol {
+  border-color: var(--remote-line);
+  background: var(--remote-control);
+  color: var(--remote-accent);
+}
+.remote-mode[data-theme]:not([data-theme="dark"]) :is(.remote-brand, .remote-peer strong, .viewer-tool-title strong, .host-sharing-panel h1, .host-session-details h2, .viewer-transfer-destination strong, .pipeline-flow b, .viewer-connection-details dd, .host-connection-summary dd) {
+  color: var(--text);
+}
+.remote-mode[data-theme]:not([data-theme="dark"]) :is(.remote-brand strong span, .viewer-toolbar svg, .viewer-tool-actions svg, .viewer-live-metrics svg, .viewer-session-switcher form button svg, .viewer-transfer-destination, .host-sharing-panel .eyebrow, .host-sharing-panel h1 strong) {
+  color: var(--remote-accent);
+}
+.remote-mode[data-theme]:not([data-theme="dark"]) :is(.viewer-tool-title, .viewer-connection-details div, .host-live-row, .host-connection-summary, .host-admin-request) {
+  border-color: var(--remote-line);
+}
+.remote-mode[data-theme]:not([data-theme="dark"]) :is(.viewer-tool-title button, .viewer-tool-fields label, .viewer-control-state, .viewer-transfer-list > p, .viewer-transfer-destination span, .viewer-connection-details div, .pipeline-flow span, .host-sharing-copy, .host-live-row, .host-connection-summary dl div, .host-stop-note, .host-session-state) {
+  color: var(--text-soft);
+}
+.remote-mode[data-theme]:not([data-theme="dark"]) :is(.viewer-session-switcher input, .viewer-session-switcher select, .viewer-tool-fields select) { color: var(--text); }
+.remote-mode[data-theme]:not([data-theme="dark"]) .viewer-session-switcher input::placeholder { color: var(--text-muted); }
+.remote-mode[data-theme]:not([data-theme="dark"]) .viewer-tool-popover { box-shadow: 0 18px 55px color-mix(in srgb, var(--remote-accent) 14%, transparent); }

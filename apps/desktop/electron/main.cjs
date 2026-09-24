@@ -10,10 +10,12 @@ const { pathToFileURL } = require("node:url");
 
 let mainWindow;
 let tray;
+let themedIcon;
 let isQuitting = false;
 let trayIdentity = { nodusId: "", deviceName: "Nodus Connect", status: "Online" };
 let remoteControlActive = false;
 let remoteKeyboardCaptureActive = false;
+let remoteKeyboardCaptureWebContentsId = 0;
 let minimizeToTray = true;
 let inputHelper;
 let captureOptions = { sourceId: "", displayId: "", shareAudio: true };
@@ -55,6 +57,17 @@ const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) app.quit();
 
 app.on("second-instance", () => showMainWindow());
+
+function attachRemoteKeyboardForwarding(window) {
+  window.webContents.on("before-input-event", (event, input) => {
+    if (!remoteKeyboardCaptureActive || remoteKeyboardCaptureWebContentsId !== window.webContents.id || (input.type !== "keyDown" && input.type !== "keyUp")) return;
+    const remoteInput = toRemoteKeyboardInput(input);
+    if (!remoteInput) return;
+    event.preventDefault();
+    window.webContents.send("nodus:remote-key-input", input.type, remoteInput);
+  });
+}
+
 app.whenReady().then(() => {
   if (!gotLock) return;
   session.defaultSession.setPermissionRequestHandler((_webContents, permission, callback) => {
@@ -127,6 +140,7 @@ function createMainWindow() {
       webPreferences: {
         contextIsolation: true,
         nodeIntegration: false,
+        preload: path.join(__dirname, "preload.cjs"),
         sandbox: true,
       },
     },
@@ -136,6 +150,8 @@ function createMainWindow() {
   mainWindow.webContents.on("will-navigate", (event, url) => {
     if (!isAllowedAppUrl(url)) event.preventDefault();
   });
+
+  mainWindow.webContents.on("did-create-window", (window) => attachRemoteKeyboardForwarding(window));
 
   mainWindow.once("ready-to-show", () => {
     appendLog("ready-to-show");
@@ -152,13 +168,7 @@ function createMainWindow() {
   mainWindow.webContents.on("console-message", (_event, level, message, line, sourceId) => {
     if (level >= 2) appendLog(`renderer-console ${message} ${sourceId}:${line}`);
   });
-  mainWindow.webContents.on("before-input-event", (event, input) => {
-    if (!remoteKeyboardCaptureActive || (input.type !== "keyDown" && input.type !== "keyUp")) return;
-    const remoteInput = toRemoteKeyboardInput(input);
-    if (!remoteInput) return;
-    event.preventDefault();
-    mainWindow.webContents.send("nodus:remote-key-input", input.type, remoteInput);
-  });
+  attachRemoteKeyboardForwarding(mainWindow);
 
   if (isDev) {
     mainWindow.loadURL(devUrl);
@@ -221,6 +231,7 @@ function quitApp() {
 }
 
 function createIcon() {
+  if (themedIcon) return themedIcon;
   const iconPath = path.resolve(__dirname, "../../../build/icon.ico");
   const icon = nativeImage.createFromPath(iconPath);
   if (!icon.isEmpty()) return icon;
@@ -271,6 +282,36 @@ function setupIpc() {
   });
   ipcMain.handle("nodus:get-server-info", () => getServerInfo());
   ipcMain.handle("nodus:get-app-info", () => ({ version: app.getVersion(), googleClientConfigured: Boolean(firebaseApiKey && firebaseAuthUrl) }));
+  ipcMain.handle("nodus:set-theme-icon", (_event, theme, dataUrl) => {
+    if (!["dark", "japan", "sakura-night", "neo-tokyo", "cosmos", "arctic"].includes(theme)
+      || typeof dataUrl !== "string" || !dataUrl.startsWith("data:image/png;base64,") || dataUrl.length > 500_000) return false;
+    try {
+      const icon = nativeImage.createFromDataURL(dataUrl);
+      const size = icon.getSize();
+      if (icon.isEmpty() || size.width !== 256 || size.height !== 256) return false;
+      themedIcon = icon;
+      BrowserWindow.getAllWindows().forEach((window) => window.setIcon(icon));
+      tray?.setImage(icon.resize({ width: 32, height: 32 }));
+      return true;
+    } catch { return false; }
+  });
+  ipcMain.handle("nodus:get-performance-diagnostic", () => {
+    try {
+      const input = JSON.parse(process.env.NODUS_PERF_DIAGNOSTIC || "null");
+      const videoOnly = process.env.NODUS_VIDEO_ONLY_DIAGNOSTIC === "1";
+      if ((!input || typeof input !== "object") && !videoOnly) return null;
+      const config = input && typeof input === "object" ? input : {};
+      const bounded = (value, min, max) => typeof value === "number" && Number.isFinite(value) && value >= min && value <= max ? value : undefined;
+      const dimensions = typeof config.resolution === "string" ? config.resolution.match(/^(\d{3,4})x(\d{3,4})$/) : null;
+      const resolution = dimensions && bounded(Number(dimensions[1]), 640, 3840) && bounded(Number(dimensions[2]), 480, 2160) ? config.resolution : undefined;
+      return {
+        label: String(config.label || "diagnostic").slice(0, 60), videoOnly,
+        resolution, fps: bounded(config.fps, 15, 120), bitrate: bounded(config.bitrate, 300_000, 30_000_000),
+        maxFramerate: bounded(config.maxFramerate, 15, 120), scaleResolutionDownBy: bounded(config.scaleResolutionDownBy, 1, 4),
+        lockAdaptive: config.lockAdaptive === true,
+      };
+    } catch { return null; }
+  });
   ipcMain.handle("nodus:get-native-capture-status", () => getNativeCaptureStatus());
   ipcMain.handle("nodus:get-service-status", () => getServiceStatus());
   ipcMain.handle("nodus:install-service", () => runServiceCommand("--install"));
@@ -285,13 +326,15 @@ function setupIpc() {
       powerSaveBlockerId = -1;
     }
   });
-  ipcMain.handle("nodus:set-remote-keyboard-capture", (_event, active) => {
+  ipcMain.handle("nodus:set-remote-keyboard-capture", (event, active) => {
     remoteKeyboardCaptureActive = Boolean(active);
+    remoteKeyboardCaptureWebContentsId = remoteKeyboardCaptureActive ? event.sender.id : remoteKeyboardCaptureWebContentsId === event.sender.id ? 0 : remoteKeyboardCaptureWebContentsId;
   });
-  ipcMain.handle("nodus:toggle-full-screen", (_event, enabled) => {
-    if (!mainWindow) return false;
-    const next = typeof enabled === "boolean" ? enabled : !mainWindow.isFullScreen();
-    mainWindow.setFullScreen(next);
+  ipcMain.handle("nodus:toggle-full-screen", (event, enabled) => {
+    const targetWindow = BrowserWindow.fromWebContents(event.sender) || mainWindow;
+    if (!targetWindow) return false;
+    const next = typeof enabled === "boolean" ? enabled : !targetWindow.isFullScreen();
+    targetWindow.setFullScreen(next);
     return next;
   });
   ipcMain.handle("nodus:check-for-updates", async () => {
@@ -344,7 +387,7 @@ function setupIpc() {
   ipcMain.handle("nodus:wake-on-lan", (_event, macAddress) => wakeOnLan(macAddress));
   ipcMain.handle("nodus:open-diagnostics", () => shell.showItemInFolder(path.join(app.getPath("userData"), "logs", "desktop.log")));
   ipcMain.handle("nodus:write-diagnostic", (_event, message) => appendLog(String(message || "").slice(0, 2000)));
-  ipcMain.handle("nodus:write-performance", (_event, message) => appendLog(String(message || "").slice(0, 2000), "performance.log"));
+  ipcMain.handle("nodus:write-performance", (_event, message) => appendLog(String(message || "").slice(0, 16_000), "performance.log"));
   ipcMain.handle("nodus:get-gpu-diagnostics", () => getGpuDiagnostics());
   ipcMain.handle("nodus:google-login", (_event, options) => googleLogin(options));
 }

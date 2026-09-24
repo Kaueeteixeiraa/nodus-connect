@@ -28,7 +28,7 @@ describe("performance report", () => {
     ]);
     const result = JSON.parse(execFileSync(process.execPath, [resolve("scripts/perf-lab.mjs"), "report", host, "--duration=60", `--peer=${viewer}`], { encoding: "utf8" }));
     expect(result.roles).toEqual(["host", "viewer"]);
-    expect(result.fps).toMatchObject({ captureFps: 60, encodedFps: 58.5, decodedFps: 57.5, renderFps: 56.5 });
+    expect(result.fps).toMatchObject({ captureFps: 60, encodedFps: 58.5, decodedFps: 57.5, renderFps: 57, renderCallbacksFps: 56.5 });
     expect(result.network).toMatchObject({ transport: "UDP", route: "direct", bitrateKbpsPeak: 4200 });
     expect(result.media).toMatchObject({ encoder: "OpenH264", encoderKind: "software", decoder: "FFmpeg", encodeMsP95: 9 });
     expect(result.media.codecProfile).toBe("profile-level-id=42e01f");
@@ -43,6 +43,18 @@ describe("performance report", () => {
     expect(result.warnings).toEqual(["POSSIBLE RENDER BOTTLENECK", "HIGH WEBRTC PLAYOUT DELAY (SOURCE UNDETERMINED)"]);
     expect(result.buffering).toMatchObject({ webRtcPlayoutMs: 180, renderQueueMs: null, estimatedGlassToGlassMs: null });
     expect(result.media.encoderKind).toBe("software");
+  });
+
+  it("uses presented-frame counters when callbacks undercount rendering", () => {
+    const viewer = report("viewer", [
+      { decodedFps: 50, renderFps: 35, counters: { rendered: 100 } },
+      { decodedFps: 50, renderFps: 35, counters: { rendered: 150 } },
+    ]);
+    const result = JSON.parse(execFileSync(process.execPath, [resolve("scripts/perf-lab.mjs"), "report", viewer], { encoding: "utf8" }));
+    expect(result.fps).toMatchObject({ renderFps: 50, renderCallbacksFps: 35 });
+    expect(result.video.renderFpsSource).toBe("presentedFrames counter");
+    expect(result.warnings).toContain("FRAME CALLBACKS UNDERCOUNT PRESENTED FRAMES");
+    expect(result.warnings).not.toContain("POSSIBLE RENDER BOTTLENECK");
   });
 
   it("marks missing peer metrics as unavailable", () => {
@@ -73,5 +85,19 @@ describe("performance report", () => {
     expect(result.adaptation).toMatchObject({ requestedProfile: "high", appliedProfile: "high", profileChanges: 1, lastReason: "playout=326ms" });
     expect(result.network.availableKbps).toBeNull();
     expect(result.bottleneck.predominant).toBe("UNKNOWN");
+  });
+
+  it("keeps requested video separate from runtime capture and sender parameters", () => {
+    const host = report("host", [{
+      diagnosticLabel: "resolution-1080", lightweightMode: true,
+      configuredVideo: { resolution: "1920x1080", fps: 60, bitrate: 10000000 },
+      actualVideo: { capture: { width: 1280, height: 720, frameRate: 59 }, sender: { maxBitrate: 8000000, maxFramerate: 60, scaleResolutionDownBy: 1.5 } },
+      captureFps: 49, encodedFps: 48, encoder: "Intel Quick Sync", limitation: "none",
+    }]);
+    const result = JSON.parse(execFileSync(process.execPath, [resolve("scripts/perf-lab.mjs"), "report", host], { encoding: "utf8" }));
+    expect(result.diagnostic).toMatchObject({ label: "resolution-1080", lightweightMode: { host: true, viewer: null }, pixelsPerSecond: 54374400 });
+    expect(result.diagnostic.configured.resolution).toBe("1920x1080");
+    expect(result.diagnostic.actual.capture.width).toBe(1280);
+    expect(result.diagnostic.actual.sender.maxBitrate).toBe(8000000);
   });
 });
