@@ -6006,7 +6006,7 @@ button[type="submit"]:hover,
 .remote-local-cursor { position:absolute; z-index:3; top:0; left:0; pointer-events:none; opacity:0; transform:translate3d(-100px,-100px,0); will-change:transform,opacity; }
 .remote-local-cursor svg { display:block; fill:#fff; stroke:#111; stroke-width:1.5; stroke-linejoin:round; }
 .viewer-session-v2 .remote-viewer-surface:fullscreen { border:0; border-radius:0; background:#000; }
-.viewer-session-v2 .remote-viewer-surface video { width:100%; height:100%; object-fit:contain; background:#000; pointer-events:none; cursor:inherit; }
+.viewer-session-v2 .remote-viewer-surface video { width:100%; height:100%; object-fit:contain; background:#000; }
 .viewer-tool-popover { position:absolute; z-index:7; top:8px; left:50%; width:min(440px,calc(100% - 24px)); max-height:min(520px,calc(100% - 20px)); overflow:auto; padding:14px; transform:translateX(-50%); border:1px solid rgba(50,164,237,.55); border-radius:9px; background:rgba(3,16,29,.97); box-shadow:0 18px 55px rgba(0,0,0,.55); backdrop-filter:blur(18px); }
 .viewer-tool-title { display:flex; align-items:center; justify-content:space-between; gap:12px; padding-bottom:10px; border-bottom:1px solid rgba(50,151,219,.2); }
 .viewer-tool-title strong { color:#f0f9ff; font-size:13px; }

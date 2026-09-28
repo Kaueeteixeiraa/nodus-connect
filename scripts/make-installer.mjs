@@ -8,7 +8,7 @@ const cache = join(process.env.LOCALAPPDATA || "", "electron-builder", "Cache");
 const script = join(root, "scripts", "custom-installer.nsi");
 const makensis = find(cache, "makensis.exe");
 const version = JSON.parse(readFileSync(join(root, "package.json"), "utf8")).version;
-const productVersion = `${version}.0`;
+const productVersion = `${version.split("-")[0]}.0`;
 const setup = join(root, "outputs", "installer", "Nodus-Connect-Setup.exe");
 
 if (!makensis) throw new Error("makensis.exe nao encontrado no cache do electron-builder.");

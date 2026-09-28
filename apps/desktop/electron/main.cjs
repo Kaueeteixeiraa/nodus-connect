@@ -462,6 +462,7 @@ function startNativeMedia(sender, input) {
   const height = Number.isInteger(input?.height) && input.height > 0 ? input.height : 0;
   const fps = Number.isInteger(input?.fps) ? Math.max(5, Math.min(60, input.fps)) : 60;
   const bitrateKbps = Number.isInteger(input?.bitrateKbps) ? Math.max(1000, Math.min(30000, input.bitrateKbps)) : 14000;
+  appendLog(`native-media-start session=${sessionId} monitor=${monitor} resolution=${width}x${height} fps=${fps} audio=${Boolean(input?.shareAudio)}`);
   const child = spawn(nativeMediaExe, [String(monitor), String(fps), String(bitrateKbps), String(width), String(height), input?.shareAudio ? "1" : "0"], {
     windowsHide: true,
     stdio: ["pipe", "pipe", "pipe"],
@@ -494,7 +495,20 @@ function startNativeMedia(sender, input) {
     let output = "";
     let stderr = "";
     let encoderInfo = {};
-    const timer = setTimeout(() => { if (!settled) { settled = true; child.kill(); reject(new Error("WGC nao iniciou.")); } }, 8000);
+    let stage = "PROCESS_STARTED";
+    const startedAt = Date.now();
+    const failStartup = (message) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      clearTimeout(deadline);
+      child.nodusStopped = true;
+      if (nativeMedia.get(sessionId)?.child === child) nativeMedia.delete(sessionId);
+      child.kill();
+      reject(new Error(`WGC_STAGE=${stage}: ${message}`));
+    };
+    let timer = setTimeout(() => failStartup("CAPTURE_STARTUP_IDLE_TIMEOUT"), 8000);
+    const deadline = setTimeout(() => failStartup("CAPTURE_STARTUP_DEADLINE"), 30000);
     const emit = (type, payload) => {
       if (!sender.isDestroyed()) sender.send("nodus:native-media-signal", { sessionId, type, ...payload });
     };
@@ -505,7 +519,17 @@ function startNativeMedia(sender, input) {
         const line = output.slice(0, end).trim();
         output = output.slice(end + 1);
         const [code, first, second] = line.split(" ");
-        if (code === "R" && !settled) { settled = true; clearTimeout(timer); resolve({ backend: "wgc", cursorCapture: false, ...encoderInfo }); }
+        if (code === "L") {
+          stage = first;
+          appendLog(`native-media-stage session=${sessionId} elapsedMs=${Date.now() - startedAt} ${line.slice(2)}`);
+          if (!settled) { clearTimeout(timer); timer = setTimeout(() => failStartup("CAPTURE_STARTUP_IDLE_TIMEOUT"), 8000); }
+        }
+        else if (code === "R" && !settled) {
+          if (first !== "STREAM_READY") { failStartup("INVALID_READY_HANDSHAKE"); continue; }
+          settled = true; clearTimeout(timer); clearTimeout(deadline);
+          appendLog(`native-media-ready session=${sessionId} stage=STREAM_READY elapsedMs=${Date.now() - startedAt}`);
+          resolve({ backend: "wgc", cursorCapture: false, ...encoderInfo });
+        }
         else if (code === "H") encoderInfo = { encoderImplementation: Buffer.from(first, "base64").toString("utf8"), hardwareEncode: second === "1" };
         else if (code === "O") emit("offer", { sdp: Buffer.from(first, "base64").toString("utf8") });
         else if (code === "I") emit("candidate", { sdpMLineIndex: Number(first), candidate: Buffer.from(second, "base64").toString("utf8") });
@@ -518,13 +542,8 @@ function startNativeMedia(sender, input) {
         else if (code === "E") {
           const message = line.slice(2).replace(/(turns?:\/\/)[^\s@]+@/gi, "$1[redacted]@").slice(0, 1000);
           appendLog(`native-media-error session=${sessionId} ${message}`);
-          if (!settled) {
-            settled = true;
-            clearTimeout(timer);
-            child.nodusStopped = true;
-            child.kill();
-            reject(new Error(`WGC: ${message}`));
-          } else emit("error", { message });
+          if (!settled) failStartup(message);
+          else emit("error", { message });
         }
       }
     });
@@ -533,10 +552,12 @@ function startNativeMedia(sender, input) {
       stderr = (stderr + message).slice(-1200);
       appendLog(`native-media ${message.slice(0, 600)}`);
     });
-    child.on("error", (error) => { if (!settled) { settled = true; clearTimeout(timer); reject(error); } });
+    child.stdin.on("error", (error) => { if (!settled) failStartup(`STDIN_ERROR ${error.message}`); });
+    child.on("error", (error) => failStartup(`SPAWN_ERROR ${error.message}`));
     child.on("close", (code) => {
       if (nativeMedia.get(sessionId)?.child === child) nativeMedia.delete(sessionId);
-      if (!settled) { settled = true; clearTimeout(timer); reject(new Error(`WGC encerrou (${code}). ${stderr.trim()}`)); }
+      appendLog(`native-media-close session=${sessionId} stage=${stage} exitCode=${code} stopped=${Boolean(child.nodusStopped)}`);
+      if (!settled) failStartup(`EXIT_CODE=${code} ${stderr.trim()}`);
       else if (!child.nodusStopped) emit("exit", { code });
     });
   });
@@ -572,12 +593,14 @@ function stopNativeMedia(sender, sessionId) {
 }
 
 function getNativeCaptureStatus() {
-  if (!fs.existsSync(nativeCaptureProbe)) return { available: false, supported: false, backend: "chromium-getdisplaymedia" };
+  const policy = getCaptureBackendPolicy();
+  if (!fs.existsSync(nativeCaptureProbe)) return { ...policy, available: false, supported: false, backend: "chromium-getdisplaymedia" };
   try {
     const result = require("node:child_process").execFileSync(nativeCaptureProbe, [], { encoding: "utf8", timeout: 5000, windowsHide: true });
     const capabilities = JSON.parse(result);
     const supported = capabilities.windowsGraphicsCapture === true;
     return {
+      ...policy,
       available: true,
       supported,
       nativeMediaExperimental: process.env.NODUS_WGC_EXPERIMENTAL === "1",
@@ -589,9 +612,14 @@ function getNativeCaptureStatus() {
       hardwareH264Encoders: Number(capabilities.hardwareH264Encoders || 0),
       adapter: String(capabilities.adapter || "").slice(0, 200),
     };
-  } catch {
-    return { available: false, supported: false, backend: "chromium-getdisplaymedia" };
+  } catch (error) {
+    appendLog(`native-capture-discovery-failed ${error.message}`);
+    return { ...policy, available: false, supported: false, backend: "chromium-getdisplaymedia" };
   }
+}
+
+function getCaptureBackendPolicy() {
+  return { requestedBackend: process.env.NODUS_CAPTURE_BACKEND === "wgc" ? "wgc" : "chromium", allowLegacyFallback: process.env.NODUS_CAPTURE_FALLBACK !== "0" };
 }
 
 async function getGpuDiagnostics() {

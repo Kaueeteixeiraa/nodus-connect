@@ -60,7 +60,7 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import { formatNodusId, normalizeNodusId } from "../../../packages/common/src/nodusId";
-import { CURSOR_HOTSPOT, canUseCursorFreeNativeCapture, cursorCaptureStatus, mapVideoPointer, requireCursorFreeCapture } from "./core/remote-cursor";
+import { CURSOR_HOTSPOT, captureBackendPlan, cursorCaptureStatus, mapVideoPointer, requireLegacyCaptureAllowed } from "./core/remote-cursor";
 import { holdSelectedRoute, iceServerInfo, iceSignalCandidate, inspectIceStats, withConfiguredStun } from "./core/ice-diagnostics";
 import type { SessionPermission } from "../../../packages/protocol/src/index";
 import {
@@ -329,6 +329,7 @@ export function App() {
   const peersRef = useRef(new Map<string, RTCPeerConnection>());
   const nativeVideoPeersRef = useRef(new Map<string, RTCPeerConnection>());
   const nativeHostSessionsRef = useRef(new Set<string>());
+  const nativeFallbackAllowedRef = useRef(new Map<string, boolean>());
   const nativeHostDisplaysRef = useRef(new Map<string, string>());
   const nativeMediaStatsRef = useRef(new Map<string, { captureFrames: number; encodeFrames: number; encodeTimeUs: number; encodeSamples: number; encodeMs: number; encoder?: string; rtpBytes: number; width: number; height: number; outputWidth: number; outputHeight: number; at: number; captureFps: number; encodedFps: number; bitrateKbps: number }>());
   const nativeMediaListenersRef = useRef(new Map<string, () => void>());
@@ -919,9 +920,9 @@ export function App() {
         if (servers.length) setServerIceServers(servers);
         return servers;
       }).catch(() => [] as RTCIceServer[]);
-      const nativeSupported = await window.nodusDesktop?.getNativeCaptureStatus().then(canUseCursorFreeNativeCapture).catch(() => false);
-      logDiagnostic(`cursor-capture-selection backend=${nativeSupported ? "WGC" : "CHROMIUM"} requested=never`);
-      if (!nativeSupported) captureLease = await acquireHostCapture(
+      const capturePlan = captureBackendPlan(await window.nodusDesktop?.getNativeCaptureStatus());
+      logDiagnostic(`cursor-capture-selection requested=${capturePlan.requested} backend=${capturePlan.native ? "WGC_EXPERIMENTAL" : "CHROMIUM_LEGACY"} fallback-allowed=${capturePlan.allowLegacyFallback}`);
+      if (!capturePlan.native) captureLease = await acquireHostCapture(
         request.preferredResolution ?? settings.preferredResolution,
         request.preferredFps ?? settings.maxFps,
         settings.preferredDisplayId,
@@ -935,16 +936,17 @@ export function App() {
         result: "accepted",
       });
       setIncomingRequests((items) => items.filter((item) => item.id !== request.id));
-      await startHostSession(accepted, captureLease, Boolean(nativeSupported));
+      await startHostSession(accepted, captureLease, capturePlan.native, capturePlan.allowLegacyFallback);
       captureLease = null;
       return null;
     } catch (error) {
       captureLease?.release();
       if (accepted?.sessionId) {
         cleanupSession(accepted.sessionId, true);
+        removeRuntime(accepted.sessionId);
         sendSignal(accepted.sessionId, { from: identity.nodusId, to: request.requesterNodusId, type: "disconnect", payload: {} }).catch(() => undefined);
       }
-      if (error instanceof Error && error.message.startsWith("CURSOR_SUPPRESSION_")) {
+      if (error instanceof Error && /^(CURSOR_SUPPRESSION_|CAPTURE_BACKEND_)/.test(error.message)) {
         setFeedback(error.message);
         return error.message;
       }
@@ -1086,6 +1088,7 @@ export function App() {
     nativeMediaListenersRef.current.delete(sessionId);
     nativeMediaStatsRef.current.delete(sessionId);
     await window.nodusDesktop?.stopNativeMedia(sessionId);
+    requireLegacyCaptureAllowed(nativeFallbackAllowedRef.current.get(sessionId) !== false);
     const resolution = requestedResolutionsRef.current.get(sessionId) ?? settings.preferredResolution;
     const frameRate = requestedFpsRef.current.get(sessionId) ?? settings.maxFps;
     const lease = await acquireHostCapture(resolution, frameRate, displayId, runtime.session.permissions.includes("audio:remote"));
@@ -1099,7 +1102,7 @@ export function App() {
         }
       }
       captureCleanupRef.current.set(sessionId, lease.release);
-      updateRuntime(sessionId, { shareStream: lease.stream, error: "" });
+      updateRuntime(sessionId, { shareStream: lease.stream, error: "Captura legada: remocao do cursor do host nao garantida." });
       await peer.setLocalDescription(await peer.createOffer());
       await sendReliableSignal(sessionId, { from: identity.nodusId, to: runtime.session.remoteNodusId, type: "offer", payload: peer.localDescription });
       logDiagnostic(`capture-backend=CHROMIUM reason=${reason}`);
@@ -1110,7 +1113,7 @@ export function App() {
     }
   }
 
-  async function startHostSession(request: SessionRequestRecord, captureLease: CaptureLease | null, preferNative: boolean) {
+  async function startHostSession(request: SessionRequestRecord, captureLease: CaptureLease | null, preferNative: boolean, allowLegacyFallback = true) {
     if (!request.sessionId) {
       captureLease?.release();
       return;
@@ -1123,8 +1126,15 @@ export function App() {
     captureCleanupRef.current.get(request.sessionId)?.();
     const remoteNodusId = request.requesterNodusId;
     const peer = createPeer(request.sessionId, identity.nodusId, remoteNodusId, "host", await ensureSessionIceServers());
+    nativeFallbackAllowedRef.current.set(request.sessionId, allowLegacyFallback);
     const permissions = request.grantedPermissions ?? allowedPermissions(request, settings);
+    upsertRuntime({
+      session: { role: "host", sessionId: request.sessionId, remoteNodusId, remoteName: request.requesterName, status: "Preparando compartilhamento", permissions },
+      remoteStream: null, shareStream: captureLease?.stream ?? null, controlReady: false, error: "", metrics: emptyMetrics(),
+    });
+    if (preferNative) startSignalPolling(request.sessionId, identity.nodusId);
     const nativeVideo = preferNative && await startHostNativeMedia(request.sessionId, remoteNodusId, settings.preferredDisplayId, request.preferredResolution ?? settings.preferredResolution, request.preferredFps ?? settings.maxFps, permissions.includes("audio:remote"), peer.getConfiguration().iceServers ?? []);
+    if (preferNative && !nativeVideo) requireLegacyCaptureAllowed(allowLegacyFallback);
     if (!nativeVideo && !captureLease) captureLease = await acquireHostCapture(request.preferredResolution ?? settings.preferredResolution, request.preferredFps ?? settings.maxFps, settings.preferredDisplayId, permissions.includes("audio:remote"));
     const stream = captureLease?.stream ?? null;
     if (nativeVideo) {
@@ -1149,23 +1159,13 @@ export function App() {
         await tuneVideoSender(sender, frameRate, resolution);
       }
     }
-    upsertRuntime({
-      session: {
-        role: "host",
-        sessionId: request.sessionId,
-        remoteNodusId,
-        remoteName: request.requesterName,
-        status: "Compartilhando sua tela",
-        permissions,
-      },
-      remoteStream: null,
+    updateRuntime(request.sessionId, {
+      session: { status: "Compartilhando sua tela" },
       shareStream: nativeVideo ? null : stream,
-      controlReady: false,
-      error: "",
-      metrics: emptyMetrics(),
+      error: nativeVideo ? "" : "Captura legada: remocao do cursor do host nao garantida.",
     });
     window.nodusDesktop?.setRemoteControlActive(settings.allowRemoteControl).catch(() => undefined);
-    startSignalPolling(request.sessionId, identity.nodusId);
+    if (!preferNative) startSignalPolling(request.sessionId, identity.nodusId);
   }
 
   async function startViewerSession(request: SessionRequestRecord) {
@@ -2350,6 +2350,7 @@ export function App() {
     nativeMediaListenersRef.current.get(sessionId)?.();
     nativeMediaListenersRef.current.delete(sessionId);
     nativeHostDisplaysRef.current.delete(sessionId);
+    nativeFallbackAllowedRef.current.delete(sessionId);
     nativeMediaStatsRef.current.delete(sessionId);
     if (nativeHostSessionsRef.current.delete(sessionId)) window.nodusDesktop?.stopNativeMedia(sessionId).catch(() => undefined);
     if (stopShare) {
@@ -2583,12 +2584,7 @@ export function App() {
       const capture = track?.getSettings() as MediaTrackSettings & { cursor?: string } | undefined;
       const cursorInfo = captureCursorInfo(track);
       logDiagnostic(`capture-settings width=${capture?.width || 0} height=${capture?.height || 0} fps=${capture?.frameRate || 0} captureCursorRequested=${cursorInfo.requested} captureCursorApplied=${cursorInfo.applied ?? "unknown"} captureCursorSupported=${JSON.stringify(cursorInfo.supported)} status=${cursorInfo.status}`);
-      try {
-        requireCursorFreeCapture(cursorInfo.applied);
-      } catch (error) {
-        raw.getTracks().forEach((item) => item.stop());
-        throw error;
-      }
+      logDiagnostic("LEGACY CAPTURE / CURSOR SUPPRESSION NOT GUARANTEED");
       return prepareCaptureStream(raw);
     });
   }
@@ -3813,8 +3809,8 @@ function RemoteSessionPanel({
     }
   };
   useEffect(() => {
-    hideLocalCursor();
-  }, [canControlMouse, session.sessionId]);
+    if (!canControlMouse) hideLocalCursor();
+  }, [canControlMouse]);
   useEffect(() => {
     if (!isViewer || !canControlKeyboard) return;
     const releasePressedKeys = () => {
@@ -3916,7 +3912,7 @@ function RemoteSessionPanel({
               if (canControlMouse) moveLocalCursor(event.currentTarget, event.nativeEvent);
               if (canControlMouse) onPointerButton("mouseDown", event);
             }}
-            onBlur={() => { hideLocalCursor(); window.nodusDesktop?.setRemoteKeyboardCapture(false).catch(() => undefined); }}
+            onBlur={() => window.nodusDesktop?.setRemoteKeyboardCapture(false).catch(() => undefined)}
             onFocus={() => window.nodusDesktop?.setRemoteKeyboardCapture(true).catch(() => undefined)}
             onMouseEnter={(event) => canControlMouse && moveLocalCursor(event.currentTarget, event.nativeEvent)}
             onMouseLeave={(event) => hideLocalCursor(event.currentTarget)}
@@ -4454,7 +4450,7 @@ function videoPoint(surface: HTMLElement, event: MouseEvent) {
     { width: video?.videoWidth ?? 0, height: video?.videoHeight ?? 0 },
     { x: event.clientX - rect.left, y: event.clientY - rect.top },
   );
-  return point ? { ...point, left: point.left + rect.left - surfaceRect.left - surface.clientLeft, top: point.top + rect.top - surfaceRect.top - surface.clientTop } : null;
+  return point ? { ...point, left: point.left + rect.left - surfaceRect.left, top: point.top + rect.top - surfaceRect.top } : null;
 }
 
 function bottleneckLabel(value: PipelineBottleneck): string {

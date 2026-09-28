@@ -8,6 +8,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <exception>
 #include <iostream>
 #include <memory>
 #include <map>
@@ -31,10 +32,24 @@ static GstSegment encoderInputSegment, encoderOutputSegment;
 static unsigned long long encodeTimeUs = 0, encodeSamples = 0;
 static std::vector<gint64> encodeIntervals;
 static gboolean reportMedia(gpointer);
+static std::atomic<const char*> lifecycleStage{"PROCESS_STARTED"};
+static std::atomic<bool> pipelineFailed{false};
 
 static void sendLine(const std::string& line) {
   std::lock_guard<std::mutex> lock(outputMutex);
   std::cout << line << std::endl;
+}
+
+static void stage(const char* value) {
+  lifecycleStage.store(value);
+  sendLine(std::string("L ") + value);
+}
+
+static void failure(const std::string& message) {
+  std::string detail = message;
+  std::replace(detail.begin(), detail.end(), '\n', ' ');
+  std::replace(detail.begin(), detail.end(), '\r', ' ');
+  sendLine(std::string("E WGC_STAGE=") + lifecycleStage.load() + " HRESULT=UNAVAILABLE WINDOWS_ERROR=UNAVAILABLE MESSAGE=" + detail);
 }
 
 static std::string encode(const char* value) {
@@ -136,13 +151,14 @@ static gboolean applyCommand(gpointer data) {
 
 static gboolean busMessage(GstBus*, GstMessage* message, gpointer) {
   if (GST_MESSAGE_TYPE(message) == GST_MESSAGE_ERROR) {
+    pipelineFailed.store(true);
     GError* error = nullptr;
     gchar* debug = nullptr;
     gst_message_parse_error(message, &error, &debug);
-    sendLine("E " + std::string(error ? error->message : "pipeline-error"));
+    failure(std::string("element=") + (message->src ? GST_OBJECT_NAME(message->src) : "unknown") + " domain=" + (error ? g_quark_to_string(error->domain) : "unknown") + " code=" + std::to_string(error ? error->code : 0) + " " + (error ? error->message : "pipeline-error") + " DEBUG=" + (debug ? debug : "unavailable"));
     if (error) g_error_free(error);
     g_free(debug);
-    g_main_loop_quit(loop);
+    if (loop) g_main_loop_quit(loop);
   }
   return G_SOURCE_CONTINUE;
 }
@@ -192,8 +208,9 @@ static GstPadProbeReturn countBuffer(GstPad* pad, GstPadProbeInfo* info, gpointe
     if (value->fetch_add(1) == 0) {
       if (value == &captured) {
         sendPadDimensions("V", pad);
-        sendLine("R wgc no-cursor h264-hardware");
-      }
+        stage("FIRST_FRAME");
+      } else if (value == &encoded) stage("ENCODER_READY");
+      else if (value == &rtpPackets) { stage("STREAM_READY"); sendLine("R STREAM_READY wgc no-cursor h264-hardware"); }
     }
   }
   return GST_PAD_PROBE_OK;
@@ -244,7 +261,9 @@ static gboolean reportMedia(gpointer) {
   return G_SOURCE_CONTINUE;
 }
 
-int main(int argc, char** argv) {
+static int runMedia(int argc, char** argv) {
+  stage("PROCESS_STARTED");
+  stage("GST_INITIALIZATION");
   gst_init(&argc, &argv);
   gst_segment_init(&encoderInputSegment, GST_FORMAT_TIME);
   gst_segment_init(&encoderOutputSegment, GST_FORMAT_TIME);
@@ -255,13 +274,15 @@ int main(int argc, char** argv) {
   const int width = argc > 4 ? std::atoi(argv[4]) : 0;
   const int height = argc > 5 ? std::atoi(argv[5]) : 0;
   const bool shareAudio = argc > 6 && std::atoi(argv[6]) == 1;
+  sendLine("L CONFIG monitor=" + std::to_string(monitor) + " resolution=" + std::to_string(width) + "x" + std::to_string(height) + " D3D_DEVICE=GSTREAMER_OWNED FRAME_POOL=GSTREAMER_OWNED CAPTURE_SESSION=GSTREAMER_OWNED");
+  stage("HANDSHAKE");
   std::string setup;
-  if (!std::getline(std::cin, setup) || setup.rfind("S ", 0) != 0) return 1;
+  if (!std::getline(std::cin, setup) || setup.rfind("S ", 0) != 0) { failure("invalid-setup-handshake"); return 1; }
   const int serverCount = std::clamp(std::atoi(setup.c_str() + 2), 0, 72);
   std::vector<std::string> iceServers;
   for (int index = 0; index < serverCount; index++) {
     std::string uri;
-    if (!std::getline(std::cin, uri) || uri.size() > 800) return 1;
+    if (!std::getline(std::cin, uri) || uri.size() > 800) { failure("invalid-server-handshake"); return 1; }
     iceServers.push_back(uri);
   }
   const std::string dimensions = width > 0 && height > 0 ? ",width=" + std::to_string(width) + ",height=" + std::to_string(height) : "";
@@ -277,13 +298,15 @@ int main(int argc, char** argv) {
     " ! application/x-rtp,media=video,encoding-name=H264,payload=96 ! pc." +
     (shareAudio ? " wasapi2src loopback=true ! audioconvert ! audioresample ! opusenc ! rtpopuspay pt=97 ! application/x-rtp,media=audio,encoding-name=OPUS,payload=97 ! pc." : "");
   GError* error = nullptr;
+  stage("PIPELINE_PARSE");
   GstElement* media = gst_parse_launch(pipeline.c_str(), &error);
   if (!media || error) {
-    sendLine("E " + std::string(error ? error->message : "pipeline-unavailable"));
+    failure(error ? error->message : "pipeline-unavailable");
     if (error) g_error_free(error);
     if (media) gst_object_unref(media);
     return 1;
   }
+  stage("ENCODER_DISCOVERY");
   peer = gst_bin_get_by_name(GST_BIN(media), "pc");
   encoder = gst_bin_get_by_name(GST_BIN(media), "encoder");
   GstElementFactory* factory = gst_element_get_factory(encoder);
@@ -301,7 +324,7 @@ int main(int argc, char** argv) {
     else if (uri.rfind("turn://", 0) == 0 || uri.rfind("turns://", 0) == 0) {
       gboolean accepted = FALSE;
       g_signal_emit_by_name(peer, "add-turn-server", uri.c_str(), &accepted);
-      if (!accepted) { sendLine("E turn-server-rejected"); return 1; }
+      if (!accepted) { failure("turn-server-rejected"); return 1; }
     }
   }
   loop = g_main_loop_new(nullptr, FALSE);
@@ -311,8 +334,13 @@ int main(int argc, char** argv) {
   GstBus* bus = gst_element_get_bus(media);
   gst_bus_add_watch(bus, busMessage, nullptr);
   gst_object_unref(bus);
+  stage("CAPTURE_START");
   if (gst_element_set_state(media, GST_STATE_PLAYING) == GST_STATE_CHANGE_FAILURE) {
-    sendLine("E pipeline-start-failed");
+    GstBus* failedBus = gst_element_get_bus(media);
+    GstMessage* message = gst_bus_pop_filtered(failedBus, GST_MESSAGE_ERROR);
+    if (message) { busMessage(failedBus, message, nullptr); gst_message_unref(message); }
+    else failure("pipeline-start-failed; no detailed bus error available");
+    gst_object_unref(failedBus);
     return 1;
   }
   g_timeout_add_seconds(5, reportMedia, nullptr);
@@ -328,5 +356,12 @@ int main(int argc, char** argv) {
   gst_object_unref(encoder);
   gst_object_unref(media);
   g_main_loop_unref(loop);
-  return 0;
+  return pipelineFailed.load() ? 1 : 0;
+}
+
+int main(int argc, char** argv) {
+  try { return runMedia(argc, argv); }
+  catch (const std::exception& error) { failure(error.what()); }
+  catch (...) { failure("unknown-native-exception"); }
+  return 1;
 }

@@ -88,9 +88,9 @@ async function finish() {
 
 app.whenReady().then(async () => {
   if (process.env.NODUS_TEST_HEARTBEAT === "1") setInterval(() => console.log("main-heartbeat"), 1000);
-  motion = new BrowserWindow({ show: true, width: 1366, height: 768, webPreferences: { backgroundThrottling: false } });
+  motion = new BrowserWindow({ show: process.env.NODUS_TEST_VISIBLE !== "0", width: 1366, height: 768, webPreferences: { backgroundThrottling: false } });
   await motion.loadURL(`data:text/html,${encodeURIComponent(motionMarkup())}`);
-  motion.setFullScreen(true);
+  if (process.env.NODUS_TEST_VISIBLE !== "0") motion.setFullScreen(true);
   browser = new BrowserWindow({ show: process.env.NODUS_TEST_VISIBLE !== "0", width: 720, height: 480, webPreferences: { nodeIntegration: true, contextIsolation: false, sandbox: false, backgroundThrottling: false } });
   const html = `<style>html,body{margin:0;width:100%;height:100%;overflow:hidden;background:#000}video{width:100%;height:100%;object-fit:contain}</style><video id="video" autoplay muted playsinline></video><script>
     const { ipcRenderer } = require('electron');
