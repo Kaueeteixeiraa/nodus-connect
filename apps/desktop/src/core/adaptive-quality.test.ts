@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { advanceStage, assessQuality, nextBitrate, recommendedStage, type AdaptiveState, type QualitySample } from "./adaptive-quality";
+import { advanceStage, assessQuality, nativeVideoBitrate, nextBitrate, recommendedStage, type AdaptiveState, type QualitySample } from "./adaptive-quality";
 
 const good: QualitySample = { rttMs: 15, jitterMs: 2, lossPct: 0, availableKbps: 20_000, bitrateKbps: 12_000, captureFps: 60, encodedFps: 60, encodeMs: 5, targetFps: 60, activePicture: true, limitation: "none" };
 
@@ -10,6 +10,11 @@ describe("adaptive quality", () => {
     expect(recommendedStage({ ...good, availableKbps: 2000 })).toBe(3);
     expect(recommendedStage({ ...good, availableKbps: 1000 })).toBe(4);
     expect(recommendedStage({ ...good, availableKbps: 2000, bitrateKbps: 200 })).toBe(0);
+  });
+
+  it("does not degrade video for high RTT without congestion", () => {
+    expect(assessQuality({ ...good, rttMs: 380 })).toMatchObject({ stage: 0, source: "none" });
+    expect(recommendedStage({ ...good, rttMs: 380, lossPct: 5 })).toBe(3);
   });
 
   it("responds to slow encoding but ignores an unchanged desktop", () => {
@@ -56,5 +61,13 @@ describe("adaptive quality", () => {
     expect(nextBitrate(14_000_000, 500_000)).toBe(600_000);
     expect(nextBitrate(300_000, 5_000_000)).toBe(4_000_000);
     expect(nextBitrate(14_000_000, 650_000)).toBeLessThanOrEqual(780_000);
+  });
+
+  it("budgets native video by resolution and reduces bitrate without changing FPS", () => {
+    expect(nativeVideoBitrate(1080, 60)).toBe(14_000_000);
+    expect(nativeVideoBitrate(720, 60)).toBeLessThan(nativeVideoBitrate(1080, 60));
+    expect(nativeVideoBitrate(1080, 60, 2)).toBeLessThan(nativeVideoBitrate(1080, 60, 1));
+    expect(nativeVideoBitrate(2160, 60)).toBe(18_000_000);
+    expect(nativeVideoBitrate(1080, 120)).toBe(nativeVideoBitrate(1080, 60));
   });
 });

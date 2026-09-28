@@ -21,6 +21,7 @@ let inputHelper;
 let captureOptions = { sourceId: "", displayId: "", shareAudio: true };
 let powerSaveBlockerId = -1;
 let gpuInfoReady = false;
+const nativeMedia = new Map();
 
 const isDev = process.env.NODUS_DESKTOP_DEV === "1";
 const devUrl = process.env.NODUS_DESKTOP_URL || "http://127.0.0.1:5173";
@@ -31,11 +32,25 @@ const nativeCaptureProbe = app.isPackaged
 const nativeService = app.isPackaged
   ? path.join(process.resourcesPath, "native", "nodus-service.exe")
   : path.join(__dirname, "..", "..", "..", "native", "bin", "nodus-service.exe");
+const nativeMediaExe = app.isPackaged
+  ? path.join(process.resourcesPath, "native", "nodus-wgc-media.exe")
+  : path.join(__dirname, "..", "..", "..", "native", "bin", "nodus-wgc-media.exe");
+const gstreamerRoot = app.isPackaged
+  ? path.join(process.resourcesPath, "native", "gstreamer")
+  : path.join(__dirname, "..", "..", "..", "work", "gstreamer-runtime-package");
 const firebaseApiKey = process.env.NODUS_FIREBASE_API_KEY || "AIzaSyAN-UMMvnJlNFZ-hiiRvJHuCFzPPVmdR-c";
 const firebaseAuthUrl = process.env.NODUS_FIREBASE_AUTH_URL || "https://nodus-connect-kau-2026.web.app/google-login.html";
 const startMinimized = process.argv.includes("--minimized");
 const userDataDir = process.env.NODUS_USER_DATA_DIR;
 const extendedKeyboardCodes = new Set(["AltRight", "ArrowDown", "ArrowLeft", "ArrowRight", "ArrowUp", "ContextMenu", "ControlRight", "Delete", "End", "Home", "Insert", "MetaLeft", "MetaRight", "NumpadDivide", "NumpadEnter", "PageDown", "PageUp", "PrintScreen"]);
+const diagnosticPresets = {
+  "1080p60": { label: "capture-1080p60", resolution: "1920x1080", fps: 60, bitrate: 14_000_000, maxFramerate: 60, scaleResolutionDownBy: 1, lockAdaptive: true },
+  "720p60": { label: "capture-720p60", resolution: "1280x720", fps: 60, bitrate: 10_000_000, maxFramerate: 60, scaleResolutionDownBy: 1, lockAdaptive: true },
+  "1080p30": { label: "capture-1080p30", resolution: "1920x1080", fps: 30, bitrate: 14_000_000, maxFramerate: 30, scaleResolutionDownBy: 1, lockAdaptive: true },
+  "pixel-perfect-1080p60": { label: "pixel-perfect-1080p60", resolution: "1920x1080", fps: 60, bitrate: 14_000_000, maxFramerate: 60, scaleResolutionDownBy: 1, lockAdaptive: true, nativeResolution: true, contentHint: "detail", degradationPreference: "maintain-resolution" },
+  "clean-desktop": { label: "clean-desktop", fps: 60, maxFramerate: 60, scaleResolutionDownBy: 1, nativeResolution: true, contentHint: "detail", degradationPreference: "maintain-resolution" },
+};
+const performanceDiagnostic = getPerformanceDiagnostic();
 
 app.setName("Nodus Connect");
 app.setAppUserModelId("com.nodus.connect.desktop");
@@ -56,7 +71,15 @@ if (process.platform === "win32") app.commandLine.appendSwitch("enable-features"
 const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) app.quit();
 
-app.on("second-instance", () => showMainWindow());
+app.on("second-instance", (_event, commandLine) => {
+  const preset = getDiagnosticPresetArgument(commandLine);
+  if (preset) {
+    const event = { event: "diagnostic-preset-rejected", preset, reason: "APP_ALREADY_RUNNING" };
+    console.error(`[NODUS BENCHMARK] Preset rejected: ${event.reason}`);
+    appendLog(JSON.stringify(event), "performance.log");
+  }
+  showMainWindow();
+});
 
 function attachRemoteKeyboardForwarding(window) {
   window.webContents.on("before-input-event", (event, input) => {
@@ -70,6 +93,7 @@ function attachRemoteKeyboardForwarding(window) {
 
 app.whenReady().then(() => {
   if (!gotLock) return;
+  logDiagnosticPresetActivation(performanceDiagnostic);
   session.defaultSession.setPermissionRequestHandler((_webContents, permission, callback) => {
     callback(permission === "media" || permission === "display-capture");
   });
@@ -259,6 +283,51 @@ function appendLog(message, filename = "desktop.log") {
   }
 }
 
+function getDiagnosticPresetArgument(argv = process.argv) {
+  const prefix = "--diagnostic-preset=";
+  return argv.find((value) => value.startsWith(prefix))?.slice(prefix.length) || "";
+}
+
+function getPerformanceDiagnostic() {
+  try {
+    const cliPreset = getDiagnosticPresetArgument();
+    const envPreset = process.env.NODUS_DIAGNOSTIC_1080P60 === "1" ? "1080p60"
+      : process.env.NODUS_DIAGNOSTIC_720P60 === "1" ? "720p60"
+        : process.env.NODUS_DIAGNOSTIC_1080P30 === "1" ? "1080p30"
+          : process.env.NODUS_DIAGNOSTIC_PRESET || "";
+    const preset = cliPreset || envPreset;
+    const input = diagnosticPresets[preset] || JSON.parse(process.env.NODUS_PERF_DIAGNOSTIC || "null");
+    const videoOnly = process.env.NODUS_VIDEO_ONLY_DIAGNOSTIC === "1";
+    if ((!input || typeof input !== "object") && !videoOnly) return null;
+    const bounded = (value, min, max) => typeof value === "number" && Number.isFinite(value) && value >= min && value <= max ? value : undefined;
+    const dimensions = typeof input.resolution === "string" ? input.resolution.match(/^(\d{3,4})x(\d{3,4})$/) : null;
+    const resolution = dimensions && bounded(Number(dimensions[1]), 640, 3840) && bounded(Number(dimensions[2]), 480, 2160) ? input.resolution : undefined;
+    return {
+      label: String(input.label || "diagnostic").slice(0, 60), preset: diagnosticPresets[preset] ? preset : null,
+      source: cliPreset ? "cli" : envPreset ? "env" : "json", videoOnly, resolution,
+      fps: bounded(input.fps, 15, 120), bitrate: bounded(input.bitrate, 300_000, 30_000_000),
+      maxFramerate: bounded(input.maxFramerate, 15, 120), scaleResolutionDownBy: bounded(input.scaleResolutionDownBy, 1, 4),
+      lockAdaptive: input.lockAdaptive === true,
+      nativeResolution: input.nativeResolution === true,
+      contentHint: input.contentHint === "detail" || input.contentHint === "motion" ? input.contentHint : undefined,
+      degradationPreference: input.degradationPreference === "maintain-resolution" || input.degradationPreference === "maintain-framerate" ? input.degradationPreference : undefined,
+    };
+  } catch { return null; }
+}
+
+function logDiagnosticPresetActivation(diagnostic) {
+  if (!diagnostic?.preset) return;
+  const [requestedWidth, requestedHeight] = diagnostic.resolution?.split("x").map(Number) ?? [null, null];
+  const event = {
+    event: "diagnostic-preset-activated", preset: diagnostic.preset, source: diagnostic.source,
+    requestedWidth, requestedHeight, requestedFps: diagnostic.fps, maxFramerate: diagnostic.maxFramerate,
+    bitrateKbps: diagnostic.bitrate ? Math.round(diagnostic.bitrate / 1000) : null, scaleResolutionDownBy: diagnostic.scaleResolutionDownBy,
+    adaptiveLocked: diagnostic.lockAdaptive, nativeResolution: diagnostic.nativeResolution, contentHint: diagnostic.contentHint ?? null, degradationPreference: diagnostic.degradationPreference ?? null,
+  };
+  console.info(`[NODUS BENCHMARK]\nPreset: ${event.preset}\nResolution: ${diagnostic.resolution ?? "native"}\nFPS: ${event.requestedFps}\nBitrate: ${event.bitrateKbps ? `${event.bitrateKbps / 1000} Mbps` : "adaptive"}\nAdaptive: ${event.adaptiveLocked ? "LOCKED" : "UNLOCKED"}`);
+  appendLog(JSON.stringify(event), "performance.log");
+}
+
 require("electron").ipcMain.on("nodus:tray-identity", (_event, identity) => {
   trayIdentity = {
     nodusId: identity?.nodusId || "",
@@ -296,23 +365,12 @@ function setupIpc() {
     } catch { return false; }
   });
   ipcMain.handle("nodus:get-performance-diagnostic", () => {
-    try {
-      const input = JSON.parse(process.env.NODUS_PERF_DIAGNOSTIC || "null");
-      const videoOnly = process.env.NODUS_VIDEO_ONLY_DIAGNOSTIC === "1";
-      if ((!input || typeof input !== "object") && !videoOnly) return null;
-      const config = input && typeof input === "object" ? input : {};
-      const bounded = (value, min, max) => typeof value === "number" && Number.isFinite(value) && value >= min && value <= max ? value : undefined;
-      const dimensions = typeof config.resolution === "string" ? config.resolution.match(/^(\d{3,4})x(\d{3,4})$/) : null;
-      const resolution = dimensions && bounded(Number(dimensions[1]), 640, 3840) && bounded(Number(dimensions[2]), 480, 2160) ? config.resolution : undefined;
-      return {
-        label: String(config.label || "diagnostic").slice(0, 60), videoOnly,
-        resolution, fps: bounded(config.fps, 15, 120), bitrate: bounded(config.bitrate, 300_000, 30_000_000),
-        maxFramerate: bounded(config.maxFramerate, 15, 120), scaleResolutionDownBy: bounded(config.scaleResolutionDownBy, 1, 4),
-        lockAdaptive: config.lockAdaptive === true,
-      };
-    } catch { return null; }
+    return performanceDiagnostic;
   });
   ipcMain.handle("nodus:get-native-capture-status", () => getNativeCaptureStatus());
+  ipcMain.handle("nodus:start-native-media", (event, input) => startNativeMedia(event.sender, input));
+  ipcMain.handle("nodus:signal-native-media", (event, input) => signalNativeMedia(event.sender, input));
+  ipcMain.handle("nodus:stop-native-media", (event, sessionId) => stopNativeMedia(event.sender, sessionId));
   ipcMain.handle("nodus:get-service-status", () => getServiceStatus());
   ipcMain.handle("nodus:install-service", () => runServiceCommand("--install"));
   ipcMain.handle("nodus:uninstall-service", () => runServiceCommand("--uninstall"));
@@ -389,18 +447,142 @@ function setupIpc() {
   ipcMain.handle("nodus:write-diagnostic", (_event, message) => appendLog(String(message || "").slice(0, 2000)));
   ipcMain.handle("nodus:write-performance", (_event, message) => appendLog(String(message || "").slice(0, 16_000), "performance.log"));
   ipcMain.handle("nodus:get-gpu-diagnostics", () => getGpuDiagnostics());
+  ipcMain.handle("nodus:get-render-display-info", (event, viewport) => getRenderDisplayInfo(event.sender, viewport));
   ipcMain.handle("nodus:google-login", (_event, options) => googleLogin(options));
+}
+
+function startNativeMedia(sender, input) {
+  const sessionId = String(input?.sessionId || "");
+  if (!/^[\da-f-]{36}$/i.test(sessionId) || nativeMedia.has(sessionId)) throw new Error("Sessao nativa invalida.");
+  if (!fs.existsSync(nativeMediaExe) || !fs.existsSync(path.join(gstreamerRoot, "lib", "gstreamer-1.0", "gstd3d11.dll"))) {
+    throw new Error("Backend WGC indisponivel.");
+  }
+  const monitor = Number.isInteger(input?.monitor) && input.monitor >= -1 ? input.monitor : -1;
+  const width = Number.isInteger(input?.width) && input.width > 0 ? input.width : 0;
+  const height = Number.isInteger(input?.height) && input.height > 0 ? input.height : 0;
+  const fps = Number.isInteger(input?.fps) ? Math.max(5, Math.min(60, input.fps)) : 60;
+  const bitrateKbps = Number.isInteger(input?.bitrateKbps) ? Math.max(1000, Math.min(30000, input.bitrateKbps)) : 14000;
+  const child = spawn(nativeMediaExe, [String(monitor), String(fps), String(bitrateKbps), String(width), String(height), input?.shareAudio ? "1" : "0"], {
+    windowsHide: true,
+    stdio: ["pipe", "pipe", "pipe"],
+    env: {
+      ...process.env,
+      PATH: `${path.join(gstreamerRoot, "bin")};${process.env.PATH || ""}`,
+      GST_PLUGIN_PATH: path.join(gstreamerRoot, "lib", "gstreamer-1.0"),
+      GST_PLUGIN_PATH_1_0: path.join(gstreamerRoot, "lib", "gstreamer-1.0"),
+      GST_PLUGIN_SYSTEM_PATH_1_0: "",
+      GST_REGISTRY_1_0: path.join(app.getPath("userData"), "gstreamer-registry.bin"),
+      GST_PLUGIN_SCANNER: path.join(gstreamerRoot, "libexec", "gstreamer-1.0", "gst-plugin-scanner.exe"),
+    },
+  });
+  const iceUris = [];
+  for (const server of Array.isArray(input?.iceServers) ? input.iceServers.slice(0, 12) : []) {
+    for (const raw of (Array.isArray(server?.urls) ? server.urls : [server?.urls]).slice(0, 6)) {
+      if (typeof raw !== "string" || raw.length > 300) continue;
+      if (/^stun:/i.test(raw)) iceUris.push(`stun://${raw.replace(/^stun:(\/\/)?/i, "")}`);
+      if (/^turns?:/i.test(raw) && typeof server.username === "string" && typeof server.credential === "string") {
+        const scheme = raw.toLowerCase().startsWith("turns:") ? "turns" : "turn";
+        const host = raw.replace(/^turns?:(\/\/)?/i, "");
+        iceUris.push(`${scheme}://${encodeURIComponent(server.username)}:${encodeURIComponent(server.credential)}@${host}`);
+      }
+    }
+  }
+  child.stdin.write(`S ${iceUris.length}\n${iceUris.map((uri) => `${uri}\n`).join("")}`);
+  nativeMedia.set(sessionId, { child, owner: sender.id });
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    let output = "";
+    let stderr = "";
+    let encoderInfo = {};
+    const timer = setTimeout(() => { if (!settled) { settled = true; child.kill(); reject(new Error("WGC nao iniciou.")); } }, 8000);
+    const emit = (type, payload) => {
+      if (!sender.isDestroyed()) sender.send("nodus:native-media-signal", { sessionId, type, ...payload });
+    };
+    child.stdout.on("data", (chunk) => {
+      output += chunk.toString("utf8");
+      let end;
+      while ((end = output.indexOf("\n")) >= 0) {
+        const line = output.slice(0, end).trim();
+        output = output.slice(end + 1);
+        const [code, first, second] = line.split(" ");
+        if (code === "R" && !settled) { settled = true; clearTimeout(timer); resolve({ backend: "wgc", cursorCapture: false, ...encoderInfo }); }
+        else if (code === "H") encoderInfo = { encoderImplementation: Buffer.from(first, "base64").toString("utf8"), hardwareEncode: second === "1" };
+        else if (code === "O") emit("offer", { sdp: Buffer.from(first, "base64").toString("utf8") });
+        else if (code === "I") emit("candidate", { sdpMLineIndex: Number(first), candidate: Buffer.from(second, "base64").toString("utf8") });
+        else if (code === "M") {
+          const [, captureFrames, encodeFrames, rtpPackets, rtpBytes, encodeTimeUs, encodeSamples, encodeP95Us] = line.split(" ");
+          emit("metrics", { captureFrames: Number(captureFrames), encodeFrames: Number(encodeFrames), rtpPackets: Number(rtpPackets), rtpBytes: Number(rtpBytes), encodeTimeUs: Number(encodeTimeUs || 0), encodeSamples: Number(encodeSamples || 0), encodeP95Ms: Number(encodeP95Us || 0) / 1000 });
+        }
+        else if (code === "V") emit("source", { width: Number(first), height: Number(second) });
+        else if (code === "C") emit("connected", {});
+        else if (code === "E") {
+          const message = line.slice(2).replace(/(turns?:\/\/)[^\s@]+@/gi, "$1[redacted]@").slice(0, 1000);
+          appendLog(`native-media-error session=${sessionId} ${message}`);
+          if (!settled) {
+            settled = true;
+            clearTimeout(timer);
+            child.nodusStopped = true;
+            child.kill();
+            reject(new Error(`WGC: ${message}`));
+          } else emit("error", { message });
+        }
+      }
+    });
+    child.stderr.on("data", (chunk) => {
+      const message = chunk.toString("utf8").replace(/(turns?:\/\/)[^\s@]+@/gi, "$1[redacted]@");
+      stderr = (stderr + message).slice(-1200);
+      appendLog(`native-media ${message.slice(0, 600)}`);
+    });
+    child.on("error", (error) => { if (!settled) { settled = true; clearTimeout(timer); reject(error); } });
+    child.on("close", (code) => {
+      if (nativeMedia.get(sessionId)?.child === child) nativeMedia.delete(sessionId);
+      if (!settled) { settled = true; clearTimeout(timer); reject(new Error(`WGC encerrou (${code}). ${stderr.trim()}`)); }
+      else if (!child.nodusStopped) emit("exit", { code });
+    });
+  });
+}
+
+function signalNativeMedia(sender, input) {
+  const entry = nativeMedia.get(String(input?.sessionId || ""));
+  if (!entry || entry.owner !== sender.id) return false;
+  if (input.type === "answer" && typeof input.sdp === "string" && input.sdp.length < 100_000) {
+    entry.child.stdin.write(`A ${Buffer.from(input.sdp).toString("base64")}\n`);
+    return true;
+  }
+  if (input.type === "candidate" && typeof input.candidate === "string" && input.candidate.length < 4096) {
+    const index = Number(input.sdpMLineIndex);
+    if (!Number.isInteger(index) || index < 0 || index > 16) return false;
+    entry.child.stdin.write(`I ${index} ${Buffer.from(input.candidate).toString("base64")}\n`);
+    return true;
+  }
+  if (input.type === "bitrate" && Number.isInteger(input.bitrateKbps) && input.bitrateKbps >= 1000 && input.bitrateKbps <= 50000) {
+    entry.child.stdin.write(`B ${input.bitrateKbps}\n`);
+    return true;
+  }
+  return false;
+}
+
+function stopNativeMedia(sender, sessionId) {
+  const entry = nativeMedia.get(String(sessionId || ""));
+  if (!entry || entry.owner !== sender.id) return;
+  nativeMedia.delete(sessionId);
+  entry.child.nodusStopped = true;
+  entry.child.stdin.end("Q\n");
+  setTimeout(() => { if (entry.child.exitCode === null) entry.child.kill(); }, 1500).unref();
 }
 
 function getNativeCaptureStatus() {
   if (!fs.existsSync(nativeCaptureProbe)) return { available: false, supported: false, backend: "chromium-getdisplaymedia" };
   try {
-    const result = require("node:child_process").execFileSync(nativeCaptureProbe, [], { encoding: "utf8", timeout: 1500, windowsHide: true });
+    const result = require("node:child_process").execFileSync(nativeCaptureProbe, [], { encoding: "utf8", timeout: 5000, windowsHide: true });
     const capabilities = JSON.parse(result);
     const supported = capabilities.windowsGraphicsCapture === true;
     return {
       available: true,
       supported,
+      nativeMediaExperimental: process.env.NODUS_WGC_EXPERIMENTAL === "1",
+      nativeMediaAvailable: fs.existsSync(nativeMediaExe) && fs.existsSync(path.join(gstreamerRoot, "lib", "gstreamer-1.0", "gstd3d11.dll")),
+      cursorSuppressionSupported: capabilities.cursorSuppressionSupported === true,
       backend: "chromium-getdisplaymedia",
       d3d11Hardware: capabilities.d3d11Hardware === true,
       hardwareH264: capabilities.hardwareH264 === true,
@@ -423,6 +605,24 @@ async function getGpuDiagnostics() {
     videoDecode: features.video_decode || "unknown",
     gpuCompositing: features.gpu_compositing || "unknown",
     gpuProcessAvailable: app.getAppMetrics().some((metric) => metric.type === "GPU"),
+  };
+}
+
+function getRenderDisplayInfo(webContents, viewport) {
+  const window = BrowserWindow.fromWebContents(webContents);
+  const display = window ? screen.getDisplayMatching(window.getBounds()) : screen.getPrimaryDisplay();
+  const metric = app.getAppMetrics().find((item) => item.pid === webContents.getOSProcessId());
+  return {
+    displayId: String(display.id),
+    displayWidth: display.size.width,
+    displayHeight: display.size.height,
+    refreshRateHz: Number(display.displayFrequency) || null,
+    scaleFactor: display.scaleFactor,
+    devicePixelRatio: Number(viewport?.devicePixelRatio) || 1,
+    viewportWidth: Number(viewport?.viewportWidth) || 0,
+    viewportHeight: Number(viewport?.viewportHeight) || 0,
+    fullscreen: Boolean(window?.isFullScreen()),
+    rendererCpuPercent: typeof metric?.cpu?.percentCPUUsage === "number" ? metric.cpu.percentCPUUsage : null,
   };
 }
 

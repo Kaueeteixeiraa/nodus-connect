@@ -67,13 +67,55 @@ async function printReport(reportArgs) {
   const lastAdaptation = [...sender].reverse().find((item) => item.adaptationReason);
   const knownLatency = [average(host, "encodeMs"), average(validPlayout, "jitterBufferMs"), average(viewer, "decodeMs")];
   const bottleneckOrder = Object.entries(distribution).sort((a, b) => b[1] - a[1]);
+  const renderDisplay = [...viewer].reverse().find((item) => item.renderDisplay)?.renderDisplay ?? null;
+  const hostDisplay = [...host].reverse().find((item) => item.renderDisplay)?.renderDisplay ?? null;
+  const configuredVideo = [...host].reverse().find((item) => item.configuredVideo)?.configuredVideo ?? null;
+  const actualVideo = [...host].reverse().find((item) => item.actualVideo)?.actualVideo ?? null;
+  const hostIce = [...host].reverse().find((item) => item.ice)?.ice ?? null;
+  const viewerIce = [...viewer].reverse().find((item) => item.ice)?.ice ?? null;
+  const iceEvents = records.filter((item) => item.sessionId === sessionId && (item.event?.startsWith("ice-") || item.event === "selected-candidate-pair" || item.event === "direct-failed"))
+    .sort((a, b) => Date.parse(a.at) - Date.parse(b.at));
+  const selectedIce = viewerIce?.selected ?? hostIce?.selected ?? null;
+  const inboundVideo = [...viewer].reverse().find((item) => item.inboundVideo)?.inboundVideo ?? null;
+  const presentation = [...viewer].reverse().find((item) => item.presentation)?.presentation ?? null;
+  const resolutionPipeline = inspectResolutionPipeline(actualVideo, inboundVideo, presentation);
+  const preset = configuredVideo?.diagnostic?.preset ?? null;
+  const activation = preset ? [...records].reverse().find((item) => item.event === "diagnostic-preset-activated" && item.preset === preset) ?? null : null;
+  const expectedBenchmark = preset ? {
+    resolution: configuredVideo?.resolution, fps: configuredVideo?.fps, bitrate: configuredVideo?.bitrate,
+    maxFramerate: configuredVideo?.diagnostic?.maxFramerate, scaleResolutionDownBy: configuredVideo?.diagnostic?.scaleResolutionDownBy,
+    nativeResolution: configuredVideo?.diagnostic?.nativeResolution === true,
+    contentHint: configuredVideo?.diagnostic?.contentHint ?? null,
+    degradationPreference: configuredVideo?.diagnostic?.degradationPreference ?? null,
+  } : null;
+  const activationValid = !expectedBenchmark ? null : Boolean(activation
+    && `${activation.requestedWidth}x${activation.requestedHeight}` === expectedBenchmark.resolution
+    && activation.requestedFps === expectedBenchmark.fps
+    && activation.maxFramerate === expectedBenchmark.maxFramerate
+    && activation.bitrateKbps === Math.round(expectedBenchmark.bitrate / 1000)
+    && activation.scaleResolutionDownBy === expectedBenchmark.scaleResolutionDownBy
+    && activation.adaptiveLocked === true
+    && (!expectedBenchmark.nativeResolution || activation.nativeResolution === true)
+    && (!expectedBenchmark.contentHint || activation.contentHint === expectedBenchmark.contentHint)
+    && (!expectedBenchmark.degradationPreference || activation.degradationPreference === expectedBenchmark.degradationPreference));
+  const actualSender = actualVideo?.sender ?? null;
+  const track = actualVideo?.capture ?? null;
+  const senderValid = !expectedBenchmark || !actualSender ? null : actualSender.maxFramerate === expectedBenchmark.maxFramerate
+    && actualSender.scaleResolutionDownBy === expectedBenchmark.scaleResolutionDownBy
+    && actualSender.maxBitrate === expectedBenchmark.bitrate
+    && (!expectedBenchmark.degradationPreference || actualSender.degradationPreference === expectedBenchmark.degradationPreference)
+    && (!expectedBenchmark.contentHint || actualVideo.contentHint === expectedBenchmark.contentHint);
+  const trackValid = !expectedBenchmark || !track ? null : expectedBenchmark.nativeResolution
+    ? track.width > 0 && track.height > 0 && track.frameRate === expectedBenchmark.fps
+    : track.width === Number(expectedBenchmark.resolution?.split("x")[0]) && track.height === Number(expectedBenchmark.resolution?.split("x")[1]) && track.frameRate === expectedBenchmark.fps;
+  const adaptiveChanges = maximum(host, "profileChangeCount") ?? 0;
   const report = {
     sessionId,
     diagnostic: {
       label: mode(windowSamples.map((item) => item.diagnosticLabel).filter(Boolean)) ?? null,
       lightweightMode: Object.fromEntries(["host", "viewer"].map((role) => [role, mode(windowSamples.filter((item) => item.role === role).map((item) => item.lightweightMode).filter((value) => typeof value === "boolean")) ?? null])),
-      configured: [...host].reverse().find((item) => item.configuredVideo)?.configuredVideo ?? null,
-      actual: [...host].reverse().find((item) => item.actualVideo)?.actualVideo ?? null,
+      configured: configuredVideo,
+      actual: actualVideo,
       pixelsPerSecond: (() => {
         const capture = [...host].reverse().find((item) => item.actualVideo?.capture)?.actualVideo.capture;
         return capture?.width && capture?.height && capture?.frameRate ? Math.round(capture.width * capture.height * capture.frameRate) : null;
@@ -95,6 +137,7 @@ async function printReport(reportArgs) {
       jitterBufferMs: round(average(validPlayout, "jitterBufferMs")),
       rtpJitterMs: round(average(receiver, "jitterMs")),
       availableKbps: round(average(host, "availableKbps")),
+      outgoingBitrateKbps: round(average(host, "bitrateKbps")),
       route: mode(receiver.map((item) => item.route).filter(Boolean)) ?? "unknown",
       transport: mode(receiver.map((item) => item.transport).filter(Boolean)) ?? "unknown",
     },
@@ -111,6 +154,7 @@ async function printReport(reportArgs) {
       encodeMsP95: round(percentile(sender.filter((item) => item.encodedFps > 0), "encodeMs", 0.95)),
       decodeMs: round(average(viewer.filter((item) => item.decodedFps > 0), "decodeMs")),
       decodeMsP95: round(percentile(viewer.filter((item) => item.decodedFps > 0), "decodeMs", 0.95)),
+      averageQp: round(averageNested(host, "actualVideo", "outbound", "averageQp")),
       freezes: sum(receiver, "freezes"),
       freezeDurationMs: numbers(receiver, "freezeDurationMs").length ? sum(receiver, "freezeDurationMs") : null,
       droppedFrames: sum(receiver, "droppedFrames"),
@@ -128,6 +172,56 @@ async function printReport(reportArgs) {
       appliedFps: round(average(sender, "appliedFps")),
       appliedResolution: mode(sender.filter((item) => item.appliedWidth && item.appliedHeight).map((item) => `${item.appliedWidth}x${item.appliedHeight}`)) ?? "unknown",
       appliedBitrateKbps: round(average(sender, "appliedBitrateKbps")),
+    },
+    rendering: {
+      display: renderDisplay,
+      refreshRateHz: renderDisplay?.refreshRateHz ?? null,
+      devicePixelRatio: renderDisplay?.devicePixelRatio ?? null,
+      fullscreen: renderDisplay?.fullscreen ?? null,
+      rendererCpuPercent: renderDisplay?.rendererCpuPercent ?? null,
+    },
+    imageQuality: {
+      resolutionPipeline,
+      doubleScaling: resolutionPipeline.doubleScaling,
+      contentHint: actualVideo?.contentHint ?? null,
+      degradationPreference: actualSender?.degradationPreference ?? null,
+      actualOutgoingBitrateKbps: round(average(host, "bitrateKbps")),
+      availableOutgoingBitrateKbps: round(average(host, "availableKbps")),
+      averageQp: round(averageNested(host, "actualVideo", "outbound", "averageQp")),
+    },
+    cursor: actualVideo?.cursorCapture ?? null,
+    cursorValidation: { localOverlayObserved: viewer.some((item) => item.localCursorOverlay === true),
+      hostCursorExcludedFromVideo: actualVideo?.cursorCapture?.applied === "never" ? "SETTINGS_CONFIRMED_VISUAL_UNVERIFIED" : actualVideo?.cursorCapture?.applied ? "NO" : "INCONCLUSIVE" },
+    ice: {
+      policy: [...windowSamples].reverse().find((item) => item.iceTransportPolicy)?.iceTransportPolicy ?? null,
+      configuredServers: iceEvents.filter((item) => item.event === "ice-started").map(({ role, servers }) => ({ role,
+        servers: Array.isArray(servers) ? servers.map(({ type, host, transport }) => ({ type, host, transport })) : [] })),
+      states: { host: host.at(-1)?.iceStates ?? null, viewer: viewer.at(-1)?.iceStates ?? null },
+      host: hostIce, viewer: viewerIce, selectedPair: selectedIce,
+      classification: viewerIce?.classification ?? hostIce?.classification ?? "UNKNOWN",
+      directFailureReason: viewerIce?.failureReason ?? hostIce?.failureReason ?? null,
+      directAttempted: viewerIce?.directPairs?.attempted ?? hostIce?.directPairs?.attempted ?? null,
+      stun: { host: stunResult(hostIce, host.at(-1)?.iceStates), viewer: stunResult(viewerIce, viewer.at(-1)?.iceStates) },
+      turn: { used: selectedIce?.route === "relay", server: [hostIce?.selected?.local, viewerIce?.selected?.local].find((candidate) => candidate?.type === "relay" && candidate.server)?.server ?? null,
+        region: null, transport: [hostIce?.selected?.local, viewerIce?.selected?.local].find((candidate) => candidate?.type === "relay")?.relayProtocol ?? null,
+        segmentRttMs: null },
+      restarts: { host: host.at(-1)?.iceRestartCount ?? null, viewer: viewer.at(-1)?.iceRestartCount ?? null,
+        viewerReason: viewer.at(-1)?.iceRestartReason ?? null, viewerTimeSinceLastMs: viewer.at(-1)?.timeSinceLastIceRestartMs ?? null },
+      timeline: iceEvents.map(({ at, role, event, elapsedMs, side, type, protocol, priority, state, pair, reason, count, server, code }) =>
+        ({ at, role, event, elapsedMs, side, type, protocol, priority, state, pair, reason, count, server, code })),
+    },
+    validation: {
+      requested: configuredVideo ? { resolution: configuredVideo.resolution ?? null, fps: configuredVideo.fps ?? null, bitrate: configuredVideo.bitrate ?? null, lockAdaptive: configuredVideo.diagnostic?.lockAdaptive ?? null, nativeResolution: configuredVideo.diagnostic?.nativeResolution ?? false, contentHint: configuredVideo.diagnostic?.contentHint ?? null, degradationPreference: configuredVideo.diagnostic?.degradationPreference ?? null } : null,
+      trackSettings: actualVideo?.capture ?? null,
+      constraints: actualVideo?.constraints ?? null,
+      sender: actualVideo?.sender ?? null,
+      qualityLimitationDurations: actualVideo?.outbound?.qualityLimitationDurations ?? null,
+      rendererCpuPercent: { host: hostDisplay?.rendererCpuPercent ?? null, viewer: renderDisplay?.rendererCpuPercent ?? null },
+      benchmark: !expectedBenchmark ? { status: "NOT_REQUESTED" } : {
+        status: activationValid && senderValid && trackValid && adaptiveChanges === 0 ? "PASS" : "FAIL",
+        activation, activationValid, senderValid, trackValid, adaptiveChanges,
+        abortReason: activationValid ? senderValid === false ? "SENDER_PARAMETERS_MISMATCH" : trackValid === false ? "TRACK_SETTINGS_MISMATCH" : adaptiveChanges > 0 ? "ADAPTIVE_PROFILE_CHANGED" : null : "DIAGNOSTIC_PRESET_NOT_CONFIRMED",
+      },
     },
     buffering: {
       webRtcPlayoutMs: round(average(validPlayout, "jitterBufferMs")),
@@ -155,6 +249,8 @@ async function printReport(reportArgs) {
     },
     warnings: [
       average(viewer, "decodedFps") > 0 && (presentedFps ?? average(viewer, "renderFps")) < average(viewer, "decodedFps") * 0.85 ? "POSSIBLE RENDER BOTTLENECK" : null,
+      actualVideo?.cursorCapture?.applied && actualVideo.cursorCapture.applied !== "never" ? "CURSOR_SUPPRESSION_FAILED; HOST CURSOR STILL CAPTURED; CURSOR DUPLICATION RISK" : null,
+      actualVideo?.cursorCapture && !actualVideo.cursorCapture.applied ? "CURSOR DUPLICATION RISK (CAPTURE CURSOR UNVERIFIED)" : null,
       presentedFps !== null && callbackFps !== null && callbackFps < presentedFps * 0.85 ? "FRAME CALLBACKS UNDERCOUNT PRESENTED FRAMES" : null,
       average(validPlayout, "jitterBufferMs") >= 150 ? "HIGH WEBRTC PLAYOUT DELAY (SOURCE UNDETERMINED)" : null,
     ].filter(Boolean),
@@ -170,6 +266,12 @@ function parseRecords(contents) {
     if (!payload) return [];
     try { return [JSON.parse(payload)]; } catch { return []; }
   });
+}
+
+function stunResult(ice, states) {
+  if (!ice) return "UNVERIFIED";
+  if (ice.counts?.local?.srflx > 0) return "SUCCESS";
+  return states?.gathering === "complete" ? "NO_SRFLX_OBSERVED" : "PENDING";
 }
 
 function counterDelta(items, key) {
@@ -212,6 +314,34 @@ function numbers(items, key) {
 function average(items, key) {
   const list = numbers(items, key);
   return list.length ? list.reduce((total, value) => total + value, 0) / list.length : null;
+}
+
+function averageNested(items, ...path) {
+  const values = items.map((item) => path.reduce((value, key) => value?.[key], item)).filter((value) => typeof value === "number" && Number.isFinite(value));
+  return values.length ? values.reduce((total, value) => total + value, 0) / values.length : null;
+}
+
+function inspectResolutionPipeline(actualVideo, inboundVideo, presentation) {
+  const source = actualVideo?.source ?? null;
+  const capture = actualVideo?.capture ?? null;
+  const outbound = actualVideo?.outbound ?? null;
+  const scale = actualVideo?.sender?.scaleResolutionDownBy ?? null;
+  const streamWidth = inboundVideo?.width ?? outbound?.width ?? null;
+  const streamHeight = inboundVideo?.height ?? outbound?.height ?? null;
+  const presentationUpscaled = Boolean(streamWidth && streamHeight && presentation?.physicalWidth && presentation?.physicalHeight
+    && (presentation.physicalWidth > streamWidth * 1.05 || presentation.physicalHeight > streamHeight * 1.05));
+  const senderDownscaled = Boolean(scale && scale > 1.01) || Boolean(capture?.width && capture?.height && outbound?.width && outbound?.height
+    && (outbound.width < capture.width * .99 || outbound.height < capture.height * .99));
+  return {
+    source,
+    track: capture ? { width: capture.width ?? null, height: capture.height ?? null, frameRate: capture.frameRate ?? null } : null,
+    sender: { scaleResolutionDownBy: scale, degradationPreference: actualVideo?.sender?.degradationPreference ?? null },
+    outbound: outbound ? { width: outbound.width ?? null, height: outbound.height ?? null } : null,
+    inbound: inboundVideo,
+    presentation,
+    doubleScaling: !capture || !outbound || !inboundVideo || !presentation ? "UNKNOWN"
+      : senderDownscaled && presentationUpscaled ? "YES" : "NO",
+  };
 }
 
 function sum(items, key) {

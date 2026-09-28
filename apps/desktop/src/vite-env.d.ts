@@ -2,15 +2,21 @@
 
 interface Window {
   nodusDesktop?: {
+    iceDiagnosticsEnabled: boolean;
     setTrayIdentity(identity: { nodusId: string; deviceName: string; status: string }): void;
     getIdentity(): Promise<unknown>;
     saveIdentity(identity: unknown): Promise<void>;
     getServerInfo(): Promise<{ port: number; urls: string[] }>;
     getAppInfo(): Promise<{ version: string; googleClientConfigured?: boolean }>;
     setThemeIcon(theme: string, dataUrl: string): Promise<boolean>;
-    getPerformanceDiagnostic(): Promise<{ label: string; videoOnly: boolean; resolution?: string; fps?: number; bitrate?: number; maxFramerate?: number; scaleResolutionDownBy?: number; lockAdaptive: boolean } | null>;
-    getNativeCaptureStatus(): Promise<{ available: boolean; supported: boolean; backend?: string; d3d11Hardware?: boolean; hardwareH264?: boolean; hardwareH264Encoders?: number; adapter?: string }>;
+    getPerformanceDiagnostic(): Promise<{ label: string; preset?: string | null; source?: "cli" | "env" | "json"; videoOnly: boolean; resolution?: string; fps?: number; bitrate?: number; maxFramerate?: number; scaleResolutionDownBy?: number; lockAdaptive: boolean; nativeResolution?: boolean; contentHint?: "detail" | "motion"; degradationPreference?: "maintain-resolution" | "maintain-framerate" } | null>;
+    getNativeCaptureStatus(): Promise<{ available: boolean; supported: boolean; nativeMediaExperimental?: boolean; nativeMediaAvailable?: boolean; cursorSuppressionSupported?: boolean; backend?: string; d3d11Hardware?: boolean; hardwareH264?: boolean; hardwareH264Encoders?: number; adapter?: string }>;
+    startNativeMedia(options: { sessionId: string; monitor: number; fps: number; bitrateKbps: number; width: number; height: number; shareAudio: boolean; iceServers: RTCIceServer[] }): Promise<{ backend: "wgc"; cursorCapture: false; encoderImplementation?: string; hardwareEncode?: boolean }>;
+    signalNativeMedia(signal: { sessionId: string; type: "answer" | "candidate" | "bitrate"; sdp?: string; candidate?: string; sdpMLineIndex?: number; bitrateKbps?: number }): Promise<boolean>;
+    stopNativeMedia(sessionId: string): Promise<void>;
+    onNativeMediaSignal(callback: (signal: { sessionId: string; type: "offer" | "candidate" | "metrics" | "source" | "connected" | "error" | "exit"; sdp?: string; candidate?: string; sdpMLineIndex?: number; captureFrames?: number; encodeFrames?: number; encodeTimeUs?: number; encodeSamples?: number; encodeP95Ms?: number; rtpPackets?: number; rtpBytes?: number; width?: number; height?: number; message?: string }) => void): () => void;
     getGpuDiagnostics(): Promise<{ adapter: string; videoEncode: string; videoDecode: string; gpuCompositing: string; gpuProcessAvailable: boolean }>;
+    getRenderDisplayInfo(viewport?: { devicePixelRatio: number; viewportWidth: number; viewportHeight: number }): Promise<{ displayId: string; displayWidth: number; displayHeight: number; refreshRateHz: number | null; scaleFactor: number; devicePixelRatio: number; viewportWidth: number; viewportHeight: number; fullscreen: boolean; rendererCpuPercent: number | null }>;
     getServiceStatus(): Promise<{ installed: boolean; running: boolean }>;
     installService(): Promise<{ ok: boolean; error?: string }>;
     uninstallService(): Promise<{ ok: boolean; error?: string }>;

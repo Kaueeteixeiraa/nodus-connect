@@ -15,7 +15,8 @@ VIAddVersionKey "LegalCopyright" "Nodus Connect"
 RequestExecutionLevel user
 SilentInstall silent
 ShowInstDetails nevershow
-SetCompressor /FINAL zlib
+SetCompressor /SOLID /FINAL lzma
+SetCompressorDictSize 64
 
 Section
   InitPluginsDir

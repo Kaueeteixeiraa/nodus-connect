@@ -1,6 +1,7 @@
 const { contextBridge, ipcRenderer } = require("electron");
 
 contextBridge.exposeInMainWorld("nodusDesktop", {
+  iceDiagnosticsEnabled: process.env.NODUS_ICE_DIAGNOSTIC === "1",
   setTrayIdentity(identity) {
     ipcRenderer.send("nodus:tray-identity", identity);
   },
@@ -25,8 +26,25 @@ contextBridge.exposeInMainWorld("nodusDesktop", {
   getNativeCaptureStatus() {
     return ipcRenderer.invoke("nodus:get-native-capture-status");
   },
+  startNativeMedia(options) {
+    return ipcRenderer.invoke("nodus:start-native-media", options);
+  },
+  signalNativeMedia(signal) {
+    return ipcRenderer.invoke("nodus:signal-native-media", signal);
+  },
+  stopNativeMedia(sessionId) {
+    return ipcRenderer.invoke("nodus:stop-native-media", sessionId);
+  },
+  onNativeMediaSignal(callback) {
+    const listener = (_event, signal) => callback(signal);
+    ipcRenderer.on("nodus:native-media-signal", listener);
+    return () => ipcRenderer.removeListener("nodus:native-media-signal", listener);
+  },
   getGpuDiagnostics() {
     return ipcRenderer.invoke("nodus:get-gpu-diagnostics");
+  },
+  getRenderDisplayInfo(viewport) {
+    return ipcRenderer.invoke("nodus:get-render-display-info", viewport);
   },
   getServiceStatus() {
     return ipcRenderer.invoke("nodus:get-service-status");

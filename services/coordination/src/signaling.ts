@@ -4,7 +4,7 @@ import type { SessionPermission } from "../../../packages/protocol/src/index.js"
 import type { RemoteFrameRate, RemoteResolution } from "../../../apps/desktop/src/core/api";
 
 export type SessionRequestStatus = "pending" | "accepted" | "denied";
-export type SignalType = "offer" | "answer" | "ice-candidate" | "disconnect";
+export type SignalType = "offer" | "answer" | "ice-candidate" | "media-fallback" | "disconnect";
 
 export interface SessionRequest {
   id: string;

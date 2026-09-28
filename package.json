@@ -1,6 +1,6 @@
 {
   "name": "nodus-connect",
-  "version": "0.4.20",
+  "version": "0.4.26",
   "description": "Acesso remoto seguro, rapido e gratuito.",
   "author": "Nodus Connect",
   "private": true,
@@ -11,15 +11,18 @@
     "icons": "node scripts/generate-icons.mjs",
     "native:capture": "node scripts/build-native-capture.mjs",
     "native:capture:test": "node scripts/build-native-capture.mjs --test",
+    "native:media": "node scripts/build-native-media.mjs",
+    "native:media:runtime": "node scripts/prepare-native-media-runtime.mjs",
     "native:service": "node scripts/build-native-service.mjs",
     "dev:desktop": "vite --config apps/desktop/vite.config.ts",
     "dev:coordination": "tsx services/coordination/src/server.ts",
     "start:relay": "tsx services/coordination/src/server.ts",
     "desktop:dev": "node scripts/desktop-runner.mjs dev",
     "desktop:start": "node scripts/desktop-runner.mjs start",
-    "desktop:pack": "pnpm icons && pnpm native:capture && pnpm build && electron-builder --win --x64 --dir",
-    "desktop:build": "pnpm icons && pnpm native:capture && pnpm build && electron-builder --win --x64",
-    "installer:build": "pnpm icons && pnpm native:capture && pnpm native:service && pnpm build && electron-builder --win --x64 --dir --config installer-builder.json && node scripts/make-installer.mjs",
+    "desktop:pack": "pnpm icons && pnpm native:capture && pnpm native:media && pnpm native:media:runtime && pnpm build && electron-builder --win --x64 --dir",
+    "desktop:build": "pnpm icons && pnpm native:capture && pnpm native:media && pnpm native:media:runtime && pnpm build && electron-builder --win --x64",
+    "installer:build": "pnpm icons && pnpm native:capture && pnpm native:media && pnpm native:media:runtime && pnpm native:service && pnpm build && electron-builder --win --x64 --dir --config installer-builder.json && node scripts/make-installer.mjs",
+    "perf:local": "pnpm build && pnpm exec electron scripts/local-performance-lab.cjs",
     "build": "tsc --noEmit && vite build --config apps/desktop/vite.config.ts",
     "test": "vitest run",
     "firebase:login": "npx firebase-tools login",
@@ -66,8 +69,13 @@
         "to": "native",
         "filter": [
           "nodus-capture-status.exe",
-          "nodus-service.exe"
+          "nodus-service.exe",
+          "nodus-wgc-media.exe"
         ]
+      },
+      {
+        "from": "work/gstreamer-runtime-package",
+        "to": "native/gstreamer"
       }
     ],
     "win": {

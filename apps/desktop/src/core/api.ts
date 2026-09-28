@@ -70,7 +70,7 @@ export interface SignalMessage {
   sessionId: string;
   from: string;
   to: string;
-  type: "offer" | "answer" | "ice-candidate" | "disconnect";
+  type: "offer" | "answer" | "ice-candidate" | "media-fallback" | "disconnect";
   payload: unknown;
   createdAt: string;
 }
