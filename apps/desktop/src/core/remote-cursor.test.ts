@@ -1,5 +1,22 @@
 import { describe, expect, it } from "vitest";
-import { CURSOR_HOTSPOT, canUseCursorFreeNativeCapture, captureBackendPlan, cursorCaptureStatus, mapVideoPointer, requireCursorFreeCapture, requireLegacyCaptureAllowed } from "./remote-cursor";
+import { CURSOR_HOTSPOT, canUseCursorFreeNativeCapture, captureBackendPlan, cursorCaptureStatus, mapVideoPointer, requireCursorFreeCapture, requireLegacyCaptureAllowed, shouldHideHostCursor } from "./remote-cursor";
+
+describe("host cursor visibility policy", () => {
+  it("hides only a connected host with mouse permission", () => {
+    expect(shouldHideHostCursor("host", "connected", ["mouse:control"], true, "")).toBe(true);
+    expect(shouldHideHostCursor("host", "connected", ["mouse:control"], true, "Captura legada: aviso")).toBe(true);
+    expect(shouldHideHostCursor("viewer", "connected", ["mouse:control"], true, "")).toBe(false);
+    expect(shouldHideHostCursor("host", "connected", [], true, "")).toBe(false);
+    expect(shouldHideHostCursor("host", "connected", ["mouse:control"], false, "")).toBe(false);
+  });
+  it.each(["new", "connecting", "disconnected", "failed", "closed"])("keeps/restores the host cursor when peer state is %s", (state) => {
+    expect(shouldHideHostCursor("host", state, ["mouse:control"], true, "")).toBe(false);
+  });
+  it("restores on error and enables hiding again only after recovery", () => {
+    expect(shouldHideHostCursor("host", "connected", ["mouse:control"], true, "Reconectando...")).toBe(false);
+    expect(shouldHideHostCursor("host", "connected", ["mouse:control"], true, "")).toBe(true);
+  });
+});
 
 describe("remote cursor mapping", () => {
   const available = { nativeMediaAvailable: true, supported: true, cursorSuppressionSupported: true, d3d11Hardware: true, hardwareH264: true };

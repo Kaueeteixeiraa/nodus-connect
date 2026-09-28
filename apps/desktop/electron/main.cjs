@@ -7,6 +7,7 @@ const http = require("node:http");
 const os = require("node:os");
 const path = require("node:path");
 const { pathToFileURL } = require("node:url");
+const { RemoteCursorVisibility } = require("./remote-cursor-visibility.cjs");
 
 let mainWindow;
 let tray;
@@ -32,6 +33,9 @@ const nativeCaptureProbe = app.isPackaged
 const nativeService = app.isPackaged
   ? path.join(process.resourcesPath, "native", "nodus-service.exe")
   : path.join(__dirname, "..", "..", "..", "native", "bin", "nodus-service.exe");
+const hostCursorVisibility = process.platform === "win32"
+  ? new RemoteCursorVisibility({ spawn, executable: nativeService, log: (message) => appendLog(message) })
+  : null;
 const nativeMediaExe = app.isPackaged
   ? path.join(process.resourcesPath, "native", "nodus-wgc-media.exe")
   : path.join(__dirname, "..", "..", "..", "native", "bin", "nodus-wgc-media.exe");
@@ -114,6 +118,7 @@ app.whenReady().then(() => {
 
 app.on("before-quit", () => {
   isQuitting = true;
+  hostCursorVisibility?.dispose();
   if (powerSaveBlockerId >= 0 && powerSaveBlocker.isStarted(powerSaveBlockerId)) powerSaveBlocker.stop(powerSaveBlockerId);
   inputHelper?.kill();
 });
@@ -146,6 +151,11 @@ function createMainWindow() {
     if (isQuitting || !minimizeToTray) return;
     event.preventDefault();
     mainWindow.hide();
+  });
+  mainWindow.webContents.on("render-process-gone", () => hostCursorVisibility?.setActive(false));
+  mainWindow.webContents.on("destroyed", () => hostCursorVisibility?.setActive(false));
+  mainWindow.webContents.on("did-start-navigation", (_event, _url, _inPlace, isMainFrame) => {
+    if (isMainFrame) hostCursorVisibility?.setActive(false);
   });
 
   mainWindow.webContents.setWindowOpenHandler((details) => {
@@ -383,6 +393,10 @@ function setupIpc() {
       if (powerSaveBlocker.isStarted(powerSaveBlockerId)) powerSaveBlocker.stop(powerSaveBlockerId);
       powerSaveBlockerId = -1;
     }
+  });
+  ipcMain.handle("nodus:set-host-cursor-active", (event, active) => {
+    if (event.sender !== mainWindow?.webContents) return;
+    hostCursorVisibility?.setActive(active === true);
   });
   ipcMain.handle("nodus:set-remote-keyboard-capture", (event, active) => {
     remoteKeyboardCaptureActive = Boolean(active);

@@ -60,7 +60,7 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import { formatNodusId, normalizeNodusId } from "../../../packages/common/src/nodusId";
-import { CURSOR_HOTSPOT, captureBackendPlan, cursorCaptureStatus, mapVideoPointer, requireLegacyCaptureAllowed } from "./core/remote-cursor";
+import { CURSOR_HOTSPOT, captureBackendPlan, cursorCaptureStatus, mapVideoPointer, requireLegacyCaptureAllowed, shouldHideHostCursor } from "./core/remote-cursor";
 import { holdSelectedRoute, iceServerInfo, iceSignalCandidate, inspectIceStats, withConfiguredStun } from "./core/ice-diagnostics";
 import type { SessionPermission } from "../../../packages/protocol/src/index";
 import {
@@ -801,6 +801,18 @@ export function App() {
   }, [captureSources]);
 
   useEffect(() => {
+    const restore = () => { window.nodusDesktop?.setHostCursorActive?.(false).catch(() => undefined); };
+    syncHostCursorVisibility();
+    const timer = window.setInterval(() => syncHostCursorVisibility(), 1000);
+    window.addEventListener("pagehide", restore);
+    return () => {
+      window.clearInterval(timer);
+      window.removeEventListener("pagehide", restore);
+      restore();
+    };
+  }, [settings.allowRemoteControl]);
+
+  useEffect(() => {
     const request = incomingRequests[0];
     if (!request || lastIncomingAlertRef.current === request.id) return;
     lastIncomingAlertRef.current = request.id;
@@ -979,6 +991,7 @@ export function App() {
     sessionId: string,
     patch: Partial<Omit<SessionRuntime, "session">> & { session?: Partial<RemoteSession> },
   ) {
+    if (patch.error && !patch.error.startsWith("Captura legada:")) syncHostCursorVisibility(sessionId);
     setSessionRuntimes((current) => {
       const next = current.map((item) => {
         if (item.session.sessionId !== sessionId) return item;
@@ -1000,6 +1013,13 @@ export function App() {
 
   function syncRemoteControl(runtimes = sessionsRef.current) {
     window.nodusDesktop?.setRemoteControlActive(settings.allowRemoteControl && runtimes.some((item) => item.session.role === "host")).catch(() => undefined);
+    syncHostCursorVisibility();
+  }
+
+  function syncHostCursorVisibility(excludeSessionId?: string) {
+    const active = sessionsRef.current.some((runtime) => runtime.session.sessionId !== excludeSessionId
+      && shouldHideHostCursor(runtime.session.role, peersRef.current.get(runtime.session.sessionId)?.connectionState ?? "closed", runtime.session.permissions, settings.allowRemoteControl, runtime.error));
+    window.nodusDesktop?.setHostCursorActive?.(active).catch(() => undefined);
   }
 
   async function startHostNativeMedia(sessionId: string, remoteNodusId: string, displayId: string, resolution: RemoteResolution, frameRate: RemoteFrameRate, shareAudio: boolean, iceServers: RTCIceServer[]) {
@@ -1298,6 +1318,7 @@ export function App() {
       logDiagnostic(`connection-state id=${sessionId} role=${role} state=${peer.connectionState}`);
       logIceEvent(sessionId, role, "peer-connection-state", { state: peer.connectionState });
       updateRuntime(sessionId, { session: { status: connectionLabel(peer.connectionState) } });
+      syncHostCursorVisibility();
     };
     peer.oniceconnectionstatechange = () => {
       logDiagnostic(`ice-state id=${sessionId} role=${role} state=${peer.iceConnectionState}`);
@@ -2279,6 +2300,7 @@ export function App() {
   }
 
   function cleanupSession(sessionId: string, stopShare: boolean) {
+    syncHostCursorVisibility(sessionId);
     pressedPointerButtonsRef.current.clear();
     lastPointerPointRef.current = null;
     const timer = signalTimersRef.current.get(sessionId);

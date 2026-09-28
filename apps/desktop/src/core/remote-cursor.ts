@@ -1,5 +1,10 @@
 export const CURSOR_HOTSPOT = { x: 0, y: 0 } as const;
 
+export function shouldHideHostCursor(role: string, connectionState: string, permissions: string[], allowRemoteControl: boolean, error: string) {
+  return role === "host" && connectionState === "connected" && allowRemoteControl && permissions.includes("mouse:control")
+    && (!error || error.startsWith("Captura legada:"));
+}
+
 export function cursorCaptureStatus(applied: string | null | undefined) {
   return applied === "never" ? "SETTINGS_EXCLUDED_VISUAL_UNVERIFIED" : applied ? "CURSOR_SUPPRESSION_FAILED" : "CURSOR_SUPPRESSION_UNVERIFIED";
 }

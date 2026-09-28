@@ -1,3 +1,4 @@
+#define OEMRESOURCE
 #include <windows.h>
 #include <shellapi.h>
 #include <userenv.h>
@@ -7,6 +8,7 @@
 #include <fcntl.h>
 #include <io.h>
 #include <string>
+#include <cstring>
 
 #pragma comment(lib, "advapi32.lib")
 #pragma comment(lib, "shell32.lib")
@@ -68,6 +70,152 @@ int runInputHelper() {
   return 0;
 }
 
+bool restoreSystemCursors(bool dryRun) {
+  std::puts("[CURSOR] Restoring local host cursor");
+  if (!dryRun && !SystemParametersInfoW(SPI_SETCURSORS, 0, nullptr, 0)) {
+    std::printf("[CURSOR] Failed to restore local host cursor: Windows error %lu\n", GetLastError());
+    std::fflush(stdout);
+    return false;
+  }
+  std::puts(dryRun ? "[CURSOR] Local host cursor restored (dry run)" : "[CURSOR] Local host cursor restored");
+  std::fflush(stdout);
+  return true;
+}
+
+class RemoteCursorVisibility {
+  bool hidden = false;
+  bool dryRun;
+  HANDLE armed;
+public:
+  RemoteCursorVisibility(bool dryRun, HANDLE armed) : dryRun(dryRun), armed(armed) {}
+  ~RemoteCursorVisibility() { restore(); }
+
+  bool hide() {
+    if (hidden) return true;
+    std::puts("[CURSOR] Hiding local host cursor");
+    // Arm recovery before the first desktop-wide change; never write the cursor scheme.
+    if (!SetEvent(armed)) {
+      std::printf("[CURSOR] Failed to hide local host cursor: recovery arm, Windows error %lu\n", GetLastError());
+      std::fflush(stdout);
+      return false;
+    }
+    hidden = true;
+    const DWORD ids[] = { OCR_NORMAL, OCR_IBEAM, OCR_WAIT, OCR_CROSS, OCR_UP,
+      OCR_SIZENWSE, OCR_SIZENESW, OCR_SIZEWE, OCR_SIZENS, OCR_SIZEALL,
+      OCR_NO, OCR_HAND, OCR_APPSTARTING };
+    unsigned char andMask[128], xorMask[128]{};
+    std::memset(andMask, 0xff, sizeof(andMask));
+    for (DWORD id : ids) {
+      if (dryRun) continue;
+      HCURSOR cursor = CreateCursor(GetModuleHandleW(nullptr), 0, 0, 32, 32, andMask, xorMask);
+      if (!cursor || !SetSystemCursor(cursor, id)) {
+        const DWORD error = GetLastError();
+        std::printf("[CURSOR] Failed to hide local host cursor: cursor %lu, Windows error %lu\n", id, error);
+        restore();
+        return false;
+      }
+    }
+    std::puts(dryRun ? "[CURSOR] Local host cursor hidden (dry run)" : "[CURSOR] Local host cursor hidden");
+    std::fflush(stdout);
+    return true;
+  }
+
+  bool restore() {
+    if (!hidden) return true;
+    if (!restoreSystemCursors(dryRun)) return false;
+    hidden = false;
+    ResetEvent(armed);
+    return true;
+  }
+};
+
+int runCursorWatchdog(DWORD helperPid, DWORD parentPid, const std::wstring& name, bool dryRun) {
+  HANDLE helper = OpenProcess(SYNCHRONIZE | PROCESS_TERMINATE, FALSE, helperPid);
+  HANDLE parent = OpenProcess(SYNCHRONIZE, FALSE, parentPid);
+  HANDLE ready = OpenEventW(EVENT_MODIFY_STATE, FALSE, (name + L"-ready").c_str());
+  HANDLE armed = OpenEventW(SYNCHRONIZE, FALSE, (name + L"-armed").c_str());
+  HANDLE pulse = OpenEventW(SYNCHRONIZE, FALSE, (name + L"-pulse").c_str());
+  const std::wstring mutexName = dryRun ? name + L"-test-lock" : L"Local\\NodusConnectCursorVisibility";
+  HANDLE mutex = CreateMutexW(nullptr, FALSE, mutexName.c_str());
+  if (!helper || !parent || !ready || !armed || !pulse || !mutex) return 1;
+  const DWORD lock = WaitForSingleObject(mutex, 0);
+  if (lock != WAIT_OBJECT_0 && lock != WAIT_ABANDONED) return 1;
+  if (lock == WAIT_ABANDONED && !dryRun) {
+    while (!restoreSystemCursors(false)) Sleep(1000);
+  }
+  if (!SetEvent(ready)) return 1;
+  HANDLE handles[] = { helper, parent, pulse };
+  DWORD result;
+  do { result = WaitForMultipleObjects(3, handles, FALSE, 5000); }
+  while (result == WAIT_OBJECT_0 + 2);
+  if (WaitForSingleObject(helper, 0) == WAIT_TIMEOUT) {
+    TerminateProcess(helper, 1);
+    WaitForSingleObject(helper, 1000);
+  }
+  // This process survives Electron/helper failure and owns the lock until recovery.
+  if (WaitForSingleObject(armed, 0) == WAIT_OBJECT_0) {
+    while (!restoreSystemCursors(dryRun)) Sleep(1000);
+  }
+  ReleaseMutex(mutex);
+  for (HANDLE handle : { helper, parent, ready, armed, pulse, mutex }) CloseHandle(handle);
+  return 0;
+}
+
+int runCursorVisibilityHelper(DWORD parentPid, bool dryRun) {
+  HANDLE parent = OpenProcess(SYNCHRONIZE, FALSE, parentPid);
+  if (!parent || WaitForSingleObject(parent, 0) != WAIT_TIMEOUT) return 1;
+  const std::wstring name = L"Local\\NodusCursor-" + std::to_wstring(GetCurrentProcessId()) + L"-" + std::to_wstring(GetTickCount64());
+  HANDLE ready = CreateEventW(nullptr, TRUE, FALSE, (name + L"-ready").c_str());
+  HANDLE armed = CreateEventW(nullptr, TRUE, FALSE, (name + L"-armed").c_str());
+  HANDLE pulse = CreateEventW(nullptr, FALSE, FALSE, (name + L"-pulse").c_str());
+  if (!ready || !armed || !pulse) return 1;
+  wchar_t exe[32768];
+  if (!GetModuleFileNameW(nullptr, exe, 32768)) return 1;
+  std::wstring command = L"\"" + std::wstring(exe) + L"\" --cursor-restore-watchdog "
+    + std::to_wstring(GetCurrentProcessId()) + L" " + std::to_wstring(parentPid) + L" " + name + (dryRun ? L" --dry-run" : L"");
+  STARTUPINFOW startup{};
+  startup.cb = sizeof(startup);
+  startup.dwFlags = STARTF_USESTDHANDLES;
+  startup.hStdInput = INVALID_HANDLE_VALUE;
+  startup.hStdOutput = GetStdHandle(STD_OUTPUT_HANDLE);
+  startup.hStdError = GetStdHandle(STD_ERROR_HANDLE);
+  // Do not inherit stdin: closing Electron's pipe must reach the visibility worker.
+  SetHandleInformation(GetStdHandle(STD_INPUT_HANDLE), HANDLE_FLAG_INHERIT, 0);
+  PROCESS_INFORMATION watchdog{};
+  if (!CreateProcessW(exe, command.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW | CREATE_BREAKAWAY_FROM_JOB, nullptr, nullptr, &startup, &watchdog)) {
+    std::printf("[CURSOR] Failed to hide local host cursor: watchdog launch, Windows error %lu\n", GetLastError());
+    return 1;
+  }
+  CloseHandle(watchdog.hThread);
+  HANDLE starting[] = { ready, watchdog.hProcess };
+  int result = 1;
+  if (WaitForMultipleObjects(2, starting, FALSE, 3000) == WAIT_OBJECT_0) {
+    std::printf("[CURSOR] Restoration watchdog armed pid=%lu\n", watchdog.dwProcessId);
+    std::fflush(stdout);
+    RemoteCursorVisibility cursor(dryRun, armed);
+    HANDLE living[] = { parent, watchdog.hProcess };
+    const HANDLE input = GetStdHandle(STD_INPUT_HANDLE);
+    while (WaitForMultipleObjects(2, living, FALSE, 100) == WAIT_TIMEOUT) {
+      DWORD available = 0, count = 0;
+      if (!PeekNamedPipe(input, nullptr, 0, nullptr, &available, nullptr)) break;
+      if (!available) continue;
+      char commands[64];
+      if (!ReadFile(input, commands, available < sizeof(commands) ? available : sizeof(commands), &count, nullptr)) break;
+      bool done = false;
+      for (DWORD i = 0; i < count; ++i) {
+        if (commands[i] == 'R') { result = cursor.restore() ? 0 : 1; done = true; break; }
+        if (commands[i] == 'H' && (!SetEvent(pulse) || !cursor.hide())) { done = true; break; }
+      }
+      if (done) break;
+    }
+  } else {
+    std::puts("[CURSOR] Failed to hide local host cursor: watchdog not ready; no cursors changed");
+    std::fflush(stdout);
+  }
+  for (HANDLE handle : { parent, ready, armed, pulse, watchdog.hProcess }) CloseHandle(handle);
+  return result;
+}
+
 void setStatus(DWORD state, DWORD exitCode = NO_ERROR) {
   status.dwServiceType = SERVICE_WIN32_OWN_PROCESS;
   status.dwCurrentState = state;
@@ -125,6 +273,10 @@ void WINAPI serviceMain(DWORD argc, LPWSTR* argv) {
 }
 
 int wmain(int argc, wchar_t** argv) {
+  if (argc >= 3 && _wcsicmp(argv[1], L"--cursor-visibility-helper") == 0)
+    return runCursorVisibilityHelper(std::wcstoul(argv[2], nullptr, 10), argc >= 4 && _wcsicmp(argv[3], L"--dry-run") == 0);
+  if (argc >= 5 && _wcsicmp(argv[1], L"--cursor-restore-watchdog") == 0)
+    return runCursorWatchdog(std::wcstoul(argv[2], nullptr, 10), std::wcstoul(argv[3], nullptr, 10), argv[4], argc >= 6 && _wcsicmp(argv[5], L"--dry-run") == 0);
   if (argc >= 2 && _wcsicmp(argv[1], L"--input-helper") == 0) return runInputHelper();
   if (argc >= 3 && _wcsicmp(argv[1], L"--install") == 0) {
     SC_HANDLE manager = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CREATE_SERVICE);

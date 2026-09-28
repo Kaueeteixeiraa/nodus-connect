@@ -64,6 +64,9 @@ contextBridge.exposeInMainWorld("nodusDesktop", {
   setRemoteControlActive(active) {
     return ipcRenderer.invoke("nodus:set-remote-control-active", Boolean(active));
   },
+  setHostCursorActive(active) {
+    return ipcRenderer.invoke("nodus:set-host-cursor-active", Boolean(active));
+  },
   setRemoteKeyboardCapture(active) {
     return ipcRenderer.invoke("nodus:set-remote-keyboard-capture", Boolean(active));
   },

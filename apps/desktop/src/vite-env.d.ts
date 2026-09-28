@@ -23,6 +23,7 @@ interface Window {
     startService(): Promise<{ ok: boolean; error?: string }>;
     stopService(): Promise<{ ok: boolean; error?: string }>;
     setRemoteControlActive(active: boolean): Promise<void>;
+    setHostCursorActive(active: boolean): Promise<void>;
     setRemoteKeyboardCapture(active: boolean): Promise<void>;
     toggleFullScreen(enabled?: boolean): Promise<boolean>;
     checkForUpdates(): Promise<{ ok: boolean; version?: string; url?: string; error?: string }>;
