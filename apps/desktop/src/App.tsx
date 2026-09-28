@@ -1005,6 +1005,8 @@ export function App() {
   async function startHostNativeMedia(sessionId: string, remoteNodusId: string, displayId: string, resolution: RemoteResolution, frameRate: RemoteFrameRate, shareAudio: boolean, iceServers: RTCIceServer[]) {
     if (!window.nodusDesktop) return false;
     nativeMediaListenersRef.current.get(sessionId)?.();
+    let connected = false;
+    let startupFailure = "";
     const listener = window.nodusDesktop.onNativeMediaSignal((event) => {
       if (event.sessionId !== sessionId) return;
       if (event.type === "offer" && event.sdp) {
@@ -1032,13 +1034,18 @@ export function App() {
         nativeMediaStatsRef.current.set(sessionId, { captureFrames: 0, encodeFrames: 0, encodeTimeUs: 0, encodeSamples: 0, encodeMs: 0, rtpBytes: 0, at: performance.now(), captureFps: 0, encodedFps: 0, bitrateKbps: 0, outputWidth: 0, outputHeight: 0, ...previous, width: event.width ?? 0, height: event.height ?? 0 });
         logMediaDiagnostic(`capture-backend=WGC source-resolution=${event.width ?? 0}x${event.height ?? 0}`);
       } else if (event.type === "connected") {
+        connected = true;
         const timer = nativeHostTimersRef.current.get(sessionId);
         if (timer) window.clearTimeout(timer);
         nativeHostTimersRef.current.delete(sessionId);
         logMediaDiagnostic("capture-backend=WGC native-peer-connected=true");
       } else if (event.type === "error" || event.type === "exit") {
         logMediaDiagnostic(`capture-backend=WGC status=${event.type} reason=${event.message ?? "process-exit"}`);
-        fallbackHostNativeMedia(sessionId, `wgc-${event.type}`).catch(() => updateRuntime(sessionId, { error: "Captura WGC interrompida e o fallback Chromium falhou." }));
+        if (nativeHostSessionsRef.current.has(sessionId)) {
+          fallbackHostNativeMedia(sessionId, `wgc-${event.type}`).catch(() => updateRuntime(sessionId, { error: "Captura WGC interrompida e o fallback Chromium falhou." }));
+        } else {
+          startupFailure = `wgc-${event.type}: ${event.message ?? "process-exit"}`;
+        }
       }
     });
     nativeMediaListenersRef.current.set(sessionId, listener);
@@ -1054,11 +1061,12 @@ export function App() {
       const quality = performanceDiagnosticRef.current?.preset === "clean-desktop" ? "high" : requestedQualitiesRef.current.get(sessionId) ?? settings.connectionQuality;
       const bitrateKbps = Math.round(nativeVideoBitrate(targetHeight, fps, quality === "economy" ? 2 : quality === "balanced" ? 1 : 0) / 1000);
       const started = await window.nodusDesktop.startNativeMedia({ sessionId, monitor: monitor >= 0 ? monitor : -1, fps, bitrateKbps, width, height, shareAudio, iceServers });
+      if (startupFailure) throw new Error(startupFailure);
       nativeHostSessionsRef.current.add(sessionId);
       nativeHostDisplaysRef.current.set(sessionId, displayId);
       const timer = nativeHostTimersRef.current.get(sessionId);
       if (timer) window.clearTimeout(timer);
-      nativeHostTimersRef.current.set(sessionId, window.setTimeout(() => {
+      if (!connected) nativeHostTimersRef.current.set(sessionId, window.setTimeout(() => {
         fallbackHostNativeMedia(sessionId, "wgc-connect-timeout").catch(() => updateRuntime(sessionId, { error: "WGC nao conectou e o fallback Chromium falhou." }));
       }, 20_000));
       const previous = nativeMediaStatsRef.current.get(sessionId);
@@ -1069,6 +1077,7 @@ export function App() {
     } catch (error) {
       listener();
       nativeMediaListenersRef.current.delete(sessionId);
+      nativeMediaStatsRef.current.delete(sessionId);
       await window.nodusDesktop.stopNativeMedia(sessionId).catch(() => undefined);
       logDiagnostic(`capture-backend=CHROMIUM wgc-fallback=${error instanceof Error ? error.message : "unavailable"}`);
       return false;

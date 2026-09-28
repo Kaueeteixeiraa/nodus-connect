@@ -123,11 +123,11 @@ test("stdin failure is reported rather than left as an unhandled process error",
   await expect(pending).rejects.toThrow("STDIN_ERROR broken pipe");
 });
 
-function hostFixture(native: boolean, fallback: boolean, ready = false) {
+function hostFixture(native: boolean, fallback: boolean, ready = false, startupEvent?: "connected" | "error" | "exit") {
   const source = ts.createSourceFile("App.tsx", readFileSync("apps/desktop/src/App.tsx", "utf8"), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
   const functions: string[] = [];
   function visit(node: ts.Node) {
-    if (ts.isFunctionDeclaration(node) && ["acceptIncoming", "startHostSession"].includes(node.name?.text ?? "")) functions.push(node.getText(source));
+    if (ts.isFunctionDeclaration(node) && ["acceptIncoming", "startHostSession", ...(startupEvent ? ["startHostNativeMedia"] : [])].includes(node.name?.text ?? "")) functions.push(node.getText(source));
     ts.forEachChild(node, visit);
   }
   visit(source);
@@ -137,12 +137,20 @@ function hostFixture(native: boolean, fallback: boolean, ready = false) {
   const acquire = vi.fn(async () => lease);
   const nativeStart = vi.fn(async () => ready);
   const peers = ref(), policies = ref();
+  const timers = ref(), nativeSessions = { current: new Set() };
+  const unsubscribe = vi.fn(), stopNative = vi.fn(async () => {}), fallbackNative = vi.fn(async () => {});
+  let signal: (event: any) => void;
   const runtime: { value?: any } = {};
   const cleanup = vi.fn(() => { peers.current.clear(); policies.current.clear(); });
   const context = createContext({
-    Error, captureBackendPlan, requireLegacyCaptureAllowed,
+    Error, performance, captureBackendPlan, requireLegacyCaptureAllowed,
     captureCleanupRef: ref(), peersRef: peers, nativeFallbackAllowedRef: policies,
     requestedResolutionsRef: ref(), requestedFpsRef: ref(),
+    requestedQualitiesRef: ref(), appliedVideoRef: ref(),
+    nativeMediaListenersRef: ref(), nativeMediaStatsRef: ref(), nativeHostTimersRef: timers,
+    nativeHostDisplaysRef: ref(), nativeHostSessionsRef: nativeSessions,
+    captureSources: [{ id: "display", width: 1920, height: 1080 }], nativeVideoBitrate: () => 14000000,
+    logMediaDiagnostic: vi.fn(), fallbackHostNativeMedia: fallbackNative, sendReliableSignal: async () => {},
     settings: { preferredResolution: "1920x1080", maxFps: 60, allowRemoteControl: true },
     identity: { deviceName: "host", nodusId: "123456789" },
     performanceDiagnosticRef: { current: null }, iceWarmupRef: { current: null },
@@ -157,7 +165,10 @@ function hostFixture(native: boolean, fallback: boolean, ready = false) {
     setSessionResolutions: vi.fn(), tuneVideoSender: async () => {},
     logDiagnostic: vi.fn(), emptyMetrics: () => ({}), startSignalPolling: vi.fn(),
     cleanupSession: cleanup, removeRuntime: () => { runtime.value = undefined; }, sendSignal: async () => {},
-    window: { nodusDesktop: {
+    window: { setTimeout, clearTimeout, nodusDesktop: {
+      onNativeMediaSignal: (listener: typeof signal) => { signal = listener; return unsubscribe; },
+      startNativeMedia: async () => { signal({ sessionId: "session", type: startupEvent, message: "early native failure" }); return { encoderImplementation: "test" }; },
+      stopNativeMedia: stopNative,
       getNativeCaptureStatus: async () => ({ requestedBackend: native ? "wgc" : "chromium", allowLegacyFallback: fallback, nativeMediaAvailable: true, supported: true, cursorSuppressionSupported: true, d3d11Hardware: true, hardwareH264: true }),
       setRemoteControlActive: async () => {},
     } },
@@ -165,7 +176,7 @@ function hostFixture(native: boolean, fallback: boolean, ready = false) {
   const code = ts.transpile(functions.join("\n"), { target: ts.ScriptTarget.ES2022 });
   runInContext(code, context);
   const accept = runInContext("acceptIncoming", context);
-  return { accept: () => accept({ id: "request", requesterNodusId: "987654321" }), acquire, nativeStart, lease, runtime, peers, policies };
+  return { accept: () => accept({ id: "request", requesterNodusId: "987654321" }), acquire, nativeStart, lease, runtime, peers, policies, timers, nativeSessions, stopNative, unsubscribe, fallbackNative };
 }
 
 test("baseline Chromium starts without activating WGC", async () => {
@@ -199,4 +210,26 @@ test("successful WGC startup does not acquire legacy capture", async () => {
   await expect(host.accept()).resolves.toBeNull();
   expect(host.acquire).not.toHaveBeenCalled();
   expect(host.runtime.value.error).toBe("");
+});
+
+test("native connected before IPC ready does not schedule a false connection timeout", async () => {
+  const host = hostFixture(true, true, true, "connected");
+  await expect(host.accept()).resolves.toBeNull();
+  expect(host.acquire).not.toHaveBeenCalled();
+  expect(host.nativeSessions.current.has("session")).toBe(true);
+  expect(host.timers.current.size).toBe(0);
+  await vi.advanceTimersByTimeAsync(20000);
+  expect(host.fallbackNative).not.toHaveBeenCalled();
+});
+
+test.each(["error", "exit"] as const)("native %s before IPC ready falls back once rather than keeping a dead native session", async (event) => {
+  const host = hostFixture(true, true, true, event);
+  await expect(host.accept()).resolves.toBeNull();
+  expect(host.acquire).toHaveBeenCalledOnce();
+  expect(host.stopNative).toHaveBeenCalledOnce();
+  expect(host.unsubscribe).toHaveBeenCalledOnce();
+  expect(host.nativeSessions.current.size).toBe(0);
+  expect(host.timers.current.size).toBe(0);
+  expect(host.fallbackNative).not.toHaveBeenCalled();
+  expect(host.runtime.value.shareStream).toBe(host.lease.stream);
 });
