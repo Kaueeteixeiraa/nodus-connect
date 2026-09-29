@@ -23,11 +23,13 @@ interface Window {
     startService(): Promise<{ ok: boolean; error?: string }>;
     stopService(): Promise<{ ok: boolean; error?: string }>;
     setRemoteControlActive(active: boolean): Promise<void>;
+    setHostInputLock(input: { sessionId: string; mouse: boolean; keyboard: boolean }): Promise<{ ok: boolean; mouse?: boolean; keyboard?: boolean; error?: string }>;
     setHostCursorActive(active: boolean): Promise<void>;
     setRemoteKeyboardCapture(active: boolean): Promise<void>;
     toggleFullScreen(enabled?: boolean): Promise<boolean>;
     checkForUpdates(): Promise<{ ok: boolean; version?: string; url?: string; error?: string }>;
     restartComputer(): Promise<{ ok: boolean; error?: string }>;
+    sendSecureAttention(): Promise<{ ok: boolean; error?: string }>;
     setStartupOptions(options: { startWithWindows: boolean; startMinimized: boolean; minimizeToTray: boolean }): Promise<void>;
     applyRemoteInput(input: unknown): void;
     getCaptureSources(): Promise<Array<{ id: string; name: string; displayId: string; width: number; height: number }>>;

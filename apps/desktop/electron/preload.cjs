@@ -64,6 +64,9 @@ contextBridge.exposeInMainWorld("nodusDesktop", {
   setRemoteControlActive(active) {
     return ipcRenderer.invoke("nodus:set-remote-control-active", Boolean(active));
   },
+  setHostInputLock(input) {
+    return ipcRenderer.invoke("nodus:set-host-input-lock", input);
+  },
   setHostCursorActive(active) {
     return ipcRenderer.invoke("nodus:set-host-cursor-active", Boolean(active));
   },
@@ -78,6 +81,9 @@ contextBridge.exposeInMainWorld("nodusDesktop", {
   },
   restartComputer() {
     return ipcRenderer.invoke("nodus:restart-computer");
+  },
+  sendSecureAttention() {
+    return ipcRenderer.invoke("nodus:send-secure-attention");
   },
   setStartupOptions(options) {
     return ipcRenderer.invoke("nodus:set-startup-options", options);

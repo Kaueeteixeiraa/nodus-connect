@@ -37,6 +37,13 @@ class RemoteCursorVisibility {
     }
   }
 
+  remoteMouseActivity(input) {
+    if (!this.active || this.blocked || this.disposed || !this.helper || this.helper.stopping) return;
+    if (!["mouseMove", "mouseDown", "mouseUp", "wheel"].includes(input.type)) return;
+    try { this.helper.stdin.write("M"); }
+    catch (error) { this.fail(this.helper, error); }
+  }
+
   start() {
     try {
       const helper = this.spawn(this.executable, ["--cursor-visibility-helper", String(process.pid)], { windowsHide: true, stdio: ["pipe", "pipe", "pipe"] });

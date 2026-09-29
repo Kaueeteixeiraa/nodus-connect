@@ -1,4 +1,4 @@
-import type { CoordinationDevice } from "./api";
+import type { CoordinationDevice, RemoteFrameRate, RemoteResolution } from "./api";
 
 const RECENTS_KEY = "nodus.recents.v1";
 const FAVORITES_KEY = "nodus.favorites.v1";
@@ -69,9 +69,9 @@ export interface LocalSettings {
   unattendedAccess: boolean;
   trustedNodusIds: string[];
   preferredDisplayId: string;
-  preferredResolution: "1366x768" | "1280x720" | "1920x1080" | "1024x768";
+  preferredResolution: RemoteResolution;
   connectionQuality: "auto" | "high" | "balanced" | "economy";
-  maxFps: 60 | 120;
+  maxFps: RemoteFrameRate;
   coordinationUrl: string;
   googleClientId: string;
   iceServersJson: string;
@@ -152,7 +152,7 @@ export function loadSettings(): LocalSettings {
     unattendedAccess: false,
     trustedNodusIds: [],
     preferredDisplayId: "",
-    preferredResolution: "1920x1080",
+    preferredResolution: "native",
     connectionQuality: "high",
     maxFps: 60,
     coordinationUrl: import.meta.env.VITE_NODUS_API ?? "",
@@ -171,7 +171,12 @@ export function loadSettings(): LocalSettings {
     language: ["pt-BR", "en-US", "ru-RU", "ja-JP"].includes(stored.language ?? "")
       ? stored.language as LocalSettings["language"]
       : "pt-BR",
-    maxFps: stored.maxFps === 120 ? 120 : 60,
+    unattendedAccess: false,
+    trustedNodusIds: [],
+    preferredResolution: stored.preferredResolution && (stored.preferredResolution === "native" || /^\d{3,5}x\d{3,5}$/.test(stored.preferredResolution))
+      ? stored.preferredResolution
+      : defaults.preferredResolution,
+    maxFps: [30, 45, 60, 90, 120].includes(stored.maxFps ?? 0) ? stored.maxFps as RemoteFrameRate : 60,
     shareAudio: migratedShareAudio ?? defaults.shareAudio,
     coordinationUrl: defaults.coordinationUrl || stored.coordinationUrl || "",
     googleClientId: defaults.googleClientId || stored.googleClientId || "",

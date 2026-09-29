@@ -16,7 +16,7 @@ import {
 import type { LocalIdentity } from "./identity";
 import type { SessionPermission } from "../../../../packages/protocol/src/index";
 
-export type RemoteResolution = "1366x768" | "1280x720" | "1920x1080" | "1024x768";
+export type RemoteResolution = "native" | `${number}x${number}`;
 
 const DEFAULT_API_BASE = import.meta.env.VITE_NODUS_API ?? "";
 const AUTH_TOKEN_KEY = "nodus.coordination.auth-token.v1";
@@ -63,7 +63,7 @@ export interface SessionRequestRecord {
   preferredFps?: RemoteFrameRate;
 }
 
-export type RemoteFrameRate = 60 | 120;
+export type RemoteFrameRate = 30 | 45 | 60 | 90 | 120;
 
 export interface SignalMessage {
   seq: number;

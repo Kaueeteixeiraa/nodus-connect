@@ -8,6 +8,7 @@ const os = require("node:os");
 const path = require("node:path");
 const { pathToFileURL } = require("node:url");
 const { RemoteCursorVisibility } = require("./remote-cursor-visibility.cjs");
+const { RemoteWindowsKeys } = require("./remote-windows-keys.cjs");
 
 let mainWindow;
 let tray;
@@ -17,8 +18,12 @@ let trayIdentity = { nodusId: "", deviceName: "Nodus Connect", status: "Online" 
 let remoteControlActive = false;
 let remoteKeyboardCaptureActive = false;
 let remoteKeyboardCaptureWebContentsId = 0;
+let lastSecureAttentionAt = 0;
 let minimizeToTray = true;
 let inputHelper;
+let inputLockHelper;
+let inputLockHeartbeat;
+const inputLocks = new Map();
 let captureOptions = { sourceId: "", displayId: "", shareAudio: true };
 let powerSaveBlockerId = -1;
 let gpuInfoReady = false;
@@ -36,6 +41,8 @@ const nativeService = app.isPackaged
 const hostCursorVisibility = process.platform === "win32"
   ? new RemoteCursorVisibility({ spawn, executable: nativeService, log: (message) => appendLog(message) })
   : null;
+const remoteWindowsKeys = process.platform === "win32"
+  ? new RemoteWindowsKeys({ spawn, executable: nativeService, log: (message) => appendLog(message) }) : null;
 const nativeMediaExe = app.isPackaged
   ? path.join(process.resourcesPath, "native", "nodus-wgc-media.exe")
   : path.join(__dirname, "..", "..", "..", "native", "bin", "nodus-wgc-media.exe");
@@ -86,6 +93,17 @@ app.on("second-instance", (_event, commandLine) => {
 });
 
 function attachRemoteKeyboardForwarding(window) {
+  const contentId = window.webContents.id;
+  const release = () => {
+    remoteWindowsKeys?.stop(window);
+    if (remoteKeyboardCaptureWebContentsId === contentId) {
+      remoteKeyboardCaptureActive = false;
+      remoteKeyboardCaptureWebContentsId = 0;
+    }
+  };
+  window.on("blur", release);
+  window.on("closed", release);
+  window.webContents.on("render-process-gone", release);
   window.webContents.on("before-input-event", (event, input) => {
     if (!remoteKeyboardCaptureActive || remoteKeyboardCaptureWebContentsId !== window.webContents.id || (input.type !== "keyDown" && input.type !== "keyUp")) return;
     const remoteInput = toRemoteKeyboardInput(input);
@@ -119,6 +137,8 @@ app.whenReady().then(() => {
 app.on("before-quit", () => {
   isQuitting = true;
   hostCursorVisibility?.dispose();
+  remoteWindowsKeys?.dispose();
+  clearInputLocks();
   if (powerSaveBlockerId >= 0 && powerSaveBlocker.isStarted(powerSaveBlockerId)) powerSaveBlocker.stop(powerSaveBlockerId);
   inputHelper?.kill();
 });
@@ -128,11 +148,12 @@ app.on("window-all-closed", () => {
 });
 
 function createMainWindow() {
+  const { width: workWidth, height: workHeight } = screen.getPrimaryDisplay().workAreaSize;
   mainWindow = new BrowserWindow({
-    width: 1180,
-    height: 760,
-    minWidth: 820,
-    minHeight: 560,
+    width: Math.min(1180, workWidth),
+    height: Math.min(760, workHeight),
+    minWidth: Math.min(820, workWidth),
+    minHeight: Math.min(560, workHeight),
     title: "Nodus Connect",
     backgroundColor: "#050811",
     icon: createIcon(),
@@ -388,19 +409,54 @@ function setupIpc() {
   ipcMain.handle("nodus:stop-service", () => runServiceControl("stop"));
   ipcMain.handle("nodus:set-remote-control-active", (_event, active) => {
     remoteControlActive = Boolean(active);
+    if (!remoteControlActive) clearInputLocks();
     if (remoteControlActive && powerSaveBlockerId < 0) powerSaveBlockerId = powerSaveBlocker.start("prevent-display-sleep");
     if (!remoteControlActive && powerSaveBlockerId >= 0) {
       if (powerSaveBlocker.isStarted(powerSaveBlockerId)) powerSaveBlocker.stop(powerSaveBlockerId);
       powerSaveBlockerId = -1;
     }
   });
+  ipcMain.handle("nodus:set-host-input-lock", (event, input) => {
+    if (event.sender !== mainWindow?.webContents || !remoteControlActive || !isAllowedAppUrl(event.sender.getURL())) return { ok: false, error: "Bloqueio indisponível nesta sessão." };
+    const sessionId = String(input?.sessionId || "");
+    if (!sessionId || sessionId.length > 128) return { ok: false, error: "Sessão inválida." };
+    return setHostInputLock(sessionId, Boolean(input?.mouse), Boolean(input?.keyboard));
+  });
   ipcMain.handle("nodus:set-host-cursor-active", (event, active) => {
     if (event.sender !== mainWindow?.webContents) return;
     hostCursorVisibility?.setActive(active === true);
   });
   ipcMain.handle("nodus:set-remote-keyboard-capture", (event, active) => {
-    remoteKeyboardCaptureActive = Boolean(active);
-    remoteKeyboardCaptureWebContentsId = remoteKeyboardCaptureActive ? event.sender.id : remoteKeyboardCaptureWebContentsId === event.sender.id ? 0 : remoteKeyboardCaptureWebContentsId;
+    const target = BrowserWindow.fromWebContents(event.sender);
+    if (!target || !isAllowedAppUrl(event.sender.getURL())) return;
+    if (active && target.isFocused()) {
+      remoteKeyboardCaptureActive = true;
+      remoteKeyboardCaptureWebContentsId = event.sender.id;
+      remoteWindowsKeys?.setActive(target);
+    } else if (remoteKeyboardCaptureWebContentsId === event.sender.id) {
+      remoteKeyboardCaptureActive = false;
+      remoteKeyboardCaptureWebContentsId = 0;
+      remoteWindowsKeys?.stop(target);
+    }
+  });
+  ipcMain.handle("nodus:send-secure-attention", (event) => {
+    if (event.sender !== mainWindow?.webContents || !remoteControlActive) return { ok: false, error: "Controle remoto não autorizado." };
+    if (process.platform !== "win32" || !fs.existsSync(nativeService)) return { ok: false, error: "Ctrl+Alt+Del indisponível neste sistema." };
+    if (Date.now() - lastSecureAttentionAt < 5000) return { ok: false, error: "Aguarde antes de enviar Ctrl+Alt+Del novamente." };
+    lastSecureAttentionAt = Date.now();
+    return new Promise((resolve) => {
+      const child = spawn(nativeService, ["--send-sas"], { windowsHide: true, stdio: ["ignore", "pipe", "ignore"] });
+      let output = "";
+      const timeout = setTimeout(() => { child.kill(); resolve({ ok: false, error: "O Windows não respondeu ao Ctrl+Alt+Del." }); }, 5000);
+      child.stdout.on("data", (data) => { output = (output + data.toString()).slice(-1024); });
+      child.on("error", () => { clearTimeout(timeout); resolve({ ok: false, error: "Serviço Nodus indisponível para Ctrl+Alt+Del." }); });
+      child.on("close", (code) => {
+        clearTimeout(timeout);
+        resolve(code === 0 && output.includes("SAS_REQUESTED") ? { ok: true } : { ok: false, error: output.includes("SAS_POLICY_REQUIRED")
+          ? "O Windows precisa permitir Ctrl+Alt+Del por serviços na política SoftwareSASGeneration."
+          : "Ctrl+Alt+Del requer o serviço Nodus atualizado, ativo e autorizado no computador remoto." });
+      });
+    });
   });
   ipcMain.handle("nodus:toggle-full-screen", (event, enabled) => {
     const targetWindow = BrowserWindow.fromWebContents(event.sender) || mainWindow;
@@ -801,6 +857,7 @@ function applyRemoteInput(input) {
     const helper = ensureInputHelper();
     if (message.type === "mouseMove" && helper.stdin.writableLength > 64) return { ok: true };
     helper.stdin.write(helper.nodusBinaryInput ? encodeRemoteInput(message) : `${JSON.stringify(message)}\n`);
+    hostCursorVisibility?.remoteMouseActivity(message);
     return { ok: true };
   } catch (error) {
     appendLog(`remote-input-error ${error.message}`);
@@ -860,6 +917,35 @@ function remoteVirtualKey(code) {
   if (/^[0-9]$/.test(code)) return code.charCodeAt(0);
   if (/^F(?:[1-9]|1[0-9]|2[0-4])$/.test(code)) return 111 + Number(code.slice(1));
   return { Backspace: 8, Tab: 9, Enter: 13, ShiftLeft: 16, ShiftRight: 16, ControlLeft: 17, ControlRight: 17, AltLeft: 18, AltRight: 18, Escape: 27, Space: 32, PageUp: 33, PageDown: 34, End: 35, Home: 36, ArrowLeft: 37, ArrowUp: 38, ArrowRight: 39, ArrowDown: 40, Insert: 45, Delete: 46, Meta: 91, MetaLeft: 91, MetaRight: 92, ContextMenu: 93 }[code] || 0;
+}
+
+function clearInputLocks() {
+  inputLocks.clear();
+  if (inputLockHeartbeat) clearInterval(inputLockHeartbeat);
+  inputLockHeartbeat = undefined;
+  if (inputLockHelper && !inputLockHelper.killed) {
+    inputLockHelper.stdin?.write("mkR");
+    inputLockHelper.kill();
+  }
+  inputLockHelper = undefined;
+}
+
+function setHostInputLock(sessionId, mouse, keyboard) {
+  if (!fs.existsSync(nativeService)) return { ok: false, error: "Bloqueio de entrada não disponível neste computador." };
+  if (!mouse && !keyboard) inputLocks.delete(sessionId);
+  else inputLocks.set(sessionId, { mouse, keyboard });
+  const active = [...inputLocks.values()].reduce((current, lock) => ({ mouse: current.mouse || lock.mouse, keyboard: current.keyboard || lock.keyboard }), { mouse: false, keyboard: false });
+  if (!active.mouse && !active.keyboard) {
+    clearInputLocks();
+    return { ok: true, ...active };
+  }
+  if (!inputLockHelper || inputLockHelper.killed) {
+    inputLockHelper = spawn(nativeService, ["--input-lock-helper", String(process.pid)], { windowsHide: true, stdio: ["pipe", "ignore", "ignore"] });
+    inputLockHelper.on("exit", () => { inputLockHelper = undefined; });
+  }
+  inputLockHelper.stdin?.write(`${active.mouse ? "M" : "m"}${active.keyboard ? "K" : "k"}H`);
+  if (!inputLockHeartbeat) inputLockHeartbeat = setInterval(() => inputLockHelper?.stdin?.write("H"), 1000);
+  return { ok: true, ...active };
 }
 
 function ensureInputHelper() {

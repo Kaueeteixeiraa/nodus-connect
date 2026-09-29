@@ -50,6 +50,29 @@ test("repeated hide and restore calls are idempotent", () => {
   expect(child.stdin.end).toHaveBeenCalledExactlyOnceWith("R");
 });
 
+test("only remote mouse activity in an active host lease requests hiding", () => {
+  const { cursor, child } = fixture();
+  cursor.remoteMouseActivity({ type: "mouseMove" });
+  expect(child.stdin.write).not.toHaveBeenCalled();
+  cursor.setActive(true);
+  child.stdin.write.mockClear();
+  for (const type of ["keyDown", "keyUp", "invalid"]) cursor.remoteMouseActivity({ type });
+  expect(child.stdin.write).not.toHaveBeenCalled();
+  for (const type of ["mouseMove", "mouseDown", "mouseUp", "wheel"]) cursor.remoteMouseActivity({ type });
+  expect(child.stdin.write.mock.calls).toEqual([["M"], ["M"], ["M"], ["M"]]);
+  cursor.setActive(false);
+  cursor.remoteMouseActivity({ type: "mouseMove" });
+  expect(child.stdin.write).toHaveBeenCalledTimes(4);
+});
+
+test("mouse visibility pipe failure does not throw into input injection", () => {
+  const { cursor, child } = fixture();
+  cursor.setActive(true);
+  child.stdin.write.mockImplementation(() => { throw new Error("broken visibility pipe"); });
+  expect(() => cursor.remoteMouseActivity({ type: "mouseMove" })).not.toThrow();
+  expect(child.stdin.end).toHaveBeenCalledWith("R");
+});
+
 test("renderer heartbeat timeout restores even when Electron is still alive", async () => {
   const { cursor, child } = fixture();
   cursor.setActive(true);
@@ -130,19 +153,23 @@ test("ending one host session keeps hiding only while another controlled host is
   expect(setActive).toHaveBeenLastCalledWith(false);
 });
 
-test("Chromium acquisition is unchanged from recovery.1", () => {
-  expect(functionHash("apps/desktop/src/App.tsx", "acquireHostCapture")).toBe("b7b5b7a872f7cdcbb7bae383ee4facc7fb2bb744517b4d7e1a78f67ddac721c6");
-  expect(functionHash("apps/desktop/src/App.tsx", "captureConstraints")).toBe("00e246c060ffd156397de8f796179bdc6731ae8ddcbdde7388dcb3413ec33e59");
+test("Chromium acquisition requests native resolution and never less than 30 FPS", () => {
+  const source = functionSource("apps/desktop/src/App.tsx", "captureConstraints");
+  expect(source).toContain("boundedFrameRate");
+  expect(source).toContain("cursor: { ideal: \"never\" }");
+  expect(source).toContain("resolutionForSource");
 });
 
 test("mouse injection and packet coordinates remain exactly unchanged", () => {
-  expect(functionHash("apps/desktop/electron/main.cjs", "applyRemoteInput")).toBe("04aa1af9f01261fd9e9f3a2b67dbca98a25c6fae6bdfec79120a9a79808fc03a");
+  const inputSource = functionSource("apps/desktop/electron/main.cjs", "applyRemoteInput").replace(/\r\n/g, "\n");
+  expect(inputSource).toContain('helper.stdin.write(helper.nodusBinaryInput ? encodeRemoteInput(message) : `${JSON.stringify(message)}\\n`);\n    hostCursorVisibility?.remoteMouseActivity(message);');
+  expect(hash(inputSource.replace("    hostCursorVisibility?.remoteMouseActivity(message);\n", ""))).toBe("04aa1af9f01261fd9e9f3a2b67dbca98a25c6fae6bdfec79120a9a79808fc03a");
   expect(functionHash("apps/desktop/electron/main.cjs", "encodeRemoteInput")).toBe("264100b5230a7b7313711e3d093c4a2c2fa12d89579db71999dd543b476a7200");
   expect(hash(readFileSync("native/service/main.cpp", "utf8").replace(/\r\n/g, "\n").match(/int runInputHelper\(\) \{[\s\S]*?\n\}/)![0])).toBe("4ff03effd2d9861c9c2e4c76b2d75161edd99d1f2e8086cec477864f1e2ddc9d");
 });
 
-test("WGC lifecycle and native streaming pipeline are unchanged from recovery.1", () => {
-  expect(functionHash("apps/desktop/src/App.tsx", "startHostNativeMedia")).toBe("92c1ed658e09b813933fce6e26e2624272aa1029ce786d2709026638a71b5ad7");
+test("WGC lifecycle preserves the native streaming pipeline and 30-120 FPS bounds", () => {
+  expect(functionSource("apps/desktop/src/App.tsx", "startHostNativeMedia")).toContain("Math.max(30, Math.min(120");
   expect(hash(readFileSync("native/wgc-media/main.cpp", "utf8"))).toBe("14d664039d7367f65f611cf474f9604d1d1732bfa2313606a6ea1ebf491befb9");
 });
 
@@ -165,6 +192,32 @@ async function nativeFixture() {
   }
   return { child, parent, closed, output: () => output };
 }
+
+nativeTest("physical movement shows the cursor until new remote mouse activity, not heartbeat (dry run)", async () => {
+  const fixture = await nativeFixture();
+  async function waitForCount(text: string, count: number) {
+    for (let i = 0; i < 40 && fixture.output().split(text).length - 1 < count; i++) await delay(25);
+    expect(fixture.output().split(text).length - 1).toBe(count);
+  }
+  try {
+    expect(fixture.output()).toContain("Physical mouse monitor ready");
+    fixture.child.stdin.write("LHHH");
+    await waitForCount("Local host cursor restored (dry run)", 1);
+    await delay(100);
+    expect(fixture.output().match(/hidden \(dry run\)/g)).toHaveLength(1);
+    fixture.child.stdin.write("MMMHHH");
+    await waitForCount("Local host cursor hidden (dry run)", 2);
+    fixture.child.stdin.write("LLHHH");
+    await waitForCount("Local host cursor restored (dry run)", 2);
+    fixture.child.stdin.write("M");
+    await waitForCount("Local host cursor hidden (dry run)", 3);
+    fixture.child.stdin.end("R");
+    await fixture.closed;
+    expect(fixture.output().match(/restored \(dry run\)/g)).toHaveLength(3);
+  } finally {
+    fixture.child.stdin.destroy(); fixture.child.kill(); fixture.parent.kill();
+  }
+}, 15000);
 
 nativeTest.each(["restore", "pipe-close", "parent-crash", "helper-crash", "watchdog-crash", "lease-timeout"])("native watchdog recovers after %s (dry run)", async (event) => {
   const fixture = await nativeFixture();

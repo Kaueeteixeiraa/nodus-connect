@@ -136,20 +136,312 @@ const dictionaries: Record<Exclude<UiLanguage, "pt-BR">, Dictionary> = {
   },
 };
 
+const additions: Record<string, [string, string, string]> = {
+  "Controle": ["Control", "Управление", "コントロール"],
+  "Ações": ["Actions", "Действия", "操作"],
+  "Padrão": ["Default", "По умолчанию", "標準"],
+  "Visual Nodus atual": ["Current Nodus appearance", "Текущее оформление Nodus", "現在の Nodus の外観"],
+  "Japão Feudal": ["Feudal Japan", "Феодальная Япония", "封建時代の日本"],
+  "Papel, vermelho e montanhas": ["Paper, red and mountains", "Бумага, красный цвет и горы", "和紙、赤、山々"],
+  "Lua, sakuras e azul noturno": ["Moon, cherry blossoms and night blue", "Луна, сакура и ночная синева", "月、桜、夜の青"],
+  "Neon urbano e chuva": ["City neon and rain", "Городской неон и дождь", "都市のネオンと雨"],
+  "Nebulosas e espaço profundo": ["Nebulae and deep space", "Туманности и далёкий космос", "星雲と深宇宙"],
+  "Ártico": ["Arctic", "Арктика", "北極"],
+  "Aurora, gelo e ciano": ["Aurora, ice and cyan", "Полярное сияние, лёд и голубой цвет", "オーロラ、氷、シアン"],
+  "Buffer/fila": ["Buffer/queue", "Буфер/очередь", "バッファー / キュー"],
+  "Nenhum": ["None", "Нет", "なし"],
+  "Analisando": ["Analyzing", "Анализ", "分析中"],
+  "Detectando": ["Detecting", "Определение", "検出中"],
+  "Qualidade alta": ["High quality", "Высокое качество", "高画質"],
+  "Modo economia": ["Economy mode", "Режим экономии", "節約モード"],
+  "Qualidade equilibrada": ["Balanced quality", "Сбалансированное качество", "バランス画質"],
+  "Bem-vindo ao Nodus Connect.": ["Welcome to Nodus Connect.", "Добро пожаловать в Nodus Connect.", "Nodus Connect へようこそ。"],
+  "Conecte seus dispositivos de qualquer lugar com seguranca e consentimento claro.": ["Connect your devices from anywhere securely and with explicit consent.", "Подключайтесь к устройствам из любого места безопасно и с явного согласия.", "明確な同意のもと、どこからでも安全にデバイスに接続できます。"],
+  "Nome deste dispositivo": ["Device name", "Имя устройства", "デバイス名"],
+  "Comecar": ["Start", "Начать", "開始"],
+  "Navegação principal": ["Main navigation", "Основная навигация", "メインナビゲーション"],
+  "Conexão real.": ["Real connection.", "Настоящее подключение.", "確かな接続。"],
+  "Sem limites.": ["Without limits.", "Без ограничений.", "制限なし。"],
+  "Sair": ["Sign out", "Выйти", "ログアウト"],
+  "Nodus conectado": ["Nodus connected", "Nodus подключён", "Nodus 接続済み"],
+  "Conexão criptografada": ["Encrypted connection", "Зашифрованное подключение", "暗号化された接続"],
+  "Encerrar acesso remoto": ["End remote access", "Завершить удалённый доступ", "リモートアクセスを終了"],
+  "Encerrar acesso": ["End access", "Завершить доступ", "アクセスを終了"],
+  "Desconectar de": ["Disconnect from", "Отключиться от", "接続を切断:"],
+  "A tela e o controle remoto serao encerrados neste computador.": ["Screen sharing and remote control will end on this computer.", "Показ экрана и удалённое управление на этом компьютере будут завершены.", "このコンピューターの画面共有とリモート操作を終了します。"],
+  "Cancelar": ["Cancel", "Отмена", "キャンセル"],
+  "Desconectar": ["Disconnect", "Отключиться", "切断"],
+  "Sobre o Nodus ID": ["About Nodus ID", "О Nodus ID", "Nodus ID について"],
+  "Ver todos": ["View all", "Показать все", "すべて表示"],
+  "Os computadores acessados aparecerão aqui para conexões mais rápidas.": ["Previously accessed computers will appear here for faster connections.", "Здесь появятся ранее подключённые компьютеры для быстрого доступа.", "接続したコンピューターがここに表示され、すばやく再接続できます。"],
+  "Mais ações": ["More actions", "Другие действия", "その他の操作"],
+  "Novo nome do dispositivo": ["New device name", "Новое имя устройства", "新しいデバイス名"],
+  "Buscar nos favoritos...": ["Search favorites...", "Поиск в избранном...", "お気に入りを検索..."],
+  "favorito": ["favorite", "в избранном", "お気に入り"],
+  "favoritos": ["favorites", "в избранном", "お気に入り"],
+  "Favoritar": ["Add to favorites", "В избранное", "お気に入りに追加"],
+  "Favorito": ["Favorite", "Избранное", "お気に入り"],
+  "Adicione dispositivos aos favoritos para encontrá-los rapidamente aqui.": ["Add devices to favorites to find them quickly here.", "Добавляйте устройства в избранное для быстрого доступа.", "お気に入りに追加したデバイスをここからすばやく見つけられます。"],
+  "Filtrar dispositivos": ["Filter devices", "Фильтр устройств", "デバイスを絞り込む"],
+  "Todos (": ["All (", "Все (", "すべて ("],
+  "Online (": ["Online (", "В сети (", "オンライン ("],
+  "Offline (": ["Offline (", "Не в сети (", "オフライン ("],
+  "Exibição em grade": ["Grid view", "Вид сеткой", "グリッド表示"],
+  "Exibição em lista": ["List view", "Вид списком", "リスト表示"],
+  "Dispositivos encontrados": ["Devices found", "Найденные устройства", "見つかったデバイス"],
+  "Aguardando aceite de": ["Waiting for approval from", "Ожидание разрешения от", "承認待ち:"],
+  "Bem-vindo ao Nodus.": ["Welcome to Nodus.", "Добро пожаловать в Nodus.", "Nodus へようこそ。"],
+  "Entre para sincronizar seus dispositivos e preferências.": ["Sign in to sync devices and preferences.", "Войдите для синхронизации устройств и настроек.", "ログインしてデバイスと設定を同期します。"],
+  "Tipo de conta": ["Account type", "Тип учётной записи", "アカウントの種類"],
+  "Entrar": ["Sign in", "Войти", "ログイン"],
+  "Criar conta": ["Create account", "Создать учётную запись", "アカウントを作成"],
+  "Continuar com o Google": ["Continue with Google", "Продолжить с Google", "Google で続行"],
+  "ou": ["or", "или", "または"],
+  "Nome": ["Name", "Имя", "名前"],
+  "Como devemos chamar você": ["What should we call you", "Как вас называть", "表示名を入力"],
+  "E-mail": ["Email", "Электронная почта", "メールアドレス"],
+  "Digite seu e-mail": ["Enter your email", "Введите электронную почту", "メールアドレスを入力"],
+  "Senha": ["Password", "Пароль", "パスワード"],
+  "Digite sua senha": ["Enter your password", "Введите пароль", "パスワードを入力"],
+  "Lembrar de mim": ["Remember me", "Запомнить меня", "ログイン状態を保存"],
+  "Esqueceu a senha?": ["Forgot password?", "Забыли пароль?", "パスワードをお忘れですか？"],
+  "Continuar sem uma conta": ["Continue without an account", "Продолжить без учётной записи", "アカウントなしで続行"],
+  "Seus dados estão protegidos com criptografia de ponta a ponta.": ["Your data is protected with end-to-end encryption.", "Ваши данные защищены сквозным шифрованием.", "データはエンドツーエンド暗号化で保護されています。"],
+  "Atividade recente": ["Recent activity", "Недавняя активность", "最近の履歴"],
+  "Ver tudo": ["View all", "Показать всё", "すべて表示"],
+  "Nenhum acesso registrado ainda.": ["No access recorded yet.", "Подключений пока нет.", "アクセス履歴はまだありません。"],
+  "Transferência de arquivos": ["File transfer", "Передача файлов", "ファイル転送"],
+  "Envie e receba arquivos com segurança durante a sessão.": ["Send and receive files securely during the session.", "Безопасно отправляйте и получайте файлы во время сеанса.", "セッション中にファイルを安全に送受信できます。"],
+  "Abrir gerenciador": ["Open manager", "Открыть менеджер", "管理画面を開く"],
+  "Acesso remoto": ["Remote access", "Удалённый доступ", "リモートアクセス"],
+  "Controle dispositivos de forma rápida e estável, de onde estiver.": ["Control devices quickly and reliably from anywhere.", "Быстро и стабильно управляйте устройствами из любого места.", "どこからでもデバイスを快適かつ安定して操作できます。"],
+  "Gerencie segurança, permissões e preferências do Nodus.": ["Manage Nodus security, permissions and preferences.", "Управляйте безопасностью, разрешениями и настройками Nodus.", "Nodus のセキュリティ、権限、設定を管理します。"],
+  "Central de ajuda": ["Help center", "Центр помощи", "ヘルプセンター"],
+  "Pedido de acesso remoto": ["Remote access request", "Запрос удалённого доступа", "リモートアクセスの要求"],
+  "quer visualizar sua tela e controlar este computador com sua permissao.": ["wants to view your screen and control this computer with your permission.", "хочет просматривать ваш экран и управлять этим компьютером с вашего разрешения.", "画面の表示とこのコンピューターの操作を要求しています。"],
+  "Recusar": ["Decline", "Отклонить", "拒否"],
+  "Autorizar": ["Authorize", "Разрешить", "許可"],
+  "Aceitar e compartilhar tela": ["Accept and share screen", "Принять и показать экран", "許可して画面を共有"],
+  "Ver tela": ["View screen", "Просмотр экрана", "画面を表示"],
+  "Usar mouse": ["Use mouse", "Управление мышью", "マウス操作"],
+  "Usar teclado": ["Use keyboard", "Использовать клавиатуру", "キーボード操作"],
+  "Enviar texto copiado": ["Send clipboard text", "Отправить текст буфера обмена", "コピーしたテキストを送信"],
+  "Enviar arquivos": ["Send files", "Отправлять файлы", "ファイルを送信"],
+  "Ouvir som": ["Listen to audio", "Слушать звук", "音声を聞く"],
+  "Computador ativo": ["Active computer", "Активный компьютер", "操作中のコンピューター"],
+  "Outro Nodus ID": ["Another Nodus ID", "Другой Nodus ID", "別の Nodus ID"],
+  "Conectar a outro Nodus": ["Connect to another Nodus", "Подключиться к другому Nodus", "別の Nodus に接続"],
+  "Conectar a outro computador": ["Connect to another computer", "Подключиться к другому компьютеру", "別のコンピューターに接続"],
+  "Ferramentas da sessão": ["Session tools", "Инструменты сеанса", "セッションツール"],
+  "Métricas da conexão": ["Connection metrics", "Показатели подключения", "接続の指標"],
+  "Quadros recebidos por segundo": ["Received frames per second", "Полученные кадры в секунду", "毎秒の受信フレーム数"],
+  "Resolução remota": ["Remote resolution", "Удалённое разрешение", "リモート画面の解像度"],
+  "Aguardando imagem do outro computador...": ["Waiting for the remote screen...", "Ожидание изображения с другого компьютера...", "リモート画面を待っています..."],
+  "Fechar painel": ["Close panel", "Закрыть панель", "パネルを閉じる"],
+  "Mouse remoto": ["Remote mouse", "Удалённая мышь", "リモートマウス"],
+  "Teclado remoto": ["Remote keyboard", "Удалённая клавиатура", "リモートキーボード"],
+  "autorizado": ["authorized", "разрешено", "許可済み"],
+  "indisponível": ["unavailable", "недоступно", "利用不可"],
+  "Baixar": ["Download", "Скачать", "ダウンロード"],
+  "Monitor remoto": ["Remote display", "Удалённый монитор", "リモートモニター"],
+  "Selecionar monitor": ["Select display", "Выбрать монитор", "モニターを選択"],
+  "Monitor principal": ["Primary display", "Основной монитор", "メインモニター"],
+  "Perfil de qualidade": ["Quality profile", "Профиль качества", "画質プロファイル"],
+  "Automática": ["Automatic", "Автоматически", "自動"],
+  "Economia": ["Economy", "Экономия", "節約"],
+  "Resolução": ["Resolution", "Разрешение", "解像度"],
+  "Taxa de quadros": ["Frame rate", "Частота кадров", "フレームレート"],
+  "Captura": ["Capture", "Захват", "キャプチャ"],
+  "Rede": ["Network", "Сеть", "ネットワーク"],
+  "Gargalo": ["Bottleneck", "Узкое место", "ボトルネック"],
+  "Rota": ["Route", "Маршрут", "接続経路"],
+  "Protocolo": ["Protocol", "Протокол", "プロトコル"],
+  "Candidatos": ["Candidates", "Кандидаты", "候補"],
+  "RTT rede / input": ["Network / input RTT", "RTT сети / ввода", "ネットワーク / 入力 RTT"],
+  "Buffer de vídeo": ["Video buffer", "Видеобуфер", "動画バッファー"],
+  "Quadros descartados": ["Dropped frames", "Пропущенные кадры", "破棄フレーム"],
+  "Codificação": ["Encoding", "Кодирование", "エンコード"],
+  "Decodificação": ["Decoding", "Декодирование", "デコード"],
+  "Perda": ["Packet loss", "Потери пакетов", "パケット損失"],
+  "Perfil solicitado": ["Requested profile", "Запрошенный профиль", "要求プロファイル"],
+  "Aplicado": ["Applied", "Применено", "適用済み"],
+  "Aguardando host": ["Waiting for host", "Ожидание хоста", "ホストを待機中"],
+  "Movimento estimado": ["Estimated motion", "Оценка движения", "推定動作量"],
+  " · FPS não mede capacidade": [" · FPS does not measure capacity", " · FPS не измеряет производительность", " · FPS は処理能力の指標ではありません"],
+  "Playout alvo / mínimo": ["Target / minimum playout", "Целевое / минимальное воспроизведение", "目標 / 最小再生遅延"],
+  "Adaptações": ["Adaptations", "Адаптации", "適応回数"],
+  "Fila controle / arquivos": ["Control / file queue", "Очередь управления / файлов", "操作 / ファイルのキュー"],
+  "Perfil H.264": ["H.264 profile", "Профиль H.264", "H.264 プロファイル"],
+  "GPU deste PC": ["This PC's GPU", "GPU этого ПК", "この PC の GPU"],
+  "Vídeo GPU local": ["Local GPU video", "Видео на локальном GPU", "ローカル GPU の動画処理"],
+  "Não informado": ["Not reported", "Не указано", "情報なし"],
+  "Não identificado": ["Not identified", "Не определено", "未識別"],
+  "Não identificada": ["Not identified", "Не определена", "未識別"],
+  "Servidor não informado": ["Server not reported", "Сервер не указан", "サーバー情報なし"],
+  "Verificando": ["Checking", "Проверка", "確認中"],
+  "Negociando": ["Negotiating", "Согласование", "ネゴシエーション中"],
+  "P2P direta": ["Direct P2P", "Прямой P2P", "直接 P2P"],
+  "P2P direto": ["Direct P2P", "Прямой P2P", "直接 P2P"],
+  "Verificando rota": ["Checking route", "Проверка маршрута", "接続経路を確認中"],
+  "Conexão segura com criptografia de ponta a ponta": ["Secure connection with end-to-end encryption", "Безопасное подключение со сквозным шифрованием", "エンドツーエンド暗号化による安全な接続"],
+  "Conectado ·": ["Connected ·", "Подключено ·", "接続済み ·"],
+  "Sessão remota ativa": ["Remote session active", "Удалённый сеанс активен", "リモートセッション実行中"],
+  "Compartilhamento em andamento": ["Sharing in progress", "Идёт показ экрана", "画面共有中"],
+  "Sua tela está sendo compartilhada com": ["Your screen is being shared with", "Ваш экран доступен", "画面を共有しています:"],
+  "O Nodus mantém esta sessão visível. Você pode revisar as permissões e interromper o acesso a qualquer momento.": ["Nodus keeps this session visible. You can review permissions and end access at any time.", "Nodus делает этот сеанс видимым. Вы можете проверить разрешения и прекратить доступ в любой момент.", "Nodus はセッションを常に表示します。権限を確認し、いつでもアクセスを終了できます。"],
+  "Conectado": ["Connected", "Подключено", "接続済み"],
+  "Status": ["Status", "Состояние", "状態"],
+  "Permissões desta sessão": ["Session permissions", "Разрешения сеанса", "セッションの権限"],
+  "Visualizar sua tela": ["View your screen", "Просмотр вашего экрана", "画面の表示"],
+  "Controlar o mouse": ["Control the mouse", "Управление мышью", "マウス操作"],
+  "Usar o teclado": ["Use the keyboard", "Использование клавиатуры", "キーボード操作"],
+  "Sincronizar texto copiado": ["Sync clipboard text", "Синхронизация буфера обмена", "コピーしたテキストの同期"],
+  "Transferir arquivos": ["Transfer files", "Передача файлов", "ファイル転送"],
+  "Ouvir o áudio do computador": ["Listen to computer audio", "Прослушивание звука компьютера", "コンピューターの音声を聞く"],
+  "Permitido": ["Allowed", "Разрешено", "許可済み"],
+  "Bloqueado": ["Blocked", "Заблокировано", "ブロック済み"],
+  "Latência": ["Latency", "Задержка", "遅延"],
+  "Fila de envio": ["Send queue", "Очередь отправки", "送信キュー"],
+  "Captura / envio": ["Capture / send", "Захват / отправка", "キャプチャ / 送信"],
+  "Limitação": ["Limitation", "Ограничение", "制限"],
+  "Processador": ["CPU", "Процессор", "CPU"],
+  "Nenhuma": ["None", "Нет", "なし"],
+  "Calculando...": ["Calculating...", "Вычисление...", "計算中..."],
+  "Criptografia": ["Encryption", "Шифрование", "暗号化"],
+  "Permissão de administrador solicitada": ["Administrator permission requested", "Запрошены права администратора", "管理者権限が要求されました"],
+  "precisa da sua confirmação local no Windows.": ["needs your local confirmation in Windows.", "нуждается в вашем локальном подтверждении в Windows.", "Windows 上での承認が必要です。"],
+  "Encerrar compartilhamento": ["Stop sharing", "Прекратить показ экрана", "共有を終了"],
+  "O acesso termina imediatamente ao encerrar.": ["Access ends immediately when stopped.", "При завершении доступ прекращается немедленно.", "終了するとアクセスは直ちに停止します。"],
+  "Nodus Connect | Compartilhamento autorizado e visível": ["Nodus Connect | Authorized and visible sharing", "Nodus Connect | Разрешённый и видимый показ экрана", "Nodus Connect | 許可された画面共有を表示中"],
+  "Nova pasta de clientes": ["New client folder", "Новая папка клиентов", "新しいクライアントフォルダー"],
+  "Criar pasta": ["Create folder", "Создать папку", "フォルダーを作成"],
+  "Renomear cliente": ["Rename client", "Переименовать клиента", "クライアント名を変更"],
+  "Sem pasta": ["No folder", "Без папки", "フォルダーなし"],
+  "Ligar": ["Wake up", "Включить", "起動"],
+  "Detalhes": ["Details", "Сведения", "詳細"],
+  "Marcadores: cliente, suporte": ["Tags: client, support", "Метки: клиент, поддержка", "タグ: クライアント、サポート"],
+  "Endereco para ligar pela rede": ["Address for network wake-up", "Адрес для включения по сети", "ネットワーク起動用アドレス"],
+  "Observacoes": ["Notes", "Заметки", "メモ"],
+  "Nenhum arquivo transferido nesta execucao.": ["No files transferred during this run.", "В этом запуске файлы не передавались.", "今回の起動ではファイル転送がありません。"],
+  "Pronto": ["Ready", "Готово", "準備完了"],
+  "Aguardando": ["Waiting", "Ожидание", "待機中"],
+  "Aguardando aceite": ["Waiting for approval", "Ожидание разрешения", "承認待ち"],
+  "Temas": ["Themes", "Темы", "テーマ"],
+  "Escolha o ambiente visual do Nodus Connect.": ["Choose the Nodus Connect appearance.", "Выберите оформление Nodus Connect.", "Nodus Connect の外観を選択します。"],
+  "Tema visual": ["Visual theme", "Тема оформления", "表示テーマ"],
+  "Personalize o Nodus Connect do seu jeito. O futuro é glorioso.": ["Customize Nodus Connect your way. The future is bright.", "Настройте Nodus Connect по-своему. Будущее прекрасно.", "Nodus Connect をお好みにカスタマイズ。未来は明るい。"],
+  "Quem informar esta senha corretamente entra na conexão sem um novo aceite.": ["Entering the correct password grants access without another approval.", "Правильный пароль даёт доступ без повторного подтверждения.", "正しいパスワードを入力すると、再承認なしで接続できます。"],
+  "Buscar atualizações": ["Check for updates", "Проверить обновления", "更新を確認"],
+  "Buscando...": ["Checking...", "Проверка...", "確認中..."],
+  "Buscando atualizações...": ["Checking for updates...", "Проверка обновлений...", "更新を確認中..."],
+  "Você já está na versão mais recente.": ["You are on the latest version.", "У вас последняя версия.", "最新バージョンを使用しています。"],
+  "Não foi possível buscar atualizações agora.": ["Could not check for updates now.", "Не удалось проверить обновления.", "更新を確認できませんでした。"],
+  "Enviar Ctrl+Alt+Del ao computador remoto": ["Send Ctrl+Alt+Del to the remote computer", "Отправить Ctrl+Alt+Del на удалённый компьютер", "リモートコンピューターに Ctrl+Alt+Del を送信"],
+  "Solicitação Ctrl+Alt+Del enviada ao Windows.": ["Ctrl+Alt+Del request sent to Windows.", "Запрос Ctrl+Alt+Del отправлен в Windows.", "Ctrl+Alt+Del の要求を Windows に送信しました。"],
+  "Ctrl+Alt+Del indisponível neste sistema.": ["Ctrl+Alt+Del is unavailable on this system.", "Ctrl+Alt+Del недоступен в этой системе.", "このシステムでは Ctrl+Alt+Del を使用できません。"],
+  "Aguarde antes de enviar Ctrl+Alt+Del novamente.": ["Wait before sending Ctrl+Alt+Del again.", "Подождите перед повторной отправкой Ctrl+Alt+Del.", "Ctrl+Alt+Del を再送する前にお待ちください。"],
+  "O Windows não respondeu ao Ctrl+Alt+Del.": ["Windows did not respond to Ctrl+Alt+Del.", "Windows не ответила на Ctrl+Alt+Del.", "Windows が Ctrl+Alt+Del に応答しませんでした。"],
+  "Serviço Nodus indisponível para Ctrl+Alt+Del.": ["Nodus service unavailable for Ctrl+Alt+Del.", "Служба Nodus недоступна для Ctrl+Alt+Del.", "Ctrl+Alt+Del 用の Nodus サービスを利用できません。"],
+  "Controle remoto não autorizado.": ["Remote control is not authorized.", "Удалённое управление не разрешено.", "リモート操作は許可されていません。"],
+  "O Windows precisa permitir Ctrl+Alt+Del por serviços na política SoftwareSASGeneration.": ["Windows must allow services to send Ctrl+Alt+Del in the SoftwareSASGeneration policy.", "Политика Windows SoftwareSASGeneration должна разрешать службам отправлять Ctrl+Alt+Del.", "Windows の SoftwareSASGeneration ポリシーでサービスによる Ctrl+Alt+Del を許可する必要があります。"],
+  "Ctrl+Alt+Del requer o serviço Nodus atualizado, ativo e autorizado no computador remoto.": ["Ctrl+Alt+Del requires an updated, running and authorized Nodus service on the remote computer.", "Для Ctrl+Alt+Del нужна обновлённая, активная и разрешённая служба Nodus на удалённом компьютере.", "Ctrl+Alt+Del には、リモートコンピューターで更新済みかつ許可された Nodus サービスの実行が必要です。"],
+  "Tela e controle conectados": ["Screen and control connected", "Экран и управление подключены", "画面と操作が接続済み"],
+  "Texto copiado enviado.": ["Clipboard text sent.", "Текст буфера обмена отправлен.", "コピーしたテキストを送信しました。"],
+  "Nao ha texto copiado para enviar.": ["There is no clipboard text to send.", "В буфере обмена нет текста для отправки.", "送信するテキストがクリップボードにありません。"],
+  "Nodus ID copiado.": ["Nodus ID copied.", "Nodus ID скопирован.", "Nodus ID をコピーしました。"],
+  "Pedido recusado pelo outro computador.": ["Request declined by the remote computer.", "Другой компьютер отклонил запрос.", "リモートコンピューターが要求を拒否しました。"],
+  "Autorizado. Estabelecendo conexao segura...": ["Authorized. Establishing a secure connection...", "Разрешено. Установка безопасного подключения...", "承認済み。安全な接続を確立中..."],
+  "Localizando dispositivo...": ["Finding device...", "Поиск устройства...", "デバイスを検索中..."],
+  "Dispositivo encontrado. Aguardando autorizacao...": ["Device found. Waiting for approval...", "Устройство найдено. Ожидание разрешения...", "デバイスが見つかりました。承認待ち..."],
+  "Informe um Nodus ID com 9 digitos.": ["Enter a 9-digit Nodus ID.", "Введите Nodus ID из 9 цифр.", "9 桁の Nodus ID を入力してください。"],
+  "Digite o Nodus ID de outro computador. Este e o ID deste PC.": ["Enter another computer's Nodus ID. This ID belongs to this PC.", "Введите Nodus ID другого компьютера. Этот ID принадлежит данному ПК.", "別のコンピューターの Nodus ID を入力してください。これはこの PC の ID です。"],
+  "Dispositivo nao encontrado. Abra o Nodus no outro PC e use o ID dele.": ["Device not found. Open Nodus on the other PC and use its ID.", "Устройство не найдено. Откройте Nodus на другом ПК и используйте его ID.", "デバイスが見つかりません。別の PC で Nodus を開き、その ID を使用してください。"],
+  "Compartilhamento cancelado ou indisponivel.": ["Sharing canceled or unavailable.", "Показ экрана отменён или недоступен.", "共有がキャンセルされたか利用できません。"],
+  "Dispositivo removido da aba Dispositivos.": ["Device removed from the Devices tab.", "Устройство удалено из вкладки «Устройства».", "デバイスタブから削除しました。"],
+  "Dispositivo removido dos favoritos.": ["Device removed from favorites.", "Устройство удалено из избранного.", "お気に入りから削除しました。"],
+  "Nome do dispositivo atualizado.": ["Device name updated.", "Имя устройства обновлено.", "デバイス名を更新しました。"],
+  "Nome original restaurado.": ["Original name restored.", "Исходное имя восстановлено.", "元の名前に戻しました。"],
+};
+const languages = ["en-US", "ru-RU", "ja-JP"] as const;
+Object.assign(additions, {
+  "O host não autorizou o áudio.": ["The host has not authorized audio.", "Хост не разрешил передачу звука.", "ホストは音声を許可していません。"],
+  "Áudio indisponível. Nenhuma faixa de áudio recebida.": ["Audio unavailable. No audio track received.", "Звук недоступен. Аудиодорожка не получена.", "音声は利用できません。音声トラックを受信していません。"],
+  "Áudio indisponível": ["Audio unavailable", "Звук недоступен", "音声は利用できません"],
+  "Alternar tela cheia": ["Toggle fullscreen", "Переключить полноэкранный режим", "全画面表示を切り替える"],
+  "Mouse remoto autorizado": ["Remote mouse authorized", "Удалённая мышь разрешена", "リモートマウスは許可されています"],
+  "Teclado remoto autorizado": ["Remote keyboard authorized", "Удалённая клавиатура разрешена", "リモートキーボードは許可されています"],
+  "O host não autorizou esta ação.": ["The host has not authorized this action.", "Хост не разрешил это действие.", "ホストはこの操作を許可していません。"],
+  "Canal de controle indisponível. Aguarde a conexão ou reconecte.": ["Control channel unavailable. Wait for the connection or reconnect.", "Канал управления недоступен. Дождитесь подключения или подключитесь заново.", "制御チャネルは利用できません。接続を待つか、再接続してください。"],
+  "Enviar arquivo para Documentos no computador remoto": ["Send a file to Documents on the remote computer", "Отправить файл в Документы на удалённом компьютере", "リモートコンピューターのドキュメントにファイルを送信"],
+  "Transferência indisponível. Verifique a permissão e aguarde o canal de arquivos.": ["Transfer unavailable. Check permission and wait for the file channel.", "Передача недоступна. Проверьте разрешение и дождитесь канала файлов.", "転送は利用できません。権限を確認し、ファイルチャネルを待ってください。"],
+  "Resolução solicitada": ["Requested resolution", "Запрошенное разрешение", "要求した解像度"],
+  "Resolução e tela": ["Resolution and display", "Разрешение и экран", "解像度と画面"],
+  "Tela e adaptação": ["Display and adaptation", "Экран и адаптация", "画面と適応"],
+  "Resolução do compartilhamento": ["Sharing resolution", "Разрешение трансляции", "共有解像度"],
+  "Resolução nativa do monitor": ["Native display resolution", "Нативное разрешение монитора", "モニターのネイティブ解像度"],
+  "Perfil": ["Profile", "Профиль", "プロフィール"],
+  "Nome de usuário": ["User name", "Имя пользователя", "ユーザー名"],
+  "Alterar nome": ["Change name", "Изменить имя", "名前を変更"],
+  "Bloquear mouse do host": ["Block host mouse", "Заблокировать мышь хоста", "ホストのマウスをブロック"],
+  "Liberar mouse do host": ["Release host mouse", "Разблокировать мышь хоста", "ホストのマウスを解除"],
+  "Bloquear teclado do host": ["Block host keyboard", "Заблокировать клавиатуру хоста", "ホストのキーボードをブロック"],
+  "Liberar teclado do host": ["Release host keyboard", "Разблокировать клавиатуру хоста", "ホストのキーボードを解除"],
+  "Bloqueio de entrada não disponível neste computador.": ["Input blocking is unavailable on this computer.", "Блокировка ввода недоступна на этом компьютере.", "このコンピューターでは入力ブロックを利用できません。"],
+  "FPS solicitado": ["Requested FPS", "Запрошенная частота кадров", "要求した FPS"],
+  "Vídeo aplicado": ["Applied video", "Применённое видео", "適用された映像"],
+  "FPS recebidos": ["Received FPS", "Полученные кадры/с", "受信 FPS"],
+  "FPS apresentados": ["Presented FPS", "Отображённые кадры/с", "表示 FPS"],
+  "Aguardando confirmação do host": ["Waiting for host confirmation", "Ожидание подтверждения хоста", "ホストの確認を待機中"],
+  "Recuperação indisponível": ["Recovery unavailable", "Восстановление недоступно", "パスワード復元は未対応"],
+  "Recuperação de senha ainda não disponível.": ["Password recovery is not available yet.", "Восстановление пароля пока недоступно.", "パスワードの復元はまだ利用できません。"],
+  "Categorias das configurações": ["Settings categories", "Категории настроек", "設定カテゴリ"],
+  "Filtrar dispositivos": ["Filter devices", "Фильтр устройств", "デバイスを絞り込む"],
+  "Mais ações": ["More actions", "Другие действия", "その他の操作"],
+  "Adicionar aos favoritos": ["Add to favorites", "Добавить в избранное", "お気に入りに追加"],
+  "Exibição em grade": ["Grid view", "Вид сетки", "グリッド表示"],
+  "Exibição em lista": ["List view", "Вид списка", "一覧表示"],
+  "Receber texto copiado": ["Receive clipboard text", "Получать текст из буфера обмена", "コピーしたテキストを受信"],
+  "Permitir recebimento de texto copiado": ["Allow receiving clipboard text", "Разрешить получение текста из буфера обмена", "コピーしたテキストの受信を許可"],
+  "Enviar manualmente o texto copiado para o computador remoto": ["Manually send clipboard text to the remote computer", "Вручную отправить текст из буфера обмена на удалённый компьютер", "コピーしたテキストをリモートコンピューターに手動で送信"],
+  "Remover da lista": ["Remove from list", "Убрать из списка", "一覧から削除"],
+  "Remover dos favoritos": ["Remove from favorites", "Убрать из избранного", "お気に入りから削除"],
+  "Interface de acesso remoto revisada.": ["Remote access interface revised.", "Интерфейс удалённого доступа обновлён.", "リモートアクセス画面を更新しました。"],
+  "A sessão atual utiliza a janela principal do Nodus.": ["The current session uses the main Nodus window.", "Текущий сеанс использует главное окно Nodus.", "現在のセッションは Nodus のメインウィンドウを使用します。"],
+});
+for (const [source, values] of Object.entries(additions)) languages.forEach((language, index) => { dictionaries[language][source] = values[index]; });
+const aliases: Record<string, string> = { "Aguardando conexao": "Aguardando conexão", "Canal Nodus pronto": "CANAL NODUS PRONTO", "Conexao segura disponivel": "Conexão segura disponível", "Resolucao preferida": "Resolução preferida", "Transferencia de arquivos": "Transferência de arquivos", "Os computadores acessados aparecerao aqui para conexoes mais rapidas.": "Os computadores acessados aparecerão aqui para conexões mais rápidas." };
+const reverse = new Map(Object.values(dictionaries).flatMap((dictionary) => Object.entries(dictionary).map(([source, target]) => [target, source] as const)));
+const sources = new Set(Object.values(dictionaries).flatMap((dictionary) => Object.keys(dictionary)));
+const templates: Record<string, [string, string, string]> = {
+  "Bem-vindo de volta, {value}.": ["Welcome back, {value}.", "С возвращением, {value}.", "おかえりなさい、{value}。"],
+  "Acessando {value}": ["Accessing {value}", "Подключение к {value}", "接続先: {value}"],
+  "Nova versão disponível: {value}": ["New version available: {value}", "Доступна новая версия: {value}", "新しいバージョン: {value}"],
+  "Salvo em {value}": ["Saved to {value}", "Сохранено в {value}", "保存先: {value}"],
+  "Enviando {value}%": ["Sending {value}%", "Отправка {value}%", "送信中 {value}%"],
+  "Recebendo {value}%": ["Receiving {value}%", "Получение {value}%", "受信中 {value}%"],
+};
+const escapePattern = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+const templateMatchers = Object.entries(templates).flatMap(([source, values]) => [source, ...values].map((text) => {
+  const [prefix, suffix] = text.split("{value}");
+  return { pattern: new RegExp(`^${escapePattern(prefix)}(.+)${escapePattern(suffix)}$`), source, values };
+}));
+const textSources = new WeakMap<Text, { source: string; last: string }>();
+const attributeSources = new WeakMap<Element, Map<string, { source: string; last: string }>>();
 let observer: MutationObserver | undefined;
 
 function baseText(value: string): string {
-  for (const dictionary of Object.values(dictionaries)) {
-    const source = Object.entries(dictionary).find(([, translated]) => translated === value)?.[0];
-    if (source) return source;
-  }
-  return value;
+  return aliases[value] ?? (sources.has(value) ? value : reverse.get(value) ?? value);
 }
 
-function translate(value: string, language: UiLanguage): string {
+export function translateText(value: string, language: UiLanguage): string {
+  if (!value.trim()) return value;
   const lead = value.match(/^\s*/)?.[0] ?? "";
   const tail = value.match(/\s*$/)?.[0] ?? "";
   const base = baseText(value.trim());
+  for (const { pattern, source, values } of templateMatchers) {
+    const match = pattern.exec(value.trim());
+    if (match) return `${lead}${(language === "pt-BR" ? source : values[languages.indexOf(language)]).replace("{value}", () => match[1])}${tail}`;
+  }
   const translated = language === "pt-BR" ? base : dictionaries[language][base] ?? base;
   return `${lead}${translated}${tail}`;
 }
@@ -157,7 +449,10 @@ function translate(value: string, language: UiLanguage): string {
 function translateTree(root: Node, language: UiLanguage): void {
   const applyText = (node: Text) => {
     if (["SCRIPT", "STYLE"].includes(node.parentElement?.tagName ?? "") || node.parentElement?.closest('[translate="no"]')) return;
-    const translated = translate(node.data, language);
+    const previous = textSources.get(node);
+    const source = previous?.last === node.data ? previous.source : node.data;
+    const translated = translateText(source, language);
+    textSources.set(node, { source, last: translated });
     if (translated !== node.data) node.data = translated;
   };
   const applyAttributes = (element: Element) => {
@@ -165,7 +460,12 @@ function translateTree(root: Node, language: UiLanguage): void {
     ["placeholder", "title", "aria-label", "data-tooltip"].forEach((attribute) => {
       const value = element.getAttribute(attribute);
       if (!value) return;
-      const translated = translate(value, language);
+      const cache = attributeSources.get(element) ?? new Map();
+      const previous = cache.get(attribute);
+      const source = previous?.last === value ? previous.source : value;
+      const translated = translateText(source, language);
+      cache.set(attribute, { source, last: translated });
+      attributeSources.set(element, cache);
       if (translated !== value) element.setAttribute(attribute, translated);
     });
   };
@@ -186,10 +486,10 @@ export function applyLanguage(language: UiLanguage): void {
   if (!document.body) return;
   translateTree(document.body, language);
   observer = new MutationObserver((records) => records.forEach((record) => {
-    if (record.type === "attributes") translateTree(record.target, language);
+    if (record.type === "attributes" || record.type === "characterData") translateTree(record.target, language);
     else record.addedNodes.forEach((node) => translateTree(node, language));
   }));
-  observer.observe(document.body, { subtree: true, childList: true, attributes: true, attributeFilter: ["placeholder", "title", "aria-label", "data-tooltip"] });
+  observer.observe(document.body, { subtree: true, childList: true, characterData: true, attributes: true, attributeFilter: ["placeholder", "title", "aria-label", "data-tooltip"] });
 }
 
 export function currentLocale(): UiLanguage {

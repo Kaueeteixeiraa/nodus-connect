@@ -20,10 +20,10 @@ export type QualitySample = {
 
 export const STAGE_LIMITS = [
   { height: 1080, fps: 120 },
-  { height: 900, fps: 90 },
-  { height: 720, fps: 60 },
-  { height: 720, fps: 45 },
-  { height: 720, fps: 30 },
+  { height: 1080, fps: 90 },
+  { height: 1080, fps: 60 },
+  { height: 1080, fps: 45 },
+  { height: 1080, fps: 30 },
 ] as const;
 
 export type QualityPressure = { stage: AdaptiveStage; reason: string; source: "network" | "local" | "none" };
@@ -65,7 +65,8 @@ export function nextBitrate(desired: number, previous?: number): number {
 
 export function nativeVideoBitrate(height: number, fps: number, stage: AdaptiveStage = 0): number {
   const base = Math.max(4_000_000, Math.min(18_000_000, Math.round(14_000_000 * (height / 1080) ** 1.5 * (Math.min(60, fps) / 60) ** 0.65)));
-  return Math.max(1_000_000, Math.round(base * 0.65 ** stage));
+  const floor = height >= 1080 ? 6_000_000 : 3_000_000;
+  return Math.max(floor, Math.round(base * 0.65 ** stage));
 }
 
 export function advanceStage(current: AdaptiveState, recommended: AdaptiveStage, now: number, critical = false): AdaptiveState {

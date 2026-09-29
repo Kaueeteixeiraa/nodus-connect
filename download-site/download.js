@@ -1,4 +1,4 @@
-const setupUrl = "https://github.com/Kaueeteixeiraa/nodus-connect/releases/download/v0.4.25-recovery.1-cursor/Nodus-Connect-Setup-0.4.25-recovery.1-cursor.exe";
+const setupUrl = "https://github.com/Kaueeteixeiraa/nodus-connect/releases/download/v0.0.1/Nodus-Connect-Setup-0.0.1.exe?build=20260929-resolution-controls";
 
 const link = document.querySelector("#download-link");
 const title = document.querySelector("#download-title");
@@ -7,5 +7,5 @@ const detail = document.querySelector("#download-detail");
 link.href = setupUrl;
 link.addEventListener("click", () => {
   title.textContent = "Download iniciado";
-  detail.textContent = "0.4.25-recovery.1 - teste do cursor";
+  detail.textContent = "Versão 0.0.1 - Arquivo único";
 });
