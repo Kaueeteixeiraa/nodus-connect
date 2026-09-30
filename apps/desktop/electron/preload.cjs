@@ -5,8 +5,8 @@ contextBridge.exposeInMainWorld("nodusDesktop", {
   setTrayIdentity(identity) {
     ipcRenderer.send("nodus:tray-identity", identity);
   },
-  getIdentity() {
-    return ipcRenderer.invoke("nodus:get-identity");
+  getIdentity(legacyIdentity) {
+    return ipcRenderer.invoke("nodus:get-identity", legacyIdentity);
   },
   saveIdentity(identity) {
     return ipcRenderer.invoke("nodus:save-identity", identity);

@@ -28,6 +28,9 @@ let modulesPromise: Promise<FirebaseModules> | null = null;
 let appInstance: FirebaseApp | null = null;
 let authInstance: Auth | null = null;
 let dbInstance: Firestore | null = null;
+let accountAppInstance: FirebaseApp | null = null;
+let accountAuthInstance: Auth | null = null;
+let accountDbInstance: Firestore | null = null;
 
 export function firebaseConfigured(): boolean {
   return Boolean(config.apiKey && config.authDomain && config.projectId && config.appId);
@@ -36,20 +39,20 @@ export function firebaseConfigured(): boolean {
 export async function signInFirebaseWithGoogle(idToken?: string, accessToken?: string): Promise<string | null> {
   if (!firebaseConfigured() || (!idToken && !accessToken)) return null;
   const authApi = (await modules()).auth;
-  const authInstance = await auth();
+  const authInstance = await accountAuth();
   const credential = authApi.GoogleAuthProvider.credential(idToken || null, accessToken || null);
-  if (authInstance.currentUser?.isAnonymous) {
-    try {
-      return (await authApi.linkWithCredential(authInstance.currentUser, credential)).user.uid;
-    } catch {}
-  }
   return (await authApi.signInWithCredential(authInstance, credential)).user.uid;
 }
 
+export async function signOutFirebaseAccount(): Promise<void> {
+  if (!accountAuthInstance) return;
+  await (await modules()).auth.signOut(accountAuthInstance);
+}
+
 export async function syncCloudUser(user: LocalUser, identity: LocalIdentity): Promise<void> {
-  const uid = await ensureUid();
+  const uid = await ensureAccountUid();
   if (!uid) return;
-  const { doc, setDoc, store } = await fire();
+  const { doc, setDoc, store } = await accountFire();
   await setDoc(doc(store, "users", uid), {
     uid,
     name: user.name,
@@ -62,40 +65,40 @@ export async function syncCloudUser(user: LocalUser, identity: LocalIdentity): P
 }
 
 export async function saveCloudSettings(settings: LocalSettings): Promise<void> {
-  const uid = await ensureUid();
+  const uid = await ensureAccountUid();
   if (!uid) return;
-  const { doc, setDoc, store } = await fire();
+  const { doc, setDoc, store } = await accountFire();
   await setDoc(doc(store, "users", uid, "private", "settings"), firestoreData({ ...settings, threeDimensionalStandby: false }), { merge: true });
 }
 
 export async function loadCloudSettings(): Promise<Partial<LocalSettings> | null> {
-  const uid = await ensureUid();
+  const uid = await ensureAccountUid();
   if (!uid) return null;
-  const { doc, getDoc, store } = await fire();
+  const { doc, getDoc, store } = await accountFire();
   const snapshot = await getDoc(doc(store, "users", uid, "private", "settings"));
   return snapshot.exists() ? snapshot.data() as Partial<LocalSettings> : null;
 }
 
 export async function saveCloudAccessLog(entry: AccessLogEntry): Promise<void> {
-  const uid = await ensureUid();
+  const uid = await ensureAccountUid();
   if (!uid) return;
-  const { doc, setDoc, store } = await fire();
+  const { doc, setDoc, store } = await accountFire();
   await setDoc(doc(store, "users", uid, "accessLog", entry.id), firestoreData(entry), { merge: true });
 }
 
 export async function cloudRegisterPresence(identity: LocalIdentity): Promise<CoordinationDevice> {
-  const uid = await ensureUid();
+  const uid = await ensureDeviceUid();
   const device = cloudDevice(identity, "online", uid);
   const { doc, getDoc, setDoc, store } = await fire();
   const ref = doc(store, "devices", device.nodusId);
   const existing = await getDoc(ref);
-  if (existing.exists() && existing.data().ownerUid !== uid) throw new Error("NODUS_ID_CONFLICT");
+  if (existing.exists() && (existing.data().ownerUid !== uid || (existing.data().deviceId && existing.data().deviceId !== identity.deviceId))) throw new Error("NODUS_ID_CONFLICT");
   await setDoc(ref, device, { merge: true });
   return device;
 }
 
 export async function cloudHeartbeat(identityInput: LocalIdentity | string): Promise<CoordinationDevice> {
-  const uid = await ensureUid();
+  const uid = await ensureDeviceUid();
   const nodusIdInput = typeof identityInput === "string" ? identityInput : identityInput.nodusId;
   const nodusId = normalizeNodusId(nodusIdInput);
   if (!nodusId) throw new Error("Nodus ID invalido");
@@ -103,8 +106,11 @@ export async function cloudHeartbeat(identityInput: LocalIdentity | string): Pro
   const ref = doc(store, "devices", nodusId);
   const current = await getDoc(ref);
   const currentDevice = current.data() as CoordinationDevice | undefined;
+  if (currentDevice?.ownerUid && currentDevice.ownerUid !== uid) throw new Error("NODUS_ID_CONFLICT");
   const device: CoordinationDevice = {
     nodusId,
+    deviceId: typeof identityInput === "string" ? currentDevice?.deviceId : identityInput.deviceId,
+    deviceFingerprint: typeof identityInput === "string" ? currentDevice?.deviceFingerprint : identityInput.deviceFingerprint,
     ownerUid: uid ?? currentDevice?.ownerUid,
     deviceName: typeof identityInput === "string" ? currentDevice?.deviceName ?? "Dispositivo" : identityInput.deviceName,
     status: "online",
@@ -116,7 +122,7 @@ export async function cloudHeartbeat(identityInput: LocalIdentity | string): Pro
 }
 
 export async function cloudUnregisterPresence(identityInput: LocalIdentity | string): Promise<CoordinationDevice> {
-  const uid = await ensureUid();
+  const uid = await ensureDeviceUid();
   const nodusIdInput = typeof identityInput === "string" ? identityInput : identityInput.nodusId;
   const nodusId = normalizeNodusId(nodusIdInput);
   if (!nodusId) throw new Error("Nodus ID invalido");
@@ -124,8 +130,11 @@ export async function cloudUnregisterPresence(identityInput: LocalIdentity | str
   const ref = doc(store, "devices", nodusId);
   const current = await getDoc(ref);
   const currentDevice = current.data() as CoordinationDevice | undefined;
+  if (currentDevice?.ownerUid && currentDevice.ownerUid !== uid) throw new Error("NODUS_ID_CONFLICT");
   const device: CoordinationDevice = {
     nodusId,
+    deviceId: typeof identityInput === "string" ? currentDevice?.deviceId : identityInput.deviceId,
+    deviceFingerprint: typeof identityInput === "string" ? currentDevice?.deviceFingerprint : identityInput.deviceFingerprint,
     ownerUid: uid ?? currentDevice?.ownerUid,
     deviceName: typeof identityInput === "string" ? currentDevice?.deviceName ?? "Dispositivo" : identityInput.deviceName,
     status: "offline",
@@ -163,7 +172,7 @@ export function subscribeCloudDevicePresence(nodusIdInput: string, onPresence: (
 }
 
 export async function cloudLookupDevice(nodusIdInput: string): Promise<CoordinationDevice | null> {
-  await ensureUid();
+  await ensureDeviceUid();
   const nodusId = normalizeNodusId(nodusIdInput);
   if (!nodusId) throw new Error("Nodus ID invalido");
   const { doc, getDoc, store } = await fire();
@@ -182,7 +191,7 @@ export async function cloudCreateSessionRequest(input: {
   preferredResolution?: import("./api").RemoteResolution;
   preferredFps?: import("./api").RemoteFrameRate;
 }): Promise<SessionRequestRecord> {
-  const uid = await ensureUid();
+  const uid = await ensureDeviceUid();
   const requesterNodusId = normalizeNodusId(input.requesterNodusId);
   const targetNodusId = normalizeNodusId(input.targetNodusId);
   if (!requesterNodusId || !targetNodusId) throw new Error("Nodus ID invalido");
@@ -212,7 +221,7 @@ export async function cloudCreateSessionRequest(input: {
 }
 
 export async function cloudListIncomingRequests(nodusIdInput: string): Promise<SessionRequestRecord[]> {
-  const uid = await ensureUid();
+  const uid = await ensureDeviceUid();
   const nodusId = normalizeNodusId(nodusIdInput);
   if (!nodusId) throw new Error("Nodus ID invalido");
   if (!uid) throw new Error("Conta indisponivel.");
@@ -225,7 +234,7 @@ export async function cloudListIncomingRequests(nodusIdInput: string): Promise<S
 }
 
 export async function cloudGetSessionRequest(id: string): Promise<SessionRequestRecord> {
-  await ensureUid();
+  await ensureDeviceUid();
   const { doc, getDoc, store } = await fire();
   const snapshot = await getDoc(doc(store, "sessionRequests", id));
   if (!snapshot.exists()) throw new Error("Solicitacao expirada. Tente novamente.");
@@ -235,7 +244,7 @@ export async function cloudGetSessionRequest(id: string): Promise<SessionRequest
 }
 
 export async function cloudAcceptSessionRequest(id: string, targetName: string, grantedPermissions: SessionPermission[]): Promise<SessionRequestRecord> {
-  await ensureUid();
+  await ensureDeviceUid();
   const { doc, setDoc, store } = await fire();
   const ref = doc(store, "sessionRequests", id);
   const current = await cloudGetSessionRequest(id);
@@ -261,7 +270,7 @@ export async function cloudAcceptSessionRequest(id: string, targetName: string, 
 }
 
 export async function cloudDenySessionRequest(id: string): Promise<SessionRequestRecord> {
-  await ensureUid();
+  await ensureDeviceUid();
   const { doc, setDoc, store } = await fire();
   const ref = doc(store, "sessionRequests", id);
   const next: SessionRequestRecord = { ...await cloudGetSessionRequest(id), status: "denied", updatedAt: new Date().toISOString() };
@@ -270,7 +279,7 @@ export async function cloudDenySessionRequest(id: string): Promise<SessionReques
 }
 
 export async function cloudSendSignal(sessionId: string, signal: Omit<SignalMessage, "seq" | "sessionId" | "createdAt">): Promise<SignalMessage> {
-  await ensureUid();
+  await ensureDeviceUid();
   const to = normalizeNodusId(signal.to);
   if (!to) throw new Error("Nodus ID invalido");
   const { addDoc, collection, store } = await fire();
@@ -286,7 +295,7 @@ export async function cloudSendSignal(sessionId: string, signal: Omit<SignalMess
 }
 
 export async function cloudGetSignals(sessionId: string, toInput: string, after = 0): Promise<SignalMessage[]> {
-  await ensureUid();
+  await ensureDeviceUid();
   const to = normalizeNodusId(toInput);
   if (!to) throw new Error("Nodus ID invalido");
   const { collection, getDocs, query, store, where } = await fire();
@@ -309,7 +318,7 @@ export function subscribeCloudRealtime(
   let closed = false;
   if (!firebaseConfigured() || !nodusId) return { close() {} };
   handlers.onState?.("connecting");
-  ensureUid().then(async (uid) => {
+  ensureDeviceUid().then(async (uid) => {
     if (closed) return;
     if (!uid) throw new Error("Conta indisponivel.");
     const { collection, onSnapshot, query, store, where } = await fire();
@@ -340,6 +349,8 @@ function cloudDevice(identity: LocalIdentity, status: CoordinationDevice["status
   if (!nodusId) throw new Error("Nodus ID invalido");
   return {
     nodusId,
+    deviceId: identity.deviceId,
+    deviceFingerprint: identity.deviceFingerprint,
     ownerUid: ownerUid ?? undefined,
     deviceName: identity.deviceName,
     status,
@@ -348,16 +359,21 @@ function cloudDevice(identity: LocalIdentity, status: CoordinationDevice["status
   };
 }
 
-async function ensureUid(): Promise<string | null> {
+async function ensureDeviceUid(): Promise<string | null> {
   if (!firebaseConfigured()) return null;
   const authApi = (await modules()).auth;
-  const authInstance = await auth();
+  const authInstance = await deviceAuth();
   const user = authInstance.currentUser ?? (await authApi.signInAnonymously(authInstance)).user;
   await user.getIdToken();
   return user.uid;
 }
 
-async function auth(): Promise<Auth> {
+async function ensureAccountUid(): Promise<string | null> {
+  if (!firebaseConfigured()) return null;
+  return (await accountAuth()).currentUser?.uid ?? null;
+}
+
+async function deviceAuth(): Promise<Auth> {
   if (!authInstance) authInstance = (await modules()).auth.getAuth(await app());
   return authInstance;
 }
@@ -366,6 +382,25 @@ async function fire(): Promise<typeof import("firebase/firestore") & { store: Fi
   const { firestore } = await modules();
   if (!dbInstance) dbInstance = firestore.getFirestore(await app());
   return Object.assign({ store: dbInstance }, firestore);
+}
+
+async function accountAuth(): Promise<Auth> {
+  if (!accountAuthInstance) accountAuthInstance = (await modules()).auth.getAuth(await accountApp());
+  return accountAuthInstance;
+}
+
+async function accountFire(): Promise<typeof import("firebase/firestore") & { store: Firestore }> {
+  const { firestore } = await modules();
+  if (!accountDbInstance) accountDbInstance = firestore.getFirestore(await accountApp());
+  return Object.assign({ store: accountDbInstance }, firestore);
+}
+
+async function accountApp(): Promise<FirebaseApp> {
+  if (!accountAppInstance) {
+    const appApi = (await modules()).app;
+    accountAppInstance = appApi.getApps().find((item) => item.name === "nodus-account") ?? appApi.initializeApp(config, "nodus-account");
+  }
+  return accountAppInstance;
 }
 
 async function app(): Promise<FirebaseApp> {

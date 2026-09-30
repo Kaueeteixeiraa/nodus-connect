@@ -87,7 +87,7 @@ import {
   type SessionRequestRecord,
   type SignalMessage,
 } from "./core/api";
-import { loadNativeIdentity, loadOrCreateIdentity, regenerateNodusId, saveIdentity, type LocalIdentity } from "./core/identity";
+import { saveIdentity, type LocalIdentity } from "./core/identity";
 import { applyLanguage, currentLocale } from "./core/localization";
 import {
   firebaseConfigured,
@@ -95,6 +95,7 @@ import {
   saveCloudAccessLog,
   saveCloudSettings,
   signInFirebaseWithGoogle,
+  signOutFirebaseAccount,
   syncCloudUser,
   subscribeCloudDevicePresence,
 } from "./core/firebase";
@@ -311,8 +312,8 @@ function resolutionLabel(resolution: RemoteResolution): string {
   return resolution === "native" ? "Resolução nativa do monitor" : resolution.replace("x", " × ");
 }
 
-export function App() {
-  const [identity, setIdentity] = useState<LocalIdentity>(() => loadOrCreateIdentity());
+export function App({ initialIdentity }: { initialIdentity: LocalIdentity }) {
+  const [identity, setIdentity] = useState<LocalIdentity>(initialIdentity);
   const [deviceName, setDeviceName] = useState(identity.deviceName);
   const [serviceState, setServiceState] = useState<ServiceState>("connecting");
   const [targetId, setTargetId] = useState("");
@@ -552,19 +553,6 @@ export function App() {
   }, [currentUser, identity.nodusId]);
 
   useEffect(() => {
-    loadNativeIdentity().then((nativeIdentity) => {
-      if (!nativeIdentity) {
-        saveIdentity(identity);
-        return;
-      }
-      if (nativeIdentity.nodusId !== identity.nodusId || nativeIdentity.deviceNameConfirmed !== identity.deviceNameConfirmed) {
-        setIdentity(nativeIdentity);
-        setDeviceName(nativeIdentity.deviceName);
-      }
-    });
-  }, []);
-
-  useEffect(() => {
     window.nodusDesktop?.getAppInfo().then((info) => {
       setAppVersion(info.version);
       setNativeGoogleClient(Boolean(info.googleClientConfigured));
@@ -646,12 +634,7 @@ export function App() {
         await registerPresence(identity);
         if (!disposed) setServiceState("online");
       } catch (error) {
-        if (error instanceof Error && error.message === "NODUS_ID_CONFLICT") {
-          const next = regenerateNodusId(identity);
-          saveIdentity(next);
-          if (!disposed) setIdentity(next);
-          return;
-        }
+        if (error instanceof Error && error.message === "NODUS_ID_CONFLICT") logDiagnostic(`identity-conflict nodusId=${identity.nodusId} preserved=true`);
         if (!disposed) setServiceState(navigator.onLine ? "error" : "offline");
       }
     }
@@ -2590,6 +2573,7 @@ export function App() {
   function logout() {
     clearUser();
     setCurrentUser(null);
+    signOutFirebaseAccount().catch(() => undefined);
   }
 
   function recordAccess(entry: Omit<AccessLogEntry, "id" | "at">) {

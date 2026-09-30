@@ -4,8 +4,8 @@ interface Window {
   nodusDesktop?: {
     iceDiagnosticsEnabled: boolean;
     setTrayIdentity(identity: { nodusId: string; deviceName: string; status: string }): void;
-    getIdentity(): Promise<unknown>;
-    saveIdentity(identity: unknown): Promise<void>;
+    getIdentity(legacyIdentity?: unknown): Promise<unknown>;
+    saveIdentity(identity: unknown): Promise<unknown>;
     getServerInfo(): Promise<{ port: number; urls: string[] }>;
     getAppInfo(): Promise<{ version: string; googleClientConfigured?: boolean }>;
     setThemeIcon(theme: string, dataUrl: string): Promise<boolean>;

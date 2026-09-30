@@ -77,6 +77,8 @@ export interface SignalMessage {
 
 export interface CoordinationDevice {
   nodusId: string;
+  deviceId?: string;
+  deviceFingerprint?: string;
   ownerUid?: string;
   deviceName: string;
   status: "online" | "offline" | "connecting" | "in_session" | "error";
@@ -162,6 +164,8 @@ export async function registerPresence(identity: LocalIdentity): Promise<Coordin
     method: "PUT",
     body: JSON.stringify({
       nodusId: identity.nodusId,
+      deviceId: identity.deviceId,
+      deviceFingerprint: identity.deviceFingerprint,
       deviceName: identity.deviceName,
       status: "online",
       capabilities: ["desktop-shell", "presence", "screen-share", "remote-control", "realtime"],

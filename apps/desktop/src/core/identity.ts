@@ -1,63 +1,53 @@
-import { generateNodusId } from "../../../../packages/common/src/nodusId";
+import { isValidNodusId } from "../../../../packages/common/src/nodusId";
 
 const IDENTITY_KEY = "nodus.identity.v1";
 
 export interface LocalIdentity {
   nodusId: string;
+  deviceId: string;
+  deviceFingerprint: string;
   deviceName: string;
   deviceNameConfirmed: boolean;
   createdAt: string;
 }
 
-export function loadOrCreateIdentity(): LocalIdentity {
-  const stored = localStorage.getItem(IDENTITY_KEY);
-  if (stored) {
-    try {
-      return JSON.parse(stored) as LocalIdentity;
-    } catch {
-      localStorage.removeItem(IDENTITY_KEY);
-    }
-  }
-
-  const bytes = new Uint8Array(16);
-  crypto.getRandomValues(bytes);
-
-  const identity: LocalIdentity = {
-    nodusId: generateNodusId(bytes),
-    deviceName: defaultDeviceName(),
-    deviceNameConfirmed: false,
-    createdAt: new Date().toISOString(),
-  };
-
-  saveIdentity(identity);
+export async function loadOfficialIdentity(): Promise<LocalIdentity> {
+  const bridge = window.nodusDesktop;
+  if (!bridge) throw new Error("NODUS_NATIVE_IDENTITY_UNAVAILABLE");
+  const identity = parseIdentity(await bridge.getIdentity(readCachedIdentity()));
+  if (!identity) throw new Error("NODUS_NATIVE_IDENTITY_INVALID");
+  cacheIdentity(identity);
   return identity;
 }
 
 export function saveIdentity(identity: LocalIdentity): void {
-  localStorage.setItem(IDENTITY_KEY, JSON.stringify(identity));
+  cacheIdentity(identity);
   window.nodusDesktop?.saveIdentity(identity).catch(() => undefined);
 }
 
-export function regenerateNodusId(identity: LocalIdentity): LocalIdentity {
-  const bytes = new Uint8Array(16);
-  crypto.getRandomValues(bytes);
-  return { ...identity, nodusId: generateNodusId(bytes), createdAt: new Date().toISOString() };
+function readCachedIdentity(): Partial<LocalIdentity> | null {
+  try {
+    const value = JSON.parse(localStorage.getItem(IDENTITY_KEY) || "null") as Partial<LocalIdentity> | null;
+    return value && isValidNodusId(String(value.nodusId || "")) ? value : null;
+  } catch {
+    return null;
+  }
 }
 
-export async function loadNativeIdentity(): Promise<LocalIdentity | null> {
-  const native = await window.nodusDesktop?.getIdentity().catch(() => null);
-  if (!native || typeof native !== "object") return null;
-  const identity = native as Partial<LocalIdentity>;
-  if (!identity.nodusId || !identity.deviceName || !identity.createdAt) return null;
+function cacheIdentity(identity: LocalIdentity): void {
+  localStorage.setItem(IDENTITY_KEY, JSON.stringify(identity));
+}
+
+function parseIdentity(value: unknown): LocalIdentity | null {
+  if (!value || typeof value !== "object") return null;
+  const identity = value as Partial<LocalIdentity>;
+  if (!isValidNodusId(String(identity.nodusId || "")) || !identity.deviceId || !identity.deviceFingerprint || !identity.deviceName || !identity.createdAt) return null;
   return {
-    nodusId: identity.nodusId,
-    deviceName: identity.deviceName,
+    nodusId: String(identity.nodusId),
+    deviceId: String(identity.deviceId),
+    deviceFingerprint: String(identity.deviceFingerprint),
+    deviceName: String(identity.deviceName),
     deviceNameConfirmed: Boolean(identity.deviceNameConfirmed),
-    createdAt: identity.createdAt,
+    createdAt: String(identity.createdAt),
   };
-}
-
-function defaultDeviceName(): string {
-  const platform = navigator.platform?.toLowerCase().includes("win") ? "Windows" : "Dispositivo";
-  return `PC-${platform}`;
 }

@@ -7,6 +7,7 @@ const http = require("node:http");
 const os = require("node:os");
 const path = require("node:path");
 const { pathToFileURL } = require("node:url");
+const { createDeviceIdentityStore } = require("./device-identity.cjs");
 const { RemoteCursorVisibility } = require("./remote-cursor-visibility.cjs");
 const { RemoteWindowsKeys } = require("./remote-windows-keys.cjs");
 
@@ -27,6 +28,7 @@ const inputLocks = new Map();
 let captureOptions = { sourceId: "", displayId: "", shareAudio: true };
 let powerSaveBlockerId = -1;
 let gpuInfoReady = false;
+let deviceIdentityStore;
 const nativeMedia = new Map();
 
 const isDev = process.env.NODUS_DESKTOP_DEV === "1";
@@ -369,17 +371,8 @@ require("electron").ipcMain.on("nodus:tray-identity", (_event, identity) => {
 });
 
 function setupIpc() {
-  ipcMain.handle("nodus:get-identity", () => readJsonFile(identityPath(), null));
-  ipcMain.handle("nodus:save-identity", (_event, identity) => {
-    const nodusId = String(identity?.nodusId || "").replace(/\D/g, "");
-    if (!identity || typeof identity !== "object" || !/^\d{9}$/.test(nodusId) || !String(identity.deviceName || "").trim()) return;
-    writeJsonFile(identityPath(), {
-      nodusId: nodusId.replace(/(\d{3})(?=\d)/g, "$1 ").trim(),
-      deviceName: String(identity.deviceName).trim().slice(0, 120),
-      deviceNameConfirmed: Boolean(identity.deviceNameConfirmed),
-      createdAt: String(identity.createdAt || new Date().toISOString()),
-    });
-  });
+  ipcMain.handle("nodus:get-identity", (_event, legacyIdentity) => identityStore().loadOrCreate(legacyIdentity));
+  ipcMain.handle("nodus:save-identity", (_event, identity) => identityStore().updateMutable(identity));
   ipcMain.handle("nodus:get-server-info", () => getServerInfo());
   ipcMain.handle("nodus:get-app-info", () => ({ version: app.getVersion(), googleClientConfigured: Boolean(firebaseApiKey && firebaseAuthUrl) }));
   ipcMain.handle("nodus:set-theme-icon", (_event, theme, dataUrl) => {
@@ -776,8 +769,9 @@ function getServerInfo() {
   return { port: 8787, urls };
 }
 
-function identityPath() {
-  return path.join(app.getPath("userData"), "identity.json");
+function identityStore() {
+  deviceIdentityStore ??= createDeviceIdentityStore(app.getPath("userData"));
+  return deviceIdentityStore;
 }
 
 function connectionPasswordsPath() {
