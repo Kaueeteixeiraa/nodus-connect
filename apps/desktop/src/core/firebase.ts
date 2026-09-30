@@ -406,7 +406,7 @@ async function accountApp(): Promise<FirebaseApp> {
 async function app(): Promise<FirebaseApp> {
   if (!appInstance) {
     const appApi = (await modules()).app;
-    appInstance = appApi.getApps()[0] ?? appApi.initializeApp(config);
+    appInstance = appApi.getApps().find((item) => item.name === "[DEFAULT]") ?? appApi.initializeApp(config);
   }
   return appInstance;
 }

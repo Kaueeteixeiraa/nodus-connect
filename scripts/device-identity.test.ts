@@ -94,5 +94,7 @@ describe("native device identity", () => {
     const source = fs.readFileSync(path.resolve("apps/desktop/src/core/firebase.ts"), "utf8");
     expect(source.match(/export async function signInFirebaseWithGoogle[\s\S]*?^}/m)?.[0]).toContain("accountAuth()");
     expect(source.match(/async function ensureDeviceUid[\s\S]*?^}/m)?.[0]).toContain("signInAnonymously");
+    expect(source.match(/async function app[\s\S]*?^}/m)?.[0]).toContain('item.name === "[DEFAULT]"');
+    expect(source.match(/async function app[\s\S]*?^}/m)?.[0]).not.toContain("getApps()[0]");
   });
 });
