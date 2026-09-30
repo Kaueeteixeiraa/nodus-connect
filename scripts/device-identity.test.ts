@@ -101,4 +101,12 @@ describe("native device identity", () => {
     expect(source.match(/async function app[\s\S]*?^}/m)?.[0]).not.toContain("getApps()[0]");
     expect(source).toContain("claimDeviceOwnership(identity, uid)");
   });
+
+  it("allows legacy presence records to acquire their first device claim", () => {
+    const rules = fs.readFileSync(path.resolve("firestore.rules"), "utf8");
+    expect(rules).toContain("!('deviceId' in get(/databases/$(database)/documents/devices/$(nodusId)).data)");
+    expect(rules).toContain("!('deviceFingerprint' in get(/databases/$(database)/documents/devices/$(nodusId)).data)");
+    expect(rules).toContain("resource.data.ownerUid == request.auth.uid");
+    expect(rules).toContain("!('deviceId' in resource.data)");
+  });
 });

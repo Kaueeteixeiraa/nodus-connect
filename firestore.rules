@@ -13,19 +13,23 @@ service cloud.firestore {
     match /devices/{nodusId} {
       allow read: if signedIn();
       allow create: if signedIn()
-        && get(/databases/$(database)/documents/deviceClaims/$(nodusId)).data.ownerUid == request.auth.uid
         && request.resource.data.nodusId == nodusId
-        && request.resource.data.deviceId is string
-        && request.resource.data.deviceFingerprint is string
-        && request.resource.data.ownerUid == request.auth.uid;
+        && request.resource.data.ownerUid == request.auth.uid
+        && ((!('deviceId' in request.resource.data) && !('deviceFingerprint' in request.resource.data))
+          || (get(/databases/$(database)/documents/deviceClaims/$(nodusId)).data.ownerUid == request.auth.uid
+            && request.resource.data.deviceId is string
+            && request.resource.data.deviceFingerprint is string));
       allow update: if signedIn()
-        && get(/databases/$(database)/documents/deviceClaims/$(nodusId)).data.ownerUid == request.auth.uid
         && request.resource.data.nodusId == nodusId
-        && request.resource.data.deviceId is string
-        && request.resource.data.deviceFingerprint is string
-        && (!('deviceId' in resource.data) || request.resource.data.deviceId == resource.data.deviceId)
-        && (!('deviceFingerprint' in resource.data) || request.resource.data.deviceFingerprint == resource.data.deviceFingerprint)
-        && request.resource.data.ownerUid == request.auth.uid;
+        && request.resource.data.ownerUid == request.auth.uid
+        && ((resource.data.ownerUid == request.auth.uid
+            && !('deviceId' in resource.data)
+            && !('deviceFingerprint' in resource.data))
+          || (get(/databases/$(database)/documents/deviceClaims/$(nodusId)).data.ownerUid == request.auth.uid
+            && request.resource.data.deviceId is string
+            && request.resource.data.deviceFingerprint is string
+            && (!('deviceId' in resource.data) || request.resource.data.deviceId == resource.data.deviceId)
+            && (!('deviceFingerprint' in resource.data) || request.resource.data.deviceFingerprint == resource.data.deviceFingerprint)));
     }
 
     match /deviceClaims/{nodusId} {
@@ -35,6 +39,8 @@ service cloud.firestore {
         && request.resource.data.ownerUid == request.auth.uid
         && request.resource.data.deviceClaim is string
         && (!exists(/databases/$(database)/documents/devices/$(nodusId))
+          || !('deviceId' in get(/databases/$(database)/documents/devices/$(nodusId)).data)
+          || !('deviceFingerprint' in get(/databases/$(database)/documents/devices/$(nodusId)).data)
           || (request.resource.data.deviceId == get(/databases/$(database)/documents/devices/$(nodusId)).data.deviceId
             && request.resource.data.deviceFingerprint == get(/databases/$(database)/documents/devices/$(nodusId)).data.deviceFingerprint));
       allow update: if signedIn()
