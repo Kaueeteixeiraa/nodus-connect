@@ -4459,10 +4459,17 @@ function Settings({
       </div>
       <div aria-labelledby={`settings-tab-${section}`} className="settings-page" id="settings-content" role="tabpanel" tabIndex={0}>
         {section === "general" && <>
-          {currentUser?.provider !== "google" && <SettingsGroup icon={Settings2} title="Perfil" description="Atualize o nome exibido no Nodus Connect.">
-            <div className="settings-field profile-name-field"><span>Nome de usuário</span><div><input maxLength={80} onChange={(event) => setUserNameDraft(event.target.value)} value={userNameDraft} /><button className="secondary-button themed-action" disabled={!userNameDraft.trim() || userNameDraft.trim() === currentUser?.name} onClick={() => onUpdateLocalUserName(userNameDraft)} type="button">Alterar nome</button></div></div>
-          </SettingsGroup>}
-          <SettingsGroup icon={MonitorCog} title="Inicialização e Sistema" description="Defina como o Nodus deve se comportar com o seu sistema.">
+          <div className="settings-column">
+            {currentUser?.provider !== "google" && <SettingsGroup icon={Settings2} title="Perfil" description="Atualize o nome exibido no Nodus Connect.">
+              <div className="settings-field profile-name-field"><span>Nome de usuário</span><div><input maxLength={80} onChange={(event) => setUserNameDraft(event.target.value)} value={userNameDraft} /><button className="secondary-button themed-action" disabled={!userNameDraft.trim() || userNameDraft.trim() === currentUser?.name} onClick={() => onUpdateLocalUserName(userNameDraft)} type="button">Alterar nome</button></div></div>
+            </SettingsGroup>}
+            <SettingsGroup icon={ShieldCheck} title="Privacidade" description="Controle sua privacidade no aplicativo.">
+              <Switch checked={draft.showNodusId} icon={Monitor} label="Mostrar meu Nodus ID" description="Oculta o ID na tela inicial, sem encerrar o serviço." onChange={(value) => updateDraft({ showNodusId: value })} />
+              <Switch checked={draft.confirmBeforeDisconnect} icon={ShieldCheck} label="Confirmar antes de encerrar" description="Evita o encerramento acidental de uma sessão." onChange={(value) => updateDraft({ confirmBeforeDisconnect: value })} />
+            </SettingsGroup>
+          </div>
+          <div className="settings-column">
+            <SettingsGroup icon={MonitorCog} title="Inicialização e Sistema" description="Defina como o Nodus deve se comportar com o seu sistema.">
             <Switch checked={draft.startWithWindows} icon={Power} label="Iniciar Nodus com o Windows" description="O aplicativo será iniciado automaticamente." onChange={(value) => updateDraft({ startWithWindows: value })} />
             <Switch checked={draft.startMinimized} icon={Monitor} label="Iniciar minimizado" description="Abrir o Nodus na bandeja do sistema." onChange={(value) => updateDraft({ startMinimized: value })} />
             <Switch checked={draft.minimizeToTray} icon={ChevronDown} label="Minimizar para bandeja" description="Ao fechar a janela, manter o Nodus em execução." onChange={(value) => updateDraft({ minimizeToTray: value })} />
@@ -4470,18 +4477,15 @@ function Settings({
             <Switch checked={draft.threeDimensionalStandby} icon={MonitorUp} label="Tela de espera 3D" description="Ativa a animação 3D até reiniciar o Nodus." onChange={(value) => updateDraft({ threeDimensionalStandby: value })} />
             <Switch checked={draft.notifyIncomingRequests} icon={BellRing} label="Notificar pedidos recebidos" description="Exibe notificações de novas conexões." onChange={(value) => updateDraft({ notifyIncomingRequests: value })} />
             <Switch checked={draft.playRequestSound} icon={Volume2} label="Som ao receber pedido" description="Reproduz um som quando alguém solicitar acesso." onChange={(value) => updateDraft({ playRequestSound: value })} />
-          </SettingsGroup>
-          <SettingsGroup icon={ShieldCheck} title="Privacidade" description="Controle sua privacidade no aplicativo.">
-            <Switch checked={draft.showNodusId} icon={Monitor} label="Mostrar meu Nodus ID" description="Oculta o ID na tela inicial, sem encerrar o serviço." onChange={(value) => updateDraft({ showNodusId: value })} />
-            <Switch checked={draft.confirmBeforeDisconnect} icon={ShieldCheck} label="Confirmar antes de encerrar" description="Evita o encerramento acidental de uma sessão." onChange={(value) => updateDraft({ confirmBeforeDisconnect: value })} />
-          </SettingsGroup>
-          <SettingsGroup icon={RefreshCw} title="Atualizações" description="Mantenha o Nodus sempre atualizado.">
-            <div className="update-row">
-              <span>Versão atual: {appVersion}</span>
-              <button aria-busy={checkingUpdates} className="update-check" disabled={checkingUpdates} onClick={checkForUpdates} type="button"><RefreshCw aria-hidden="true" className={checkingUpdates ? "is-checking" : undefined} size={15} /> <span>Buscar atualizações</span></button>
-              <span aria-live="polite" className="update-status" role="status">{updateStatus}</span>
-            </div>
-          </SettingsGroup>
+            </SettingsGroup>
+            <SettingsGroup icon={RefreshCw} title="Atualizações" description="Mantenha o Nodus sempre atualizado.">
+              <div className="update-row">
+                <span>Versão atual: {appVersion}</span>
+                <button aria-busy={checkingUpdates} className="update-check" disabled={checkingUpdates} onClick={checkForUpdates} type="button"><RefreshCw aria-hidden="true" className={checkingUpdates ? "is-checking" : undefined} size={15} /> <span>Buscar atualizações</span></button>
+                <span aria-live="polite" className="update-status" role="status">{updateStatus}</span>
+              </div>
+            </SettingsGroup>
+          </div>
         </>}
         {section === "access" && <>
           <Switch checked={draft.allowRemoteControl} label="Permitir mouse e teclado" onChange={(value) => updateDraft({ allowRemoteControl: value })} />

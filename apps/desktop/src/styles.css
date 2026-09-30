@@ -3604,6 +3604,8 @@ button[type="submit"]:hover,
   gap: 12px;
 }
 
+.settings-column { display: grid; align-content: start; gap: 12px; min-width: 0; }
+
 .workspace-search {
   width: min(260px, 24vw);
   height: 46px;
