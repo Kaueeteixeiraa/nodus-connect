@@ -41,7 +41,14 @@ const nativeService = app.isPackaged
   ? path.join(process.resourcesPath, "native", "nodus-service.exe")
   : path.join(__dirname, "..", "..", "..", "native", "bin", "nodus-service.exe");
 const hostCursorVisibility = process.platform === "win32"
-  ? new RemoteCursorVisibility({ spawn, executable: nativeService, log: (message) => appendLog(message) })
+  ? new RemoteCursorVisibility({
+      spawn,
+      executable: nativeService,
+      log: (message) => appendLog(message),
+      onHostMouseActivity: () => {
+        if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.webContents.isDestroyed()) mainWindow.webContents.send("nodus:host-mouse-activity");
+      },
+    })
   : null;
 const remoteWindowsKeys = process.platform === "win32"
   ? new RemoteWindowsKeys({ spawn, executable: nativeService, log: (message) => appendLog(message) }) : null;

@@ -1,8 +1,9 @@
 class RemoteCursorVisibility {
-  constructor({ spawn, executable, log, now = Date.now }) {
+  constructor({ spawn, executable, log, onHostMouseActivity = () => {}, now = Date.now }) {
     this.spawn = spawn;
     this.executable = executable;
     this.log = log;
+    this.onHostMouseActivity = onHostMouseActivity;
     this.now = now;
     this.active = false;
     this.blocked = false;
@@ -53,7 +54,10 @@ class RemoteCursorVisibility {
         buffer += data.toString();
         const lines = buffer.split(/\r?\n/);
         buffer = lines.pop();
-        for (const line of lines) if (line.startsWith("[CURSOR]")) this.log(line);
+        for (const line of lines) {
+          if (line === "[CURSOR] Physical host mouse active") this.onHostMouseActivity();
+          if (line.startsWith("[CURSOR]")) this.log(line);
+        }
       });
       helper.stderr.on("data", (data) => this.log(`[CURSOR] Native error: ${data.toString().slice(0, 1000).trim()}`));
       helper.on("error", (error) => this.fail(helper, error));

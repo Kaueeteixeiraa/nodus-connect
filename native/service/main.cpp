@@ -248,6 +248,8 @@ public:
   RemoteCursorVisibility(bool dryRun, HANDLE armed) : dryRun(dryRun), armed(armed) {}
   ~RemoteCursorVisibility() { restore(); }
 
+  bool isHidden() const { return hidden; }
+
   bool hide() {
     if (hidden) return true;
     std::puts("[CURSOR] Hiding local host cursor");
@@ -427,7 +429,6 @@ int runCursorVisibilityHelper(DWORD parentPid, bool dryRun) {
     } else {
       std::puts("[CURSOR] Physical mouse monitor ready");
       std::fflush(stdout);
-      bool initialized = false;
       HANDLE living[] = { parent, watchdog.hProcess };
       const HANDLE input = GetStdHandle(STD_INPUT_HANDLE);
       while (true) {
@@ -435,7 +436,11 @@ int runCursorVisibilityHelper(DWORD parentPid, bool dryRun) {
         if (wake != WAIT_TIMEOUT && wake != WAIT_OBJECT_0 + 2) break;
         // Raw device input distinguishes the host's mouse from Nodus SetCursorPos/SendInput.
         const bool localActivity = physicalMouse.take();
-        if (!dryRun && localActivity && !cursor.restore()) break;
+        if (!dryRun && localActivity && cursor.isHidden()) {
+          std::puts("[CURSOR] Physical host mouse active");
+          std::fflush(stdout);
+          if (!cursor.restore()) break;
+        }
         DWORD available = 0, count = 0;
         if (!PeekNamedPipe(input, nullptr, 0, nullptr, &available, nullptr)) break;
         if (!available) continue;
@@ -445,14 +450,17 @@ int runCursorVisibilityHelper(DWORD parentPid, bool dryRun) {
         for (DWORD i = 0; i < count; ++i) {
           if (commands[i] == 'R') { result = cursor.restore() ? 0 : 1; done = true; break; }
           if (commands[i] == 'H') {
-            if (!SetEvent(pulse) || (!initialized && !cursor.hide())) { done = true; break; }
-            initialized = true;
+            if (!SetEvent(pulse)) { done = true; break; }
           }
           if (commands[i] == 'M' && !cursor.hide()) { done = true; break; }
           if (commands[i] == 'L' && dryRun && !cursor.restore()) { done = true; break; }
           if ((commands[i] == 'N' || commands[i] == 'P') && dryRun) {
             physicalMouse.simulateMovement(commands[i] == 'P' ? 8 : 1);
-            if (physicalMouse.take() && !cursor.restore()) { done = true; break; }
+            if (physicalMouse.take() && cursor.isHidden()) {
+              std::puts("[CURSOR] Physical host mouse active");
+              std::fflush(stdout);
+              if (!cursor.restore()) { done = true; break; }
+            }
           }
         }
         if (done) break;

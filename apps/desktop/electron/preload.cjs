@@ -140,4 +140,9 @@ contextBridge.exposeInMainWorld("nodusDesktop", {
     ipcRenderer.on("nodus:remote-key-input", listener);
     return () => ipcRenderer.removeListener("nodus:remote-key-input", listener);
   },
+  onHostMouseActivity(callback) {
+    const listener = () => callback();
+    ipcRenderer.on("nodus:host-mouse-activity", listener);
+    return () => ipcRenderer.removeListener("nodus:host-mouse-activity", listener);
+  },
 });

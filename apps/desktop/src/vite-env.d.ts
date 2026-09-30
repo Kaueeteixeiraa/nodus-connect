@@ -56,5 +56,6 @@ interface Window {
       ) => void,
     ): () => void;
     onRemoteKeyInput?(callback: (type: "keyDown" | "keyUp", input: { keyCode: number; code: string; location: number; repeat: boolean }) => void): () => void;
+    onHostMouseActivity?(callback: () => void): () => void;
   };
 }

@@ -14,16 +14,16 @@ const { RemoteCursorVisibility } = createRequire(import.meta.url)("../apps/deskt
 const controllers: any[] = [];
 afterEach(() => { controllers.splice(0).forEach((cursor) => cursor.dispose()); vi.useRealTimers(); });
 
-function fixture() {
+function fixture(onHostMouseActivity = vi.fn()) {
   vi.useFakeTimers();
   const child = Object.assign(new EventEmitter(), {
     stdout: new EventEmitter(), stderr: new EventEmitter(),
     stdin: Object.assign(new EventEmitter(), { write: vi.fn(), end: vi.fn() }),
   });
   const launch = vi.fn(() => child), log = vi.fn();
-  const cursor = new RemoteCursorVisibility({ spawn: launch, executable: "native.exe", log });
+  const cursor = new RemoteCursorVisibility({ spawn: launch, executable: "native.exe", log, onHostMouseActivity });
   controllers.push(cursor);
-  return { cursor, child, launch, log };
+  return { cursor, child, launch, log, onHostMouseActivity };
 }
 
 test("active host starts a visibility worker without input or streaming commands", () => {
@@ -123,6 +123,13 @@ test("native acknowledgement logs are preserved across fragmented stdout", () =>
   expect(log).toHaveBeenCalledWith("[CURSOR] Local host cursor restored");
 });
 
+test("physical host mouse ownership is forwarded once to the renderer", () => {
+  const { cursor, child, onHostMouseActivity } = fixture();
+  cursor.setActive(true);
+  child.stdout.emit("data", Buffer.from("[CURSOR] Physical host mouse active\n"));
+  expect(onHostMouseActivity).toHaveBeenCalledOnce();
+});
+
 function functionSource(file: string, name: string) {
   const source = ts.createSourceFile(file, readFileSync(file, "utf8"), ts.ScriptTarget.Latest, true, file.endsWith("tsx") ? ts.ScriptKind.TSX : ts.ScriptKind.JS);
   let text = "";
@@ -176,7 +183,7 @@ test("WGC lifecycle preserves the native streaming pipeline and 30-120 FPS bound
 const native = path.resolve("native/bin/nodus-service.exe");
 const nativeTest = test.skipIf(process.platform !== "win32" || !existsSync(native));
 
-async function nativeFixture() {
+async function nativeFixture(hide = true) {
   // Real watchdog/process lifecycle, but no changes to the user's actual cursor.
   const parent = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { windowsHide: true, stdio: "ignore" });
   const child = spawn(native, ["--cursor-visibility-helper", String(parent.pid), "--dry-run"], { windowsHide: true, stdio: ["pipe", "pipe", "pipe"] });
@@ -184,14 +191,30 @@ async function nativeFixture() {
   child.stdout.on("data", (data) => { output += data; });
   const closed = once(child, "close");
   child.stdin.on("error", () => {});
-  child.stdin.write("HHH");
-  for (let i = 0; i < 60 && !output.includes("hidden (dry run)"); i++) await delay(50);
-  if (!output.includes("hidden (dry run)")) {
+  child.stdin.write(hide ? "HHHM" : "HHH");
+  const readyText = hide ? "hidden (dry run)" : "Physical mouse monitor ready";
+  for (let i = 0; i < 60 && !output.includes(readyText); i++) await delay(50);
+  if (!output.includes(readyText)) {
     child.stdin.end("R"); parent.kill(); await closed;
     throw new Error(`Native watchdog did not arm: ${output}`);
   }
   return { child, parent, closed, output: () => output };
 }
+
+nativeTest("session heartbeat keeps the host cursor visible until remote mouse activity", async () => {
+  const fixture = await nativeFixture(false);
+  try {
+    await delay(150);
+    expect(fixture.output()).not.toContain("hidden (dry run)");
+    fixture.child.stdin.write("M");
+    for (let i = 0; i < 40 && !fixture.output().includes("hidden (dry run)"); i++) await delay(25);
+    expect(fixture.output()).toContain("hidden (dry run)");
+    fixture.child.stdin.end("R");
+    await fixture.closed;
+  } finally {
+    fixture.child.stdin.destroy(); fixture.child.kill(); fixture.parent.kill();
+  }
+}, 15000);
 
 nativeTest("physical movement shows the cursor until new remote mouse activity, not heartbeat (dry run)", async () => {
   const fixture = await nativeFixture();
@@ -206,6 +229,7 @@ nativeTest("physical movement shows the cursor until new remote mouse activity, 
     expect(fixture.output()).not.toContain("Local host cursor restored (dry run)");
     fixture.child.stdin.write("P");
     await waitForCount("Local host cursor restored (dry run)", 1);
+    expect(fixture.output()).toContain("Physical host mouse active");
     await delay(100);
     expect(fixture.output().match(/hidden \(dry run\)/g)).toHaveLength(1);
     fixture.child.stdin.write("MMMHHH");

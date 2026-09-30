@@ -243,6 +243,7 @@ type RemoteInputMessage =
   | { type: "screen-options"; displays: CaptureSource[] }
   | { type: "input-lock"; mouse: boolean; keyboard: boolean }
   | { type: "input-lock-status"; mouse: boolean; keyboard: boolean; ok: boolean; error?: string }
+  | { type: "host-mouse-activity" }
   | { type: "latency-ping" | "latency-pong"; sentAt: number }
   | { type: "receiver-stats"; jitterBufferMs: number; jitterBufferMsValid: boolean; jitterBufferTargetMs: number | null; jitterBufferMinimumMs: number | null; renderFps: number; droppedFrames: number; freezes: number; packetLossPct?: number }
   | { type: "sender-stats"; captureFps: number; encodedFps: number; sentFps: number; encodeMs: number; limitation: string; encoder: string; fallbackReason?: string; appliedFps?: number; appliedWidth?: number; appliedHeight?: number; appliedBitrateKbps?: number; profileChangeCount?: number; timeSinceLastProfileChangeMs?: number | null; adaptationReason?: string; quality?: SessionMetrics["quality"] }
@@ -816,12 +817,19 @@ export function App({ initialIdentity }: { initialIdentity: LocalIdentity }) {
 
   useEffect(() => {
     const restore = () => { window.nodusDesktop?.setHostCursorActive?.(false).catch(() => undefined); };
+    const removeHostMouseListener = window.nodusDesktop?.onHostMouseActivity?.(() => {
+      sessionsRef.current.filter((runtime) => runtime.session.role === "host").forEach((runtime) => {
+        const channel = controlChannelsRef.current.get(runtime.session.sessionId);
+        if (channel?.readyState === "open") channel.send(JSON.stringify({ type: "host-mouse-activity" } satisfies RemoteInputMessage));
+      });
+    });
     syncHostCursorVisibility();
     const timer = window.setInterval(() => syncHostCursorVisibility(), 1000);
     window.addEventListener("pagehide", restore);
     return () => {
       window.clearInterval(timer);
       window.removeEventListener("pagehide", restore);
+      removeHostMouseListener?.();
       restore();
     };
   }, [settings.allowRemoteControl]);
@@ -1945,6 +1953,10 @@ export function App({ initialIdentity }: { initialIdentity: LocalIdentity }) {
         }
         if (message.type === "sender-stats") {
           senderFeedbackRef.current.set(sessionId, message);
+          return;
+        }
+        if (message.type === "host-mouse-activity") {
+          window.dispatchEvent(new CustomEvent("nodus:host-mouse-activity", { detail: { sessionId } }));
           return;
         }
         if (message.type === "screen-options") setRemoteDisplays((current) => ({ ...current, [sessionId]: message.displays }));
@@ -4033,6 +4045,21 @@ function RemoteSessionPanel({
       surface.dataset.physicalViewerCursorHidden = "false";
     }
   };
+  const yieldCursorToHost = () => {
+    if (localCursorRef.current) localCursorRef.current.style.opacity = "0";
+    const surface = viewerSurfaceRef.current;
+    if (!surface) return;
+    surface.style.cursor = "none";
+    surface.dataset.localCursorOverlay = "false";
+    surface.dataset.physicalViewerCursorHidden = "true";
+  };
+  useEffect(() => {
+    const onHostMouseActivity = (event: Event) => {
+      if ((event as CustomEvent<{ sessionId: string }>).detail?.sessionId === session.sessionId) yieldCursorToHost();
+    };
+    window.addEventListener("nodus:host-mouse-activity", onHostMouseActivity);
+    return () => window.removeEventListener("nodus:host-mouse-activity", onHostMouseActivity);
+  }, [session.sessionId]);
   useEffect(() => {
     if (!canControlMouse) hideLocalCursor();
   }, [canControlMouse]);
