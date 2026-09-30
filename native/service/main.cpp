@@ -275,8 +275,25 @@ public:
 };
 
 class PhysicalMouseActivity {
+  static constexpr unsigned movementThreshold = 8;
+  static constexpr ULONGLONG movementWindowMs = 150;
   HWND window = nullptr;
-  bool pending = false;
+  unsigned movement = 0;
+  ULONGLONG lastMovementAt = 0;
+  bool buttonPending = false;
+
+  void record(LONG x, LONG y, USHORT buttons) {
+    if (buttons) buttonPending = true;
+    const std::uint64_t distance = (x < 0 ? -static_cast<std::int64_t>(x) : x)
+      + (y < 0 ? -static_cast<std::int64_t>(y) : y);
+    if (!distance) return;
+    const ULONGLONG now = GetTickCount64();
+    if (!lastMovementAt || now - lastMovementAt > movementWindowMs) movement = 0;
+    const std::uint64_t total = movement + distance;
+    movement = static_cast<unsigned>(total > 1000 ? 1000 : total);
+    lastMovementAt = now;
+  }
+
   static LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
     if (message == WM_NCCREATE) {
       SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(reinterpret_cast<CREATESTRUCTW*>(lparam)->lpCreateParams));
@@ -286,8 +303,9 @@ class PhysicalMouseActivity {
       RAWINPUT input{};
       UINT size = sizeof(input);
       if (GetRawInputData(reinterpret_cast<HRAWINPUT>(lparam), RID_INPUT, &input, &size, sizeof(RAWINPUTHEADER)) != UINT(-1)
-        && input.header.dwType == RIM_TYPEMOUSE
-        && (input.data.mouse.lLastX || input.data.mouse.lLastY || input.data.mouse.usButtonFlags)) activity->pending = true;
+        && input.header.dwType == RIM_TYPEMOUSE) {
+        activity->record(input.data.mouse.lLastX, input.data.mouse.lLastY, input.data.mouse.usButtonFlags);
+      }
     }
     return DefWindowProcW(hwnd, message, wparam, lparam);
   }
@@ -312,10 +330,17 @@ public:
   bool take() {
     MSG message;
     while (PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE)) DispatchMessageW(&message);
-    const bool moved = pending;
-    pending = false;
+    const ULONGLONG now = GetTickCount64();
+    const bool moved = buttonPending || movement >= movementThreshold;
+    if (moved || (lastMovementAt && now - lastMovementAt > movementWindowMs)) {
+      movement = 0;
+      lastMovementAt = 0;
+    }
+    buttonPending = false;
     return moved;
   }
+
+  void simulateMovement(LONG distance) { record(distance, 0, 0); }
 };
 
 int runCursorWatchdog(DWORD helperPid, DWORD parentPid, const std::wstring& name, bool dryRun) {
@@ -412,6 +437,10 @@ int runCursorVisibilityHelper(DWORD parentPid, bool dryRun) {
           }
           if (commands[i] == 'M' && !cursor.hide()) { done = true; break; }
           if (commands[i] == 'L' && dryRun && !cursor.restore()) { done = true; break; }
+          if ((commands[i] == 'N' || commands[i] == 'P') && dryRun) {
+            physicalMouse.simulateMovement(commands[i] == 'P' ? 8 : 1);
+            if (physicalMouse.take() && !cursor.restore()) { done = true; break; }
+          }
         }
         if (done) break;
       }

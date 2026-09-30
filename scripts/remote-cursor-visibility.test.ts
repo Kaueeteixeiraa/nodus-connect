@@ -201,7 +201,10 @@ nativeTest("physical movement shows the cursor until new remote mouse activity, 
   }
   try {
     expect(fixture.output()).toContain("Physical mouse monitor ready");
-    fixture.child.stdin.write("LHHH");
+    fixture.child.stdin.write("NHHH");
+    await delay(250);
+    expect(fixture.output()).not.toContain("Local host cursor restored (dry run)");
+    fixture.child.stdin.write("P");
     await waitForCount("Local host cursor restored (dry run)", 1);
     await delay(100);
     expect(fixture.output().match(/hidden \(dry run\)/g)).toHaveLength(1);
