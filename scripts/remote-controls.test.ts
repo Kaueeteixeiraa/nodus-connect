@@ -84,6 +84,16 @@ test("native code identity distinguishes right modifiers and numpad Enter", () =
   expect(keyboardInput(13, true).code).toBe("NumpadEnter");
 });
 
+test("remote keyboard preserves modifier sides, ABNT2 keys and intercepts Alt shortcuts", () => {
+  const keyFromCode = uiFunction("virtualKeyFromCode");
+  expect(["ShiftLeft", "ShiftRight", "ControlLeft", "ControlRight", "AltLeft", "AltRight"].map(keyFromCode))
+    .toEqual([160, 161, 162, 163, 164, 165]);
+  expect(keyFromCode("IntlBackslash")).toBe(226);
+  const native = readFileSync("native/service/main.cpp", "utf8");
+  expect(native).toContain("key.vkCode == VK_LMENU || key.vkCode == VK_RMENU");
+  expect(native).toContain("if (!pressedKeys[key]) continue;");
+});
+
 test.each(["en-US", "ru-RU", "ja-JP"] as const)("remote and main UI strings are covered in %s", (language) => {
   for (const label of ["Computador ativo", "Perfil de qualidade", "Permissões desta sessão", "Buscar atualizações", "Teclado remoto", "Gargalo", "Escolha o ambiente visual do Nodus Connect."]) {
     expect(translateText(label, language)).not.toBe(label);
@@ -160,6 +170,25 @@ test("audio availability is read-only and fullscreen does not pretend to know na
   expect(source).toContain('disabled={!audioAvailable} title={audioTooltip} onClick={onToggleRemoteAudio}');
   expect(source).toContain('title="Alternar tela cheia" onClick={enterFullscreen}');
   for (const language of ["en-US", "ru-RU", "ja-JP"] as const) for (const text of ["Áudio indisponível", "O host não autorizou o áudio.", "Áudio indisponível. Nenhuma faixa de áudio recebida.", "Alternar tela cheia"]) expect(translateText(text, language)).not.toBe(text);
+});
+
+test("recording can safely select remote audio, microphone, both or no audio", () => {
+  const source = readFileSync("apps/desktop/src/App.tsx", "utf8");
+  for (const mode of ["none", "remote", "microphone", "both"]) expect(source).toContain(`<option value="${mode}">`);
+  expect(source).toContain("navigator.mediaDevices.getUserMedia({ video: false, audio:");
+  expect(source).toContain("audioContext.createMediaStreamDestination()");
+  expect(source).toContain("track.clone()");
+  expect(source).toContain("microphone?.getTracks().forEach((track) => track.stop())");
+});
+
+test("remote toolbar sends explicit Windows shortcuts through the existing control channel", () => {
+  const source = readFileSync("apps/desktop/src/App.tsx", "utf8");
+  expect(source).toContain('keyCode: 164, code: "AltLeft"');
+  expect(source).toContain('keyCode: 9, code: "Tab"');
+  expect(source).toContain('keyCode: 91, code: "MetaLeft"');
+  for (const language of ["en-US", "ru-RU", "ja-JP"] as const) {
+    for (const text of ["Alternar janela no computador remoto", "Abrir menu Iniciar no computador remoto", "Tecla Windows"]) expect(translateText(text, language)).not.toBe(text);
+  }
 });
 
 function secureAttentionHandler() {
@@ -267,4 +296,11 @@ test("resolution controls use native display defaults and confirm host applicati
   expect(source).toContain("resolutionOptions(remoteDisplays, remoteResolution)");
   expect(source).toContain("resolutionForSource");
   expect(readFileSync("apps/desktop/src/core/storage.ts", "utf8")).toContain('preferredResolution: "native"');
+});
+
+test("workspace and remote video remain fluid across display sizes and DPI", () => {
+  const css = readFileSync("apps/desktop/src/styles.css", "utf8");
+  expect(css).not.toContain("grid-template-rows: 88px minmax(0, 1fr)");
+  expect(css).toContain("grid-template-rows: auto minmax(0, 1fr)");
+  expect(css).toContain(".viewer-session-v2 .remote-viewer-surface video { width:100%; height:100%; object-fit:contain;");
 });

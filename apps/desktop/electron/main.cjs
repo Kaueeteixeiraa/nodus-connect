@@ -899,7 +899,7 @@ function normalizeRemoteInput(input, bounds) {
 
 function toRemoteKeyboardInput(input) {
   const code = String(input.code || input.key || "");
-  const keyCode = Number(input.keyCode) || remoteVirtualKey(code);
+  const keyCode = remoteVirtualKey(code) || Number(input.keyCode);
   if (keyCode <= 0 || keyCode >= 256) return null;
   return { keyCode, code, location: Number(input.location) || 0, repeat: Boolean(input.isAutoRepeat) };
 }
@@ -910,7 +910,7 @@ function remoteVirtualKey(code) {
   if (/^[A-Z]$/.test(code)) return code.charCodeAt(0);
   if (/^[0-9]$/.test(code)) return code.charCodeAt(0);
   if (/^F(?:[1-9]|1[0-9]|2[0-4])$/.test(code)) return 111 + Number(code.slice(1));
-  return { Backspace: 8, Tab: 9, Enter: 13, ShiftLeft: 16, ShiftRight: 16, ControlLeft: 17, ControlRight: 17, AltLeft: 18, AltRight: 18, Escape: 27, Space: 32, PageUp: 33, PageDown: 34, End: 35, Home: 36, ArrowLeft: 37, ArrowUp: 38, ArrowRight: 39, ArrowDown: 40, Insert: 45, Delete: 46, Meta: 91, MetaLeft: 91, MetaRight: 92, ContextMenu: 93 }[code] || 0;
+  return { Backspace: 8, Tab: 9, Enter: 13, ShiftLeft: 160, ShiftRight: 161, ControlLeft: 162, ControlRight: 163, AltLeft: 164, AltRight: 165, Escape: 27, Space: 32, PageUp: 33, PageDown: 34, End: 35, Home: 36, ArrowLeft: 37, ArrowUp: 38, ArrowRight: 39, ArrowDown: 40, Insert: 45, Delete: 46, Meta: 91, MetaLeft: 91, MetaRight: 92, ContextMenu: 93, IntlBackslash: 226, IntlRo: 226, NumpadComma: 110 }[code] || 0;
 }
 
 function clearInputLocks() {

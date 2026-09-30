@@ -9,6 +9,8 @@ const FOLDERS_KEY = "nodus.folders.v1";
 const ACCESS_LOG_KEY = "nodus.access-log.v1";
 const USER_KEY = "nodus.user.v1";
 const GOOGLE_CLIENT_ID = "76048728439-dg1e8phioi7h6nr8ons45r4850t4puf7.apps.googleusercontent.com";
+const BACKUP_FORMAT = "nodus-connect-settings";
+const BACKUP_VERSION = 1;
 
 export interface RecentDevice {
   nodusId: string;
@@ -188,6 +190,78 @@ export function saveSettings(settings: LocalSettings): void {
   localStorage.setItem(SETTINGS_VERSION_KEY, "2");
 }
 
+const backupBooleanKeys = [
+  "startWithWindows", "startMinimized", "minimizeToTray", "confirmBeforeDisconnect", "lightweightMode",
+  "showNodusId", "notifyIncomingRequests", "playRequestSound", "allowRemoteControl", "allowFileTransfer",
+  "allowClipboard", "shareAudio",
+] as const;
+
+export function exportSettingsBackup(): string {
+  const settings = loadSettings();
+  const safeSettings: Partial<LocalSettings> = {};
+  for (const key of backupBooleanKeys) safeSettings[key] = settings[key];
+  Object.assign(safeSettings, {
+    theme: settings.theme,
+    language: settings.language,
+    preferredResolution: settings.preferredResolution,
+    connectionQuality: settings.connectionQuality,
+    maxFps: settings.maxFps,
+  });
+  const recents = loadRecents().map(({ macAddress: _macAddress, ...device }) => device);
+  return JSON.stringify({
+    format: BACKUP_FORMAT,
+    version: BACKUP_VERSION,
+    exportedAt: new Date().toISOString(),
+    settings: safeSettings,
+    recents,
+    favorites: loadFavorites(),
+    folders: loadFolders(),
+  }, null, 2);
+}
+
+export function importSettingsBackup(raw: string): { settings: LocalSettings; recents: RecentDevice[]; favorites: string[]; folders: DeviceFolder[] } {
+  if (!raw || raw.length > 2_000_000) throw new Error("Arquivo de backup vazio ou muito grande.");
+  let value: unknown;
+  try { value = JSON.parse(raw); } catch { throw new Error("Arquivo de backup inválido."); }
+  if (!isRecord(value) || value.format !== BACKUP_FORMAT || value.version !== BACKUP_VERSION) throw new Error("Formato ou versão de backup incompatível.");
+  const sourceSettings = isRecord(value.settings) ? value.settings : {};
+  const patch: Partial<LocalSettings> = {};
+  for (const key of backupBooleanKeys) if (typeof sourceSettings[key] === "boolean") patch[key] = sourceSettings[key];
+  if (["dark", "japan", "sakura-night", "neo-tokyo", "cosmos", "arctic"].includes(String(sourceSettings.theme))) patch.theme = sourceSettings.theme as LocalSettings["theme"];
+  if (["pt-BR", "en-US", "ru-RU", "ja-JP"].includes(String(sourceSettings.language))) patch.language = sourceSettings.language as LocalSettings["language"];
+  if (sourceSettings.preferredResolution === "native" || /^\d{3,5}x\d{3,5}$/.test(String(sourceSettings.preferredResolution))) patch.preferredResolution = sourceSettings.preferredResolution as RemoteResolution;
+  if (["auto", "high", "balanced", "economy"].includes(String(sourceSettings.connectionQuality))) patch.connectionQuality = sourceSettings.connectionQuality as LocalSettings["connectionQuality"];
+  if ([30, 45, 60, 90, 120].includes(Number(sourceSettings.maxFps))) patch.maxFps = Number(sourceSettings.maxFps) as RemoteFrameRate;
+
+  const favorites = uniqueNodusIds(value.favorites);
+  const folders = Array.isArray(value.folders) ? value.folders.slice(0, 100).flatMap((item) => {
+    if (!isRecord(item) || !safeText(item.id, 100) || !safeText(item.name, 100)) return [];
+    return [{ id: String(item.id), name: String(item.name), createdAt: safeDate(item.createdAt) }];
+  }) : [];
+  const folderIds = new Set(folders.map((folder) => folder.id));
+  const recents = Array.isArray(value.recents) ? value.recents.slice(0, 100).flatMap((item) => {
+    if (!isRecord(item) || !/^\d{9}$/.test(String(item.nodusId)) || !safeText(item.deviceName, 100)) return [];
+    const nodusId = String(item.nodusId);
+    return [{
+      nodusId,
+      deviceName: String(item.deviceName),
+      alias: safeText(item.alias, 100) || undefined,
+      folderId: folderIds.has(String(item.folderId)) ? String(item.folderId) : undefined,
+      lastConnectionAt: safeDate(item.lastConnectionAt),
+      status: "offline" as const,
+      favorite: favorites.includes(nodusId),
+      notes: safeText(item.notes, 2_000) || undefined,
+      tags: Array.isArray(item.tags) ? item.tags.slice(0, 20).map((tag) => String(tag).trim().slice(0, 50)).filter(Boolean) : undefined,
+    }];
+  }) : [];
+  const settings = { ...loadSettings(), ...patch, threeDimensionalStandby: false, unattendedAccess: false, trustedNodusIds: [] };
+  saveSettings(settings);
+  localStorage.setItem(RECENTS_KEY, JSON.stringify(recents));
+  localStorage.setItem(FAVORITES_KEY, JSON.stringify(favorites));
+  localStorage.setItem(FOLDERS_KEY, JSON.stringify(folders));
+  return { settings, recents, favorites, folders };
+}
+
 export function loadUser(): LocalUser | null {
   return read<LocalUser | null>(USER_KEY, null);
 }
@@ -269,4 +343,21 @@ function read<T>(key: string, fallback: T): T {
     localStorage.removeItem(key);
     return fallback;
   }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function safeText(value: unknown, limit: number): string {
+  return typeof value === "string" ? value.trim().slice(0, limit) : "";
+}
+
+function safeDate(value: unknown): string {
+  const parsed = typeof value === "string" ? Date.parse(value) : NaN;
+  return Number.isFinite(parsed) ? new Date(parsed).toISOString() : new Date().toISOString();
+}
+
+function uniqueNodusIds(value: unknown): string[] {
+  return Array.isArray(value) ? [...new Set(value.map(String).filter((item) => /^\d{9}$/.test(item)))].slice(0, 100) : [];
 }

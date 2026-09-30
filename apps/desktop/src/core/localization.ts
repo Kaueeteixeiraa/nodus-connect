@@ -407,6 +407,18 @@ Object.assign(additions, {
   "Remover dos favoritos": ["Remove from favorites", "Убрать из избранного", "お気に入りから削除"],
   "Interface de acesso remoto revisada.": ["Remote access interface revised.", "Интерфейс удалённого доступа обновлён.", "リモートアクセス画面を更新しました。"],
   "A sessão atual utiliza a janela principal do Nodus.": ["The current session uses the main Nodus window.", "Текущий сеанс использует главное окно Nodus.", "現在のセッションは Nodus のメインウィンドウを使用します。"],
+  "Alternar janela no computador remoto": ["Switch window on the remote computer", "Переключить окно на удалённом компьютере", "リモートコンピューターのウィンドウを切り替える"],
+  "Abrir menu Iniciar no computador remoto": ["Open Start menu on the remote computer", "Открыть меню Пуск на удалённом компьютере", "リモートコンピューターのスタートメニューを開く"],
+  "Tecla Windows": ["Windows key", "Клавиша Windows", "Windows キー"],
+  "Áudio da gravação": ["Recording audio", "Звук записи", "録画音声"],
+  "Sem áudio": ["No audio", "Без звука", "音声なし"],
+  "Áudio remoto": ["Remote audio", "Удалённый звук", "リモート音声"],
+  "Meu microfone": ["My microphone", "Мой микрофон", "自分のマイク"],
+  "Remoto e microfone": ["Remote and microphone", "Удалённый звук и микрофон", "リモート音声とマイク"],
+  "Backup de configurações": ["Settings backup", "Резервная копия настроек", "設定のバックアップ"],
+  "Exporte preferências seguras ou restaure um arquivo .nodus.": ["Export safe preferences or restore a .nodus file.", "Экспортируйте безопасные настройки или восстановите файл .nodus.", "安全な設定をエクスポートするか、.nodus ファイルを復元します。"],
+  "Exportar configurações": ["Export settings", "Экспортировать настройки", "設定をエクスポート"],
+  "Importar configurações": ["Import settings", "Импортировать настройки", "設定をインポート"],
 });
 for (const [source, values] of Object.entries(additions)) languages.forEach((language, index) => { dictionaries[language][source] = values[index]; });
 const aliases: Record<string, string> = { "Aguardando conexao": "Aguardando conexão", "Canal Nodus pronto": "CANAL NODUS PRONTO", "Conexao segura disponivel": "Conexão segura disponível", "Resolucao preferida": "Resolução preferida", "Transferencia de arquivos": "Transferência de arquivos", "Os computadores acessados aparecerao aqui para conexoes mais rapidas.": "Os computadores acessados aparecerão aqui para conexões mais rápidas." };

@@ -105,6 +105,7 @@ import {
   addAccessLog,
   clearUser,
   createFolder,
+  exportSettingsBackup,
   loadAccessLog,
   hideDeviceFromCatalog,
   loadHiddenCatalogDevices,
@@ -113,6 +114,7 @@ import {
   loadRecents,
   loadSettings,
   loadUser,
+  importSettingsBackup,
   moveDeviceToFolder,
   renameDevice,
   saveRecent,
@@ -251,6 +253,7 @@ type RemoteInputMessage =
   | { type: "restart-request" }
   | { type: "restart-status"; status: "approved" | "denied" | "unavailable" };
 type RemoteKeyInput = { keyCode: number; code: string; location: number; repeat: boolean };
+type RecordingAudioMode = "none" | "remote" | "microphone" | "both";
 type CaptureSource = { id: string; name: string; displayId: string; width: number; height: number };
 type GpuDiagnostics = Awaited<ReturnType<NonNullable<Window["nodusDesktop"]>["getGpuDiagnostics"]>>;
 type NativeCaptureStatus = Awaited<ReturnType<NonNullable<Window["nodusDesktop"]>["getNativeCaptureStatus"]>>;
@@ -430,7 +433,7 @@ export function App({ initialIdentity }: { initialIdentity: LocalIdentity }) {
   const capturePoolRef = useRef(new CapturePool());
   const captureQueueRef = useRef<Promise<void>>(Promise.resolve());
   const captureCleanupRef = useRef(new Map<string, () => void>());
-  const recordingRef = useRef(new Map<string, { recorder: MediaRecorder; chunks: BlobPart[] }>());
+  const recordingRef = useRef(new Map<string, { recorder: MediaRecorder; chunks: BlobPart[]; cleanup: () => void }>());
   const autoAcceptingRef = useRef(new Set<string>());
   const processedSignalsRef = useRef(new Set<string>());
   const lastIncomingAlertRef = useRef("");
@@ -2385,6 +2388,7 @@ export function App({ initialIdentity }: { initialIdentity: LocalIdentity }) {
     });
     const recording = recordingRef.current.get(sessionId);
     if (recording?.recorder.state !== "inactive") recording?.recorder.stop();
+    else recording?.cleanup();
     recordingRef.current.delete(sessionId);
     if (recordingSessionId === sessionId) setRecordingSessionId(null);
     lastSignalSeqRef.current.delete(sessionId);
@@ -2503,6 +2507,36 @@ export function App({ initialIdentity }: { initialIdentity: LocalIdentity }) {
     }
     if (("connectionQuality" in patch || "maxFps" in patch) && activeSession?.role === "viewer") {
       sendRemoteInputToSession(activeSession.sessionId, { type: "quality", quality: next.connectionQuality, maxFps: next.maxFps });
+    }
+  }
+
+  function exportLocalSettings(): string {
+    const url = URL.createObjectURL(new Blob([exportSettingsBackup()], { type: "application/json" }));
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `Nodus-configuracoes-${new Date().toISOString().slice(0, 10)}.nodus`;
+    link.click();
+    window.setTimeout(() => URL.revokeObjectURL(url), 30_000);
+    return "Backup exportado sem senhas, tokens ou Nodus ID local.";
+  }
+
+  async function importLocalSettings(file: File): Promise<string> {
+    try {
+      const restored = importSettingsBackup(await file.text());
+      setSettings(restored.settings);
+      setRecents(restored.recents);
+      setFavorites(restored.favorites);
+      setFolders(restored.folders);
+      applyLanguage(restored.settings.language);
+      await window.nodusDesktop?.setStartupOptions({
+        startWithWindows: restored.settings.startWithWindows,
+        startMinimized: restored.settings.startMinimized,
+        minimizeToTray: restored.settings.minimizeToTray,
+      }).catch(() => undefined);
+      if (firebaseConfigured()) saveCloudSettings(restored.settings).catch(() => undefined);
+      return "Configurações importadas com segurança.";
+    } catch (error) {
+      return error instanceof Error ? error.message : "Não foi possível importar este backup.";
     }
   }
 
@@ -2811,36 +2845,65 @@ export function App({ initialIdentity }: { initialIdentity: LocalIdentity }) {
     channel?.readyState === "open" && channel.send(JSON.stringify({ type: "restart-status", status } satisfies RemoteInputMessage));
   }
 
-  function toggleRecording(sessionId = selectedSessionId) {
+  async function toggleRecording(sessionId = selectedSessionId, audioMode: RecordingAudioMode = "remote") {
     if (!sessionId) return;
     const active = recordingRef.current.get(sessionId);
     if (active) {
       if (active.recorder.state !== "inactive") active.recorder.stop();
       return;
     }
-    const stream = sessionsRef.current.find((item) => item.session.sessionId === sessionId)?.remoteStream;
-    if (!stream || typeof MediaRecorder === "undefined") {
+    const remoteStream = sessionsRef.current.find((item) => item.session.sessionId === sessionId)?.remoteStream;
+    if (!remoteStream || typeof MediaRecorder === "undefined") {
       updateRuntime(sessionId, { error: "A gravacao ainda nao esta pronta." });
       return;
     }
-    const mimeType = ["video/webm;codecs=vp9,opus", "video/webm;codecs=vp8,opus", "video/webm"].find((type) => MediaRecorder.isTypeSupported(type));
-    const recorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
-    const entry = { recorder, chunks: [] as BlobPart[] };
-    recordingRef.current.set(sessionId, entry);
-    recorder.ondataavailable = (event) => event.data.size && entry.chunks.push(event.data);
-    recorder.onstop = () => {
+    let microphone: MediaStream | null = null;
+    let audioContext: AudioContext | null = null;
+    const ownedTracks: MediaStreamTrack[] = [];
+    try {
+      if (audioMode === "microphone" || audioMode === "both") microphone = await navigator.mediaDevices.getUserMedia({ video: false, audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
+      const remoteAudio = (audioMode === "remote" || audioMode === "both") ? remoteStream.getAudioTracks().map((track) => track.clone()) : [];
+      remoteAudio.forEach((track) => { track.enabled = true; ownedTracks.push(track); });
+      microphone?.getAudioTracks().forEach((track) => ownedTracks.push(track));
+      let recordedAudio = ownedTracks;
+      if (ownedTracks.length > 1) {
+        audioContext = new AudioContext();
+        const destination = audioContext.createMediaStreamDestination();
+        for (const track of ownedTracks) audioContext.createMediaStreamSource(new MediaStream([track])).connect(destination);
+        recordedAudio = destination.stream.getAudioTracks();
+        ownedTracks.push(...recordedAudio);
+      }
+      const stream = new MediaStream([...remoteStream.getVideoTracks(), ...recordedAudio]);
+      const mimeType = ["video/webm;codecs=vp9,opus", "video/webm;codecs=vp8,opus", "video/webm"].find((type) => MediaRecorder.isTypeSupported(type));
+      const recorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
+      const cleanup = () => {
+        [...new Set(ownedTracks)].forEach((track) => track.stop());
+        audioContext?.close().catch(() => undefined);
+      };
+      const entry = { recorder, chunks: [] as BlobPart[], cleanup };
+      recordingRef.current.set(sessionId, entry);
+      recorder.ondataavailable = (event) => event.data.size && entry.chunks.push(event.data);
+      recorder.onstop = () => {
+        cleanup();
+        recordingRef.current.delete(sessionId);
+        setRecordingSessionId((current) => current === sessionId ? null : current);
+        if (!entry.chunks.length) return;
+        const url = URL.createObjectURL(new Blob(entry.chunks, { type: recorder.mimeType || "video/webm" }));
+        const link = document.createElement("a");
+        link.href = url;
+        link.download = `Nodus-${new Date().toISOString().replace(/[:.]/g, "-")}.webm`;
+        link.click();
+        window.setTimeout(() => URL.revokeObjectURL(url), 30_000);
+      };
+      recorder.start(1000);
+      setRecordingSessionId(sessionId);
+    } catch {
       recordingRef.current.delete(sessionId);
-      setRecordingSessionId((current) => current === sessionId ? null : current);
-      if (!entry.chunks.length) return;
-      const url = URL.createObjectURL(new Blob(entry.chunks, { type: recorder.mimeType || "video/webm" }));
-      const link = document.createElement("a");
-      link.href = url;
-      link.download = `Nodus-${new Date().toISOString().replace(/[:.]/g, "-")}.webm`;
-      link.click();
-      window.setTimeout(() => URL.revokeObjectURL(url), 30_000);
-    };
-    recorder.start(1000);
-    setRecordingSessionId(sessionId);
+      [...new Set(ownedTracks)].forEach((track) => track.stop());
+      microphone?.getTracks().forEach((track) => track.stop());
+      audioContext?.close().catch(() => undefined);
+      updateRuntime(sessionId, { error: "Não foi possível iniciar o áudio escolhido para a gravação." });
+    }
   }
 
   function sendPointerMove(event: ReactMouseEvent<HTMLElement>) {
@@ -3017,7 +3080,7 @@ export function App({ initialIdentity }: { initialIdentity: LocalIdentity }) {
               onHostInputLockChange={(input) => sendRemoteInputToSession(activeSession.sessionId, { type: "input-lock", ...input })}
               onDisconnect={() => disconnectSession(activeSession.sessionId)}
               onClipboard={() => sendClipboardToSession(activeSession.sessionId)}
-              onRecord={() => toggleRecording(activeSession.sessionId)}
+              onRecord={(audioMode) => toggleRecording(activeSession.sessionId, audioMode)}
               onSendFile={sendFile}
               onToggleRemoteAudio={() => toggleRemoteAudio(activeSession.sessionId)}
               onRequestAdmin={() => requestAdministrator(activeSession.sessionId)}
@@ -3069,6 +3132,8 @@ export function App({ initialIdentity }: { initialIdentity: LocalIdentity }) {
               currentUser={currentUser}
               initialSection={settingsSection}
               onThemePreview={setThemePreview}
+              onExportSettings={exportLocalSettings}
+              onImportSettings={importLocalSettings}
               onUpdateLocalUserName={(name) => {
                 if (!currentUser || currentUser.provider === "google") return;
                 const next = { ...currentUser, name: name.trim().slice(0, 80) };
@@ -3872,7 +3937,7 @@ function RemoteSessionPanel({
   onPointerButton: (type: "mouseDown" | "mouseUp", event: ReactMouseEvent<HTMLElement>) => void;
   onPointerMove: (event: ReactMouseEvent<HTMLElement>) => void;
   onWheelInput: (event: ReactWheelEvent<HTMLElement>) => void;
-  onRecord: () => void;
+  onRecord: (audioMode: RecordingAudioMode) => void;
   onSendFile: (file: File) => void;
   remoteVideoRef: RefObject<HTMLVideoElement | null>;
   session: RemoteSession;
@@ -3899,6 +3964,7 @@ function RemoteSessionPanel({
   const isViewer = session.role === "viewer";
   type SessionTool = "control" | "transfer" | "monitor" | "quality" | "actions" | "connection";
   const [activeTool, setActiveTool] = useState<SessionTool | null>(null);
+  const [recordingAudioMode, setRecordingAudioMode] = useState<RecordingAudioMode>("remote");
   const [nextNodusId, setNextNodusId] = useState("");
   const toolButtonsRef = useRef(new Map<string, HTMLButtonElement>());
   const toolPanelRef = useRef<HTMLElement | null>(null);
@@ -4035,6 +4101,10 @@ function RemoteSessionPanel({
       viewerSurfaceRef.current?.requestFullscreen().catch(() => undefined);
     }
   };
+  const sendShortcut = (keys: RemoteKeyInput[]) => {
+    keys.forEach((input) => onKeyInput("keyDown", input));
+    [...keys].reverse().forEach((input) => onKeyInput("keyUp", { ...input, repeat: false }));
+  };
   const toolbar: Array<{ id?: SessionTool; label: string; icon: LucideIcon; disabled?: boolean }> = [
     { id: "control", label: "Controle", icon: MonitorCog },
     { id: "transfer", label: "Transferência", icon: FolderUp },
@@ -4101,11 +4171,11 @@ function RemoteSessionPanel({
           </div>
           {activeTool && <aside className="viewer-tool-popover" role="tabpanel" id={`viewer-panel-${session.sessionId}-${activeTool}`} aria-labelledby={`viewer-tab-${session.sessionId}-${activeTool}`} ref={toolPanelRef} style={toolPosition}>
             <div className="viewer-tool-title"><strong>{toolbar.find((item) => item.id === activeTool)?.label ?? "Conexão"}</strong><button aria-label="Fechar painel" title="Fechar painel" onClick={() => setActiveTool(null)} type="button"><X aria-hidden="true" size={17} /></button></div>
-            {activeTool === "control" && <div className="viewer-tool-actions control-options"><button aria-pressed={hostInputLock.mouse} disabled={!canControlMouse} onClick={() => onHostInputLockChange({ ...hostInputLock, mouse: !hostInputLock.mouse })} title={canControlMouse ? (hostInputLock.mouse ? "Liberar mouse do computador remoto" : "Bloquear mouse do computador remoto") : controlUnavailable} type="button"><MousePointer2 aria-hidden="true" size={18} /><span>{hostInputLock.mouse ? "Liberar mouse do host" : "Bloquear mouse do host"}</span></button><button aria-pressed={hostInputLock.keyboard} disabled={!canControlKeyboard} onClick={() => onHostInputLockChange({ ...hostInputLock, keyboard: !hostInputLock.keyboard })} title={canControlKeyboard ? (hostInputLock.keyboard ? "Liberar teclado do computador remoto" : "Bloquear teclado do computador remoto") : controlUnavailable} type="button"><Keyboard aria-hidden="true" size={18} /><span>{hostInputLock.keyboard ? "Liberar teclado do host" : "Bloquear teclado do host"}</span></button><button disabled={!canControlKeyboard} onClick={onSecureAttention} title={canControlKeyboard ? "Enviar Ctrl+Alt+Del ao computador remoto" : controlUnavailable} type="button"><Keyboard aria-hidden="true" size={18} /><span>Ctrl+Alt+Del</span></button><button disabled={!audioAvailable} title={audioTooltip} onClick={onToggleRemoteAudio} type="button">{!audioAvailable || remoteAudioMuted ? <VolumeX aria-hidden="true" size={18} /> : <Volume2 aria-hidden="true" size={18} />}<span>{!audioAvailable ? "Áudio indisponível" : remoteAudioMuted ? "Ativar áudio" : "Silenciar áudio"}</span></button><span title={controlReady ? "Canal de controle conectado" : controlUnavailable} className="viewer-control-state"><i className={controlReady ? "online" : ""} />{controlReady ? "Canal de controle conectado" : "Preparando controles"}</span></div>}
+            {activeTool === "control" && <div className="viewer-tool-actions control-options"><button aria-pressed={hostInputLock.mouse} disabled={!canControlMouse} onClick={() => onHostInputLockChange({ ...hostInputLock, mouse: !hostInputLock.mouse })} title={canControlMouse ? (hostInputLock.mouse ? "Liberar mouse do computador remoto" : "Bloquear mouse do computador remoto") : controlUnavailable} type="button"><MousePointer2 aria-hidden="true" size={18} /><span>{hostInputLock.mouse ? "Liberar mouse do host" : "Bloquear mouse do host"}</span></button><button aria-pressed={hostInputLock.keyboard} disabled={!canControlKeyboard} onClick={() => onHostInputLockChange({ ...hostInputLock, keyboard: !hostInputLock.keyboard })} title={canControlKeyboard ? (hostInputLock.keyboard ? "Liberar teclado do computador remoto" : "Bloquear teclado do computador remoto") : controlUnavailable} type="button"><Keyboard aria-hidden="true" size={18} /><span>{hostInputLock.keyboard ? "Liberar teclado do host" : "Bloquear teclado do host"}</span></button><button disabled={!canControlKeyboard} onClick={() => sendShortcut([{ keyCode: 164, code: "AltLeft", location: 1, repeat: false }, { keyCode: 9, code: "Tab", location: 0, repeat: false }])} title={canControlKeyboard ? "Alternar janela no computador remoto" : controlUnavailable} type="button"><Keyboard aria-hidden="true" size={18} /><span>Alt+Tab</span></button><button disabled={!canControlKeyboard} onClick={() => sendShortcut([{ keyCode: 91, code: "MetaLeft", location: 1, repeat: false }])} title={canControlKeyboard ? "Abrir menu Iniciar no computador remoto" : controlUnavailable} type="button"><Keyboard aria-hidden="true" size={18} /><span>Tecla Windows</span></button><button disabled={!canControlKeyboard} onClick={onSecureAttention} title={canControlKeyboard ? "Enviar Ctrl+Alt+Del ao computador remoto" : controlUnavailable} type="button"><Keyboard aria-hidden="true" size={18} /><span>Ctrl+Alt+Del</span></button><button disabled={!audioAvailable} title={audioTooltip} onClick={onToggleRemoteAudio} type="button">{!audioAvailable || remoteAudioMuted ? <VolumeX aria-hidden="true" size={18} /> : <Volume2 aria-hidden="true" size={18} />}<span>{!audioAvailable ? "Áudio indisponível" : remoteAudioMuted ? "Ativar áudio" : "Silenciar áudio"}</span></button><span title={controlReady ? "Canal de controle conectado" : controlUnavailable} className="viewer-control-state"><i className={controlReady ? "online" : ""} />{controlReady ? "Canal de controle conectado" : "Preparando controles"}</span></div>}
             {activeTool === "transfer" && <div className="viewer-transfer-panel"><div className="viewer-transfer-destination"><FolderOpen aria-hidden="true" size={16} /><span><strong>Destino</strong>Documentos no computador remoto</span></div><label title={fileReady ? "Enviar arquivo para Documentos no computador remoto" : "Transferência indisponível. Verifique a permissão e aguarde o canal de arquivos."} className={fileReady ? "session-upload" : "session-upload disabled"}><FileUp aria-hidden="true" size={18} />Enviar arquivo<input disabled={!fileReady} type="file" onChange={(event) => { const file = event.currentTarget.files?.[0]; if (file) onSendFile(file); event.currentTarget.value = ""; }} /></label><div className="viewer-tool-actions"><button title={clipboardTooltip} disabled={!controlReady || !session.permissions.includes("clipboard:sync")} onClick={onClipboard} type="button"><Clipboard aria-hidden="true" size={18} /><span>Enviar texto copiado</span></button></div><div className="viewer-transfer-list">{transfers.length === 0 ? <p>Nenhuma transferência nesta sessão.</p> : transfers.slice(0, 3).map((item) => <div className="session-transfer-item" key={item.id}><div><strong translate="no">{item.fileName}</strong><span>{fileStatusLabel(item)} · {formatBytes(item.size)}</span></div>{item.url && !item.savedPath && <a download={item.fileName} href={item.url}>Baixar</a>}</div>)}</div></div>}
             {activeTool === "monitor" && <div className="viewer-tool-fields"><label><span>Monitor remoto</span><select defaultValue="" disabled={remoteDisplays.length < 2} onChange={(event) => event.target.value && onDisplayChange(event.target.value)}><option value="">{remoteDisplays.length > 1 ? "Selecionar monitor" : "Monitor principal"}</option>{remoteDisplays.map((display, index) => <option key={display.id} value={display.id}>Monitor {index + 1}</option>)}</select></label></div>}
             {activeTool === "quality" && <><div className="viewer-tool-fields"><label><span>Perfil solicitado</span><select value={connectionQuality} onChange={(event) => onQualityChange(event.target.value as LocalSettings["connectionQuality"])}><option value="auto">Automática</option><option value="high">Alta</option><option value="balanced">Equilibrada</option><option value="economy">Economia</option></select></label><label><span>Resolução solicitada</span><select value={remoteResolution} onChange={(event) => onResolutionChange(event.target.value as RemoteResolution)}>{resolutionOptions(remoteDisplays, remoteResolution).map((resolution) => <option key={resolution} value={resolution}>{resolutionLabel(resolution)}</option>)}</select></label><label><span>FPS solicitado</span><select value={maxFps} onChange={(event) => onFpsChange(Number(event.target.value) as LocalSettings["maxFps"])}><option value={30}>30 FPS</option><option value={60}>60 FPS</option><option value={120}>120 FPS</option></select></label></div><dl className="viewer-connection-details"><div><dt>Vídeo aplicado</dt><dd>{metrics.appliedFps ? `${metrics.appliedFps} FPS · ${metrics.appliedWidth} × ${metrics.appliedHeight}` : "Aguardando confirmação do host"}</dd></div><div><dt>FPS recebidos</dt><dd>{metrics.fps || "-"}</dd></div><div><dt>FPS apresentados</dt><dd>{metrics.renderFps || "-"}</dd></div></dl></>}
-            {activeTool === "actions" && <div className="viewer-tool-actions"><button title="Alternar tela cheia" onClick={enterFullscreen} type="button"><Maximize2 aria-hidden="true" size={18} /><span>Alternar tela cheia</span></button><button title={recording ? "Parar gravação" : "Gravar sessão"} onClick={onRecord} type="button"><Radio aria-hidden="true" size={18} /><span>{recording ? "Parar gravação" : "Gravar sessão"}</span></button><button title={canControlKeyboard ? "Solicitar administrador" : controlUnavailable} disabled={!controlReady || !session.permissions.includes("keyboard:control")} onClick={onRequestAdmin} type="button"><ShieldCheck aria-hidden="true" size={18} /><span>Solicitar administrador</span></button></div>}
+            {activeTool === "actions" && <><div className="viewer-tool-fields"><label><span>Áudio da gravação</span><select disabled={recording} value={recordingAudioMode} onChange={(event) => setRecordingAudioMode(event.target.value as RecordingAudioMode)}><option value="none">Sem áudio</option><option value="remote">Áudio remoto</option><option value="microphone">Meu microfone</option><option value="both">Remoto e microfone</option></select></label></div><div className="viewer-tool-actions"><button title="Alternar tela cheia" onClick={enterFullscreen} type="button"><Maximize2 aria-hidden="true" size={18} /><span>Alternar tela cheia</span></button><button title={recording ? "Parar gravação" : "Gravar sessão"} onClick={() => onRecord(recordingAudioMode)} type="button"><Radio aria-hidden="true" size={18} /><span>{recording ? "Parar gravação" : "Gravar sessão"}</span></button><button title={canControlKeyboard ? "Solicitar administrador" : controlUnavailable} disabled={!controlReady || !session.permissions.includes("keyboard:control")} onClick={onRequestAdmin} type="button"><ShieldCheck aria-hidden="true" size={18} /><span>Solicitar administrador</span></button></div></>}
             {activeTool === "connection" && <div className="viewer-connection-inspector">
               <div className="pipeline-flow"><span>Captura <b>{metrics.captureFps || "-"}</b></span><i>›</i><span>Encoder <b>{metrics.encodedFps || "-"}</b></span><i>›</i><span>Rede <b>{metrics.receivedFps || metrics.sentFps || "-"}</b></span><i>›</i><span>Decoder <b>{metrics.decodedFps || "-"}</b></span><i>›</i><span>Render <b>{metrics.renderFps || "-"}</b></span></div>
               <div className={`pipeline-bottleneck state-${metrics.bottleneck.toLowerCase()}`}><span>Gargalo</span><strong>{bottleneckLabel(metrics.bottleneck)}</strong></div>
@@ -4391,6 +4461,8 @@ function Settings({
   currentUser,
   initialSection,
   onThemePreview,
+  onExportSettings,
+  onImportSettings,
   onUpdateLocalUserName,
   settings,
   updateSettings,
@@ -4400,6 +4472,8 @@ function Settings({
   currentUser: LocalUser | null;
   initialSection: SettingsSection;
   onThemePreview: (theme: LocalSettings["theme"] | null) => void;
+  onExportSettings: () => string;
+  onImportSettings: (file: File) => Promise<string>;
   onUpdateLocalUserName: (name: string) => void;
   settings: LocalSettings;
   updateSettings: (patch: Partial<LocalSettings>) => void;
@@ -4410,6 +4484,7 @@ function Settings({
   const [section, setSection] = useState<SettingsSection>(initialSection);
   const [updateStatus, setUpdateStatus] = useState("");
   const [checkingUpdates, setCheckingUpdates] = useState(false);
+  const [backupStatus, setBackupStatus] = useState("");
   async function checkForUpdates() {
     if (checkingUpdates) return;
     setCheckingUpdates(true);
@@ -4468,6 +4543,13 @@ function Settings({
             <SettingsGroup icon={ShieldCheck} title="Privacidade" description="Controle sua privacidade no aplicativo.">
               <Switch checked={draft.showNodusId} icon={Monitor} label="Mostrar meu Nodus ID" description="Oculta o ID na tela inicial, sem encerrar o serviço." onChange={(value) => updateDraft({ showNodusId: value })} />
               <Switch checked={draft.confirmBeforeDisconnect} icon={ShieldCheck} label="Confirmar antes de encerrar" description="Evita o encerramento acidental de uma sessão." onChange={(value) => updateDraft({ confirmBeforeDisconnect: value })} />
+            </SettingsGroup>
+            <SettingsGroup icon={FolderUp} title="Backup de configurações" description="Exporte preferências seguras ou restaure um arquivo .nodus.">
+              <div className="settings-backup-actions">
+                <button className="secondary-button themed-action" onClick={() => setBackupStatus(onExportSettings())} type="button"><FolderUp aria-hidden="true" size={16} /> Exportar configurações</button>
+                <label className="secondary-button themed-action"><FolderOpen aria-hidden="true" size={16} /> Importar configurações<input accept=".nodus,application/json" type="file" onChange={async (event) => { const file = event.currentTarget.files?.[0]; if (file) setBackupStatus(await onImportSettings(file)); event.currentTarget.value = ""; }} /></label>
+                {backupStatus && <span aria-live="polite" role="status">{backupStatus}</span>}
+              </div>
             </SettingsGroup>
           </div>
           <div className="settings-column">
@@ -4774,7 +4856,7 @@ function resultLabel(value: AccessLogEntry["result"]): string {
 }
 
 function toRemoteKeyInput(event: KeyboardEvent): RemoteKeyInput | null {
-  const keyCode = event.keyCode || event.which || virtualKeyFromCode(event.code);
+  const keyCode = virtualKeyFromCode(event.code) || event.keyCode || event.which;
   if (keyCode <= 0 || keyCode >= 256) return null;
   return { keyCode, code: event.code || event.key, location: event.location, repeat: event.repeat };
 }
@@ -4785,14 +4867,15 @@ function virtualKeyFromCode(code: string): number {
   if (/^Numpad[0-9]$/.test(code)) return 96 + Number(code.slice(-1));
   if (/^F(?:[1-9]|1[0-9]|2[0-4])$/.test(code)) return 111 + Number(code.slice(1));
   return {
-    Backspace: 8, Tab: 9, Enter: 13, NumpadEnter: 13, ShiftLeft: 16, ShiftRight: 16,
-    ControlLeft: 17, ControlRight: 17, AltLeft: 18, AltRight: 18, Pause: 19, CapsLock: 20,
+    Backspace: 8, Tab: 9, Enter: 13, NumpadEnter: 13, ShiftLeft: 160, ShiftRight: 161,
+    ControlLeft: 162, ControlRight: 163, AltLeft: 164, AltRight: 165, Pause: 19, CapsLock: 20,
     Escape: 27, Space: 32, PageUp: 33, PageDown: 34, End: 35, Home: 36, ArrowLeft: 37,
     ArrowUp: 38, ArrowRight: 39, ArrowDown: 40, PrintScreen: 44, Insert: 45, Delete: 46,
     MetaLeft: 91, MetaRight: 92, ContextMenu: 93, NumpadMultiply: 106, NumpadAdd: 107,
     NumpadSubtract: 109, NumpadDecimal: 110, NumpadDivide: 111, NumLock: 144, ScrollLock: 145,
     Semicolon: 186, Equal: 187, Comma: 188, Minus: 189, Period: 190, Slash: 191,
     Backquote: 192, BracketLeft: 219, Backslash: 220, BracketRight: 221, Quote: 222,
+    IntlBackslash: 226, IntlRo: 226, NumpadComma: 110,
   }[code] ?? 0;
 }
 

@@ -3042,7 +3042,7 @@ button[type="submit"]:hover,
 .sidebar-status .status-dot { width: 9px; height: 9px; border-radius: 50%; background: #1ce699; box-shadow: 0 0 12px rgba(28, 230, 153, 0.9); }
 .sidebar-status .status-dot.offline,.sidebar-status .status-dot.error { background: #f07180; box-shadow: none; }
 
-.app-workspace { min-width: 0; min-height: 0; display: grid; grid-template-rows: 88px minmax(0, 1fr); }
+.app-workspace { min-width: 0; min-height: 0; display: grid; grid-template-rows: auto minmax(0, 1fr); }
 .workspace-header {
   position: relative;
   z-index: 50;
@@ -3588,7 +3588,7 @@ button[type="submit"]:hover,
 }
 
 .app-workspace {
-  grid-template-rows: 88px minmax(0, 1fr) 36px;
+  grid-template-rows: auto minmax(0, 1fr) 36px;
 }
 
 .workspace-header {
@@ -4458,6 +4458,10 @@ button[type="submit"]:hover,
 .profile-name-field > div { display: flex; gap: 8px; margin-top: 7px; }
 .profile-name-field input { min-width: 0; flex: 1; }
 .profile-name-field button { flex: 0 0 auto; }
+.settings-backup-actions { display:flex; flex-wrap:wrap; gap:8px; padding:12px 0; }
+.settings-backup-actions :is(button,label) { display:inline-flex; align-items:center; gap:6px; min-height:34px; cursor:pointer; }
+.settings-backup-actions input { display:none; }
+.settings-backup-actions span { flex-basis:100%; color:var(--text-soft); font-size:.65rem; }
 
 .settings-group .switch-row {
   display: grid;
@@ -4978,7 +4982,7 @@ button[type="submit"]:hover,
   }
 
   .app-workspace {
-    grid-template-rows: 88px minmax(0, 1fr) 36px;
+    grid-template-rows: auto minmax(0, 1fr) 36px;
   }
 
   .dashboard-overview,

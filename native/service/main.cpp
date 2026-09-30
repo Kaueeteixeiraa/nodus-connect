@@ -37,7 +37,10 @@ LRESULT CALLBACK windowsKeyHook(int code, WPARAM message, LPARAM data) {
     for (UINT i = 0; i < 256; ++i) if (forwardedWindowsKeys[i]) { postWindowsKey(i, false, forwardedWindowsExtended[i]); forwardedWindowsKeys[i] = false; }
     return CallNextHookEx(nullptr, code, message, data);
   }
-  if (key.vkCode == VK_LWIN || key.vkCode == VK_RWIN || forwardedWindowsKeys[VK_LWIN] || forwardedWindowsKeys[VK_RWIN] || forwardedWindowsKeys[key.vkCode]) {
+  const bool shortcutModifier = key.vkCode == VK_LWIN || key.vkCode == VK_RWIN || key.vkCode == VK_LMENU || key.vkCode == VK_RMENU;
+  const bool shortcutActive = forwardedWindowsKeys[VK_LWIN] || forwardedWindowsKeys[VK_RWIN]
+    || forwardedWindowsKeys[VK_LMENU] || forwardedWindowsKeys[VK_RMENU];
+  if (shortcutModifier || shortcutActive || forwardedWindowsKeys[key.vkCode]) {
     if (!postWindowsKey(key.vkCode, down, (key.flags & LLKHF_EXTENDED) != 0)) return CallNextHookEx(nullptr, code, message, data);
     forwardedWindowsKeys[key.vkCode] = down;
     forwardedWindowsExtended[key.vkCode] = (key.flags & LLKHF_EXTENDED) != 0;
@@ -134,6 +137,7 @@ void sendMouseButton(std::uint8_t button, bool down) {
 int runInputHelper() {
   _setmode(_fileno(stdin), _O_BINARY);
   InputPacket packet{};
+  bool pressedKeys[256]{};
   while (std::fread(&packet, sizeof(packet), 1, stdin) == 1) {
     if (packet.type == 1) {
       SetCursorPos(packet.x, packet.y);
@@ -153,7 +157,16 @@ int runInputHelper() {
       input.ki.dwFlags = packet.button & 1 ? KEYEVENTF_EXTENDEDKEY : 0;
       if (packet.type == 6) input.ki.dwFlags |= KEYEVENTF_KEYUP;
       SendInput(1, &input, sizeof(input));
+      pressedKeys[packet.keyCode] = packet.type == 5;
     }
+  }
+  for (WORD key = 1; key < 256; ++key) {
+    if (!pressedKeys[key]) continue;
+    INPUT input{};
+    input.type = INPUT_KEYBOARD;
+    input.ki.wVk = key;
+    input.ki.dwFlags = KEYEVENTF_KEYUP;
+    SendInput(1, &input, sizeof(input));
   }
   return 0;
 }

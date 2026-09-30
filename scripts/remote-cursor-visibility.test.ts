@@ -165,7 +165,7 @@ test("mouse injection and packet coordinates remain exactly unchanged", () => {
   expect(inputSource).toContain('helper.stdin.write(helper.nodusBinaryInput ? encodeRemoteInput(message) : `${JSON.stringify(message)}\\n`);\n    hostCursorVisibility?.remoteMouseActivity(message);');
   expect(hash(inputSource.replace("    hostCursorVisibility?.remoteMouseActivity(message);\n", ""))).toBe("04aa1af9f01261fd9e9f3a2b67dbca98a25c6fae6bdfec79120a9a79808fc03a");
   expect(functionHash("apps/desktop/electron/main.cjs", "encodeRemoteInput")).toBe("264100b5230a7b7313711e3d093c4a2c2fa12d89579db71999dd543b476a7200");
-  expect(hash(readFileSync("native/service/main.cpp", "utf8").replace(/\r\n/g, "\n").match(/int runInputHelper\(\) \{[\s\S]*?\n\}/)![0])).toBe("4ff03effd2d9861c9c2e4c76b2d75161edd99d1f2e8086cec477864f1e2ddc9d");
+  expect(hash(readFileSync("native/service/main.cpp", "utf8").replace(/\r\n/g, "\n").match(/int runInputHelper\(\) \{[\s\S]*?\n\}/)![0])).toBe("c51e02a9fd58cf0227b7d34faeff4130e2254d1c30aa98fda1a1ae450a75b0ab");
 });
 
 test("WGC lifecycle preserves the native streaming pipeline and 30-120 FPS bounds", () => {
