@@ -36,4 +36,8 @@ describe("custom installer", () => {
     expect(wrapper).not.toContain("MUI_PAGE_INSTFILES");
     expect(wrapper).not.toContain("HideWindow");
   });
+
+  it("hides the decorative bar below the welcome logo", () => {
+    expect(html).toContain(".welcome .art:after{display:none}");
+  });
 });
