@@ -1,4 +1,4 @@
-const setupUrl = "https://github.com/Kaueeteixeiraa/nodus-connect/releases/download/v0.0.1/Nodus-Connect-Setup-0.0.1.exe?build=20260930-logout-button";
+const setupUrl = "https://github.com/Kaueeteixeiraa/nodus-connect/releases/download/v0.0.1/Nodus-Connect-Setup-0.0.1.exe?build=20260930-device-recovery";
 
 const link = document.querySelector("#download-link");
 const title = document.querySelector("#download-title");

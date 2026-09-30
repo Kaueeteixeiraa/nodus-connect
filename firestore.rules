@@ -13,18 +13,36 @@ service cloud.firestore {
     match /devices/{nodusId} {
       allow read: if signedIn();
       allow create: if signedIn()
+        && get(/databases/$(database)/documents/deviceClaims/$(nodusId)).data.ownerUid == request.auth.uid
         && request.resource.data.nodusId == nodusId
         && request.resource.data.deviceId is string
         && request.resource.data.deviceFingerprint is string
         && request.resource.data.ownerUid == request.auth.uid;
       allow update: if signedIn()
-        && resource.data.ownerUid == request.auth.uid
+        && get(/databases/$(database)/documents/deviceClaims/$(nodusId)).data.ownerUid == request.auth.uid
         && request.resource.data.nodusId == nodusId
         && request.resource.data.deviceId is string
         && request.resource.data.deviceFingerprint is string
         && (!('deviceId' in resource.data) || request.resource.data.deviceId == resource.data.deviceId)
         && (!('deviceFingerprint' in resource.data) || request.resource.data.deviceFingerprint == resource.data.deviceFingerprint)
         && request.resource.data.ownerUid == request.auth.uid;
+    }
+
+    match /deviceClaims/{nodusId} {
+      allow read: if signedIn() && resource.data.ownerUid == request.auth.uid;
+      allow create: if signedIn()
+        && request.resource.data.nodusId == nodusId
+        && request.resource.data.ownerUid == request.auth.uid
+        && request.resource.data.deviceClaim is string
+        && (!exists(/databases/$(database)/documents/devices/$(nodusId))
+          || (request.resource.data.deviceId == get(/databases/$(database)/documents/devices/$(nodusId)).data.deviceId
+            && request.resource.data.deviceFingerprint == get(/databases/$(database)/documents/devices/$(nodusId)).data.deviceFingerprint));
+      allow update: if signedIn()
+        && request.resource.data.nodusId == nodusId
+        && request.resource.data.ownerUid == request.auth.uid
+        && request.resource.data.deviceClaim == resource.data.deviceClaim
+        && request.resource.data.deviceId == resource.data.deviceId
+        && request.resource.data.deviceFingerprint == resource.data.deviceFingerprint;
     }
 
     match /sessionRequests/{requestId} {

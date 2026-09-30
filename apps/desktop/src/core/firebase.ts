@@ -88,17 +88,20 @@ export async function saveCloudAccessLog(entry: AccessLogEntry): Promise<void> {
 
 export async function cloudRegisterPresence(identity: LocalIdentity): Promise<CoordinationDevice> {
   const uid = await ensureDeviceUid();
+  if (!uid) throw new Error("Conta indisponivel.");
+  await claimDeviceOwnership(identity, uid);
   const device = cloudDevice(identity, "online", uid);
   const { doc, getDoc, setDoc, store } = await fire();
   const ref = doc(store, "devices", device.nodusId);
   const existing = await getDoc(ref);
-  if (existing.exists() && (existing.data().ownerUid !== uid || (existing.data().deviceId && existing.data().deviceId !== identity.deviceId))) throw new Error("NODUS_ID_CONFLICT");
+  if (existing.exists() && ((existing.data().deviceId && existing.data().deviceId !== identity.deviceId) || (existing.data().deviceFingerprint && existing.data().deviceFingerprint !== identity.deviceFingerprint))) throw new Error("NODUS_ID_CONFLICT");
   await setDoc(ref, device, { merge: true });
   return device;
 }
 
 export async function cloudHeartbeat(identityInput: LocalIdentity | string): Promise<CoordinationDevice> {
   const uid = await ensureDeviceUid();
+  if (uid && typeof identityInput !== "string") await claimDeviceOwnership(identityInput, uid);
   const nodusIdInput = typeof identityInput === "string" ? identityInput : identityInput.nodusId;
   const nodusId = normalizeNodusId(nodusIdInput);
   if (!nodusId) throw new Error("Nodus ID invalido");
@@ -366,6 +369,20 @@ async function ensureDeviceUid(): Promise<string | null> {
   const user = authInstance.currentUser ?? (await authApi.signInAnonymously(authInstance)).user;
   await user.getIdToken();
   return user.uid;
+}
+
+async function claimDeviceOwnership(identity: LocalIdentity, ownerUid: string): Promise<void> {
+  const nodusId = normalizeNodusId(identity.nodusId);
+  if (!nodusId) throw new Error("Nodus ID invalido");
+  const { doc, setDoc, store } = await fire();
+  await setDoc(doc(store, "deviceClaims", nodusId), {
+    nodusId,
+    deviceId: identity.deviceId,
+    deviceFingerprint: identity.deviceFingerprint,
+    deviceClaim: identity.deviceClaim,
+    ownerUid,
+    updatedAt: new Date().toISOString(),
+  }, { merge: true });
 }
 
 async function ensureAccountUid(): Promise<string | null> {

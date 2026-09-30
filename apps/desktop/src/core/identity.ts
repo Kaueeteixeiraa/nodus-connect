@@ -6,6 +6,7 @@ export interface LocalIdentity {
   nodusId: string;
   deviceId: string;
   deviceFingerprint: string;
+  deviceClaim: string;
   deviceName: string;
   deviceNameConfirmed: boolean;
   createdAt: string;
@@ -35,17 +36,19 @@ function readCachedIdentity(): Partial<LocalIdentity> | null {
 }
 
 function cacheIdentity(identity: LocalIdentity): void {
-  localStorage.setItem(IDENTITY_KEY, JSON.stringify(identity));
+  const { deviceClaim: _deviceClaim, ...safe } = identity;
+  localStorage.setItem(IDENTITY_KEY, JSON.stringify(safe));
 }
 
 function parseIdentity(value: unknown): LocalIdentity | null {
   if (!value || typeof value !== "object") return null;
   const identity = value as Partial<LocalIdentity>;
-  if (!isValidNodusId(String(identity.nodusId || "")) || !identity.deviceId || !identity.deviceFingerprint || !identity.deviceName || !identity.createdAt) return null;
+  if (!isValidNodusId(String(identity.nodusId || "")) || !identity.deviceId || !identity.deviceFingerprint || !identity.deviceClaim || !identity.deviceName || !identity.createdAt) return null;
   return {
     nodusId: String(identity.nodusId),
     deviceId: String(identity.deviceId),
     deviceFingerprint: String(identity.deviceFingerprint),
+    deviceClaim: String(identity.deviceClaim),
     deviceName: String(identity.deviceName),
     deviceNameConfirmed: Boolean(identity.deviceNameConfirmed),
     createdAt: String(identity.createdAt),

@@ -26,7 +26,7 @@ function createDeviceIdentityStore(directory, options = {}) {
     const backup = readIdentity(backupPath);
     if (backup.error) throw backup.error;
     if (backup.value) {
-      const recovered = upgrade(backup.value, false);
+      const recovered = completeIdentity(backup.value);
       persist(recovered);
       return publicIdentity(recovered);
     }
@@ -114,8 +114,11 @@ function createDeviceIdentityStore(directory, options = {}) {
 }
 
 function publicIdentity(identity) {
-  const { deviceSecret: _secret, ...safe } = identity;
-  return safe;
+  const { deviceSecret, ...safe } = identity;
+  return {
+    ...safe,
+    deviceClaim: crypto.createHash("sha256").update(`nodus-device-claim:${deviceSecret}`).digest("hex"),
+  };
 }
 
 function validBaseIdentity(value) {

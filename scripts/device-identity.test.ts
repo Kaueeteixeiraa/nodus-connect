@@ -28,6 +28,7 @@ describe("native device identity", () => {
     expect(afterAccountChange).toEqual(first);
     expect(first.deviceId).toBeTruthy();
     expect(first.deviceFingerprint).toMatch(/^[a-f0-9]{64}$/);
+    expect(first.deviceClaim).toMatch(/^[a-f0-9]{64}$/);
     expect(first.deviceSecret).toBeUndefined();
   });
 
@@ -39,6 +40,7 @@ describe("native device identity", () => {
     expect(saved.nodusId).toBe(original.nodusId);
     expect(saved.deviceId).toBe(original.deviceId);
     expect(saved.deviceFingerprint).toBe(original.deviceFingerprint);
+    expect(saved.deviceClaim).toBe(original.deviceClaim);
     expect(saved.deviceName).toBe("Novo nome");
     expect(saved.deviceNameConfirmed).toBe(true);
   });
@@ -66,6 +68,7 @@ describe("native device identity", () => {
     const recovered = store.loadOrCreate(null);
     expect(recovered.deviceId).toBe(original.deviceId);
     expect(recovered.deviceFingerprint).toBe(original.deviceFingerprint);
+    expect(recovered.deviceClaim).toBe(original.deviceClaim);
   });
 
   it("does not generate a new identity after a temporary native read failure", () => {
@@ -96,5 +99,6 @@ describe("native device identity", () => {
     expect(source.match(/async function ensureDeviceUid[\s\S]*?^}/m)?.[0]).toContain("signInAnonymously");
     expect(source.match(/async function app[\s\S]*?^}/m)?.[0]).toContain('item.name === "[DEFAULT]"');
     expect(source.match(/async function app[\s\S]*?^}/m)?.[0]).not.toContain("getApps()[0]");
+    expect(source).toContain("claimDeviceOwnership(identity, uid)");
   });
 });
