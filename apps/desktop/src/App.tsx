@@ -37,6 +37,7 @@ import {
   List,
   Link,
   LockKeyhole,
+  LogOut,
   Mail,
   Maximize2,
   MousePointer2,
@@ -2969,10 +2970,11 @@ export function App({ initialIdentity }: { initialIdentity: LocalIdentity }) {
               </ul>
             </section>
           </div>
-          <button className="user-chip" onClick={logout} title="Sair" type="button">
+          <div className="user-chip" title={currentUser.name}>
             {currentUser.picture ? <img alt="" src={currentUser.picture} /> : <span>{currentUser.name.slice(0, 1)}</span>}
             <span className="user-meta"><b translate="no">{currentUser.name}</b><small><i /> Online</small></span>
-          </button>
+          </div>
+          <button aria-label="Sair" className="logout-button" onClick={logout} title="Sair" type="button"><LogOut aria-hidden="true" size={17} /></button>
           </div>
         </header>
         <main className={showSessionInMain ? "desktop-main session-main" : `desktop-main ${activeView}-main`}>

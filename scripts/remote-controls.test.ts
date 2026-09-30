@@ -134,6 +134,13 @@ test("icon actions have accessible names and translated tooltips", () => {
   }
 });
 
+test("profile display does not sign out and logout has its own action", () => {
+  const source = readFileSync("apps/desktop/src/App.tsx", "utf8");
+  expect(source).toContain('<div className="user-chip" title={currentUser.name}>');
+  expect(source).not.toContain('<button className="user-chip" onClick={logout}');
+  expect(source).toContain('aria-label="Sair" className="logout-button" onClick={logout} title="Sair"');
+});
+
 test("password recovery is an explicit notice, not a fake action", () => {
   expect(readFileSync("apps/desktop/src/App.tsx", "utf8")).toContain('<span className="forgot-password" role="note" title="Recuperação de senha ainda não disponível.">Recuperação indisponível</span>');
   for (const language of ["en-US", "ru-RU", "ja-JP"] as const) expect(translateText("Recuperação de senha ainda não disponível.", language)).not.toBe("Recuperação de senha ainda não disponível.");

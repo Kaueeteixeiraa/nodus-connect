@@ -3672,6 +3672,24 @@ button[type="submit"]:hover,
   box-shadow: 0 0 8px currentColor;
 }
 
+.logout-button {
+  --logout-accent: color-mix(in srgb, #ff4f68 78%, var(--theme-accent, #ff4f68));
+  display: inline-grid;
+  width: 38px;
+  height: 38px;
+  flex: 0 0 auto;
+  place-items: center;
+  border: 1px solid color-mix(in srgb, var(--logout-accent) 52%, transparent);
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--logout-accent) 18%, var(--theme-control, #07182b));
+  color: var(--logout-accent);
+}
+
+.logout-button:hover {
+  border-color: var(--logout-accent);
+  background: color-mix(in srgb, var(--logout-accent) 28%, var(--theme-control, #07182b));
+}
+
 .desktop-main {
   grid-template-rows: auto minmax(0, 1fr);
   gap: 16px;
