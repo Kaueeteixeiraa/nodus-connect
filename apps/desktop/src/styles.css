@@ -41,6 +41,12 @@
   padding-top: 22px !important;
 }
 
+.apex-app:not(.remote-mode) .desktop-main {
+  width: 100%;
+  max-width: 1200px;
+  margin-inline: auto;
+}
+
 .devices-main > .device-catalog {
   padding: 14px 16px 12px;
 }
