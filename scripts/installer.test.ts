@@ -28,12 +28,12 @@ describe("custom installer", () => {
     expect(main).toContain("options.removeUserData");
   });
 
-  it("uses a startup-friendly non-solid installer archive", () => {
+  it("opens the branded setup without an intermediate extraction window", () => {
     expect(wrapper).toContain("SetCompressor /FINAL lzma");
     expect(wrapper).toContain("SetCompressorDictSize 8");
     expect(wrapper).not.toContain("/SOLID");
-    expect(wrapper).toContain("MUI_PAGE_INSTFILES");
-    expect(wrapper).toContain("HideWindow");
-    expect(wrapper).not.toContain("SilentInstall silent");
+    expect(wrapper).toContain("SilentInstall silent");
+    expect(wrapper).not.toContain("MUI_PAGE_INSTFILES");
+    expect(wrapper).not.toContain("HideWindow");
   });
 });
