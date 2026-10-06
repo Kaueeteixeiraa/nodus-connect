@@ -7,7 +7,7 @@
 
 * { box-sizing: border-box; }
 
-body { margin: 0; min-width: 320px; overflow: hidden; }
+body { margin: 0; min-width: 320px; }
 
 .landing {
   position: relative;
@@ -20,6 +20,9 @@ body { margin: 0; min-width: 320px; overflow: hidden; }
   isolation: isolate;
   background: #061124 url("/assets/nodus-future-grid.png") center / cover no-repeat;
 }
+
+.license-page { height: 100dvh; min-height: 0; grid-template-rows: 72px minmax(0, 1fr) 48px; }
+.license-page .topbar, .license-page footer { min-height: 0; }
 
 .landing::before {
   position: absolute;
@@ -39,6 +42,10 @@ footer {
 }
 
 .topbar { min-height: 90px; }
+.topnav { display: flex; align-items: center; gap: 18px; }
+.license-link { display: inline-flex; align-items: center; min-height: 42px; padding: 10px 16px; border: 1px solid #369acb; border-radius: 7px; color: #d5efff; background: rgba(5, 23, 46, .7); font-size: .9rem; font-weight: 700; text-decoration: none; }
+.license-link:hover { background: #123955; color: #fff; }
+a:focus-visible { outline: 3px solid #78d8ff; outline-offset: 4px; }
 
 .brand { display: inline-flex; align-items: center; gap: 10px; color: #ffffff; font-size: 1rem; font-weight: 750; letter-spacing: 0; text-decoration: none; }
 .brand img { width: 30px; height: 30px; filter: drop-shadow(0 5px 12px rgba(29, 164, 255, .42)); }
@@ -91,15 +98,68 @@ h1 em { color: #49bcff; font-style: normal; }
 .download small { margin-top: 2px; color: #d8f1ff; font-size: .75rem; font-weight: 600; }
 .compatibility { margin: 12px 0 0; color: #a9cae4; font-size: .76rem; }
 
+.license { display: flex; align-items: center; min-height: 0; }
+.license-inner { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 48px; width: min(100% - 64px, 1160px); margin-inline: auto; padding: 20px 0; }
+.license h1 { margin: 0; font-size: 2.6rem; line-height: 1.15; }
+.license .intro { margin: 20px 0 0; font-size: 1.05rem; }
+.license-price { margin: 0; color: #fff; font-size: 3.5rem; font-weight: 750; line-height: 1.1; }
+.license-price span { font-size: 1.6rem; }
+.license-price small { color: #b5d4eb; font-size: 1rem; font-weight: 400; }
+.license-billing { margin: 12px 0 24px; color: #78d8ff; font-size: .95rem; }
+.license-limits { margin: 0 0 24px; font-size: .9rem; }
+.license-limits div { display: flex; justify-content: space-between; gap: 16px; padding: 12px 0; border-bottom: 1px solid rgba(141, 208, 255, .16); }
+.license-limits dt { color: #b5d4eb; }
+.license-limits dd { margin: 0; text-align: right; font-weight: 700; }
+.license-contact { justify-content: space-between; width: 100%; padding: 12px 18px; }
+.license-features { margin-top: 24px; }
+.feature-tabs { display: flex; gap: 4px; margin-bottom: 16px; border-bottom: 1px solid rgba(141, 208, 255, .24); }
+.feature-tabs button { flex: 1; min-height: 40px; border: 0; border-bottom: 2px solid transparent; background: transparent; color: #b5d4eb; font: inherit; font-size: .9rem; font-weight: 700; cursor: pointer; }
+.feature-tabs button[aria-selected="true"] { border-bottom-color: #4fc5ff; color: #78d8ff; background: rgba(21, 153, 232, .12); }
+.feature-tabs button:focus-visible { outline: 2px solid #78d8ff; outline-offset: -2px; }
+.license-features [role="tabpanel"] { min-height: 130px; }
+.license-features ul { margin: 0; padding-left: 18px; color: #b5d4eb; font-size: .9rem; line-height: 1.6; }
+.license-features li + li { margin-top: 10px; }
+.license-features li::marker { color: #4fc5ff; }
+
+@media (max-width: 900px) {
+  .license-inner { column-gap: 32px; }
+  .license-limits div { gap: 12px; }
+}
+
 footer { min-height: 68px; border-top: 1px solid rgba(141, 208, 255, .16); color: #b5d4eb; font-size: .76rem; }
 footer span:first-child { color: #60d7ff; font-weight: 700; }
 
 @media (max-width: 620px) {
   .landing { min-height: 520px; background-position: 58% center; }
-  .topbar, .hero, footer { width: min(100% - 36px, 1440px); }
+  .topbar, .hero, footer, .license-inner { width: min(100% - 36px, 1440px); }
   .topbar { min-height: 76px; }
   .platform { display: none; }
   h1 { font-size: clamp(3.6rem, 18vw, 5.4rem); }
   .intro { max-width: 360px; margin: 22px 0; font-size: .98rem; }
+  .license-page { min-height: 0; grid-template-rows: 60px minmax(0, 1fr) 32px; }
+  .license-inner { grid-template-columns: minmax(0, 1fr); gap: 12px; padding-block: 8px; }
+  .license .eyebrow { margin-bottom: 8px; font-size: .68rem; }
+  .license h1 { font-size: 1.65rem; }
+  .license .intro { margin-top: 8px; font-size: .875rem; line-height: 1.4; }
+  .license-features { margin-top: 12px; }
+  .feature-tabs { margin-bottom: 10px; }
+  .feature-tabs button { min-height: 32px; font-size: .8rem; }
+  .license-features [role="tabpanel"] { min-height: 102px; }
+  .license-features ul { font-size: .8rem; line-height: 1.4; }
+  .license-features li + li { margin-top: 6px; }
+  .license-price { font-size: 2.4rem; }
+  .license-price span { font-size: 1.2rem; }
+  .license-billing { display: none; }
+  .license-limits { margin: 10px 0 12px; font-size: .8rem; }
+  .license-limits div { padding: 8px 0; }
+  .license-contact { min-height: 52px; padding: 10px 12px; }
+  .license-contact b { font-size: .85rem; }
+  .license-contact small { font-size: .68rem; }
+  .license-link { padding-inline: 12px; }
   footer { min-height: 58px; font-size: .67rem; }
+}
+
+@media (max-width: 620px) and (max-height: 670px) {
+  .license .intro { display: none; }
+  .license-page { grid-template-rows: 52px minmax(0, 1fr) 28px; }
 }

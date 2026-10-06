@@ -1,14 +1,21 @@
 const { contextBridge, ipcRenderer } = require("electron");
 
 contextBridge.exposeInMainWorld("nodusDesktop", {
+  iceDiagnosticsEnabled: process.env.NODUS_ICE_DIAGNOSTIC === "1",
   setTrayIdentity(identity) {
     ipcRenderer.send("nodus:tray-identity", identity);
   },
-  getIdentity() {
-    return ipcRenderer.invoke("nodus:get-identity");
+  getIdentity(legacyIdentity) {
+    return ipcRenderer.invoke("nodus:get-identity", legacyIdentity);
   },
   saveIdentity(identity) {
     return ipcRenderer.invoke("nodus:save-identity", identity);
+  },
+  getLicenseCredentials() {
+    return ipcRenderer.invoke("nodus:get-license-credentials");
+  },
+  saveLicenseCredentials(credentials) {
+    return ipcRenderer.invoke("nodus:save-license-credentials", credentials);
   },
   getServerInfo() {
     return ipcRenderer.invoke("nodus:get-server-info");
@@ -25,8 +32,25 @@ contextBridge.exposeInMainWorld("nodusDesktop", {
   getNativeCaptureStatus() {
     return ipcRenderer.invoke("nodus:get-native-capture-status");
   },
+  startNativeMedia(options) {
+    return ipcRenderer.invoke("nodus:start-native-media", options);
+  },
+  signalNativeMedia(signal) {
+    return ipcRenderer.invoke("nodus:signal-native-media", signal);
+  },
+  stopNativeMedia(sessionId) {
+    return ipcRenderer.invoke("nodus:stop-native-media", sessionId);
+  },
+  onNativeMediaSignal(callback) {
+    const listener = (_event, signal) => callback(signal);
+    ipcRenderer.on("nodus:native-media-signal", listener);
+    return () => ipcRenderer.removeListener("nodus:native-media-signal", listener);
+  },
   getGpuDiagnostics() {
     return ipcRenderer.invoke("nodus:get-gpu-diagnostics");
+  },
+  getRenderDisplayInfo(viewport) {
+    return ipcRenderer.invoke("nodus:get-render-display-info", viewport);
   },
   getServiceStatus() {
     return ipcRenderer.invoke("nodus:get-service-status");
@@ -46,6 +70,12 @@ contextBridge.exposeInMainWorld("nodusDesktop", {
   setRemoteControlActive(active) {
     return ipcRenderer.invoke("nodus:set-remote-control-active", Boolean(active));
   },
+  setHostInputLock(input) {
+    return ipcRenderer.invoke("nodus:set-host-input-lock", input);
+  },
+  setHostCursorActive(active) {
+    return ipcRenderer.invoke("nodus:set-host-cursor-active", Boolean(active));
+  },
   setRemoteKeyboardCapture(active) {
     return ipcRenderer.invoke("nodus:set-remote-keyboard-capture", Boolean(active));
   },
@@ -58,11 +88,17 @@ contextBridge.exposeInMainWorld("nodusDesktop", {
   restartComputer() {
     return ipcRenderer.invoke("nodus:restart-computer");
   },
+  sendSecureAttention() {
+    return ipcRenderer.invoke("nodus:send-secure-attention");
+  },
   setStartupOptions(options) {
     return ipcRenderer.invoke("nodus:set-startup-options", options);
   },
   applyRemoteInput(input) {
     ipcRenderer.send("nodus:apply-remote-input", input);
+  },
+  measureRemoteInput(input) {
+    return ipcRenderer.invoke("nodus:measure-remote-input", input);
   },
   getCaptureSources() {
     return ipcRenderer.invoke("nodus:get-capture-sources");
@@ -112,5 +148,15 @@ contextBridge.exposeInMainWorld("nodusDesktop", {
     const listener = (_event, type, input) => callback(type, input);
     ipcRenderer.on("nodus:remote-key-input", listener);
     return () => ipcRenderer.removeListener("nodus:remote-key-input", listener);
+  },
+  onHostMouseActivity(callback) {
+    const listener = () => callback();
+    ipcRenderer.on("nodus:host-mouse-activity", listener);
+    return () => ipcRenderer.removeListener("nodus:host-mouse-activity", listener);
+  },
+  onOpenWorkspace(callback) {
+    const listener = () => callback();
+    ipcRenderer.on("nodus:open-workspace", listener);
+    return () => ipcRenderer.removeListener("nodus:open-workspace", listener);
   },
 });

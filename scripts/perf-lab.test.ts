@@ -17,6 +17,30 @@ function report(role: "host" | "viewer", samples: Record<string, unknown>[]) {
 }
 
 describe("performance report", () => {
+  it("uses an explicit cutoff on both peers and excludes unknown packet loss", () => {
+    const host = report("host", [{ captureFps: 60 }, { captureFps: 40 }, { captureFps: 1 }]);
+    const viewer = report("viewer", [{ decodedFps: 60, packetLossPct: 1 }, { decodedFps: 40, packetLossPct: 0, packetLossPctValid: false }, { decodedFps: 1, packetLossPct: 100 }]);
+    const result = JSON.parse(execFileSync(process.execPath, [resolve("scripts/perf-lab.mjs"), "report", host, `--peer=${viewer}`, "--end=2026-09-23T12:00:01.000Z"], { encoding: "utf8" }));
+    expect(result.samples).toBe(4);
+    expect(result.fps).toMatchObject({ captureFps: 50, decodedFps: 50 });
+    expect(result.network.packetLossPct).toBe(1);
+  });
+
+  it("deduplicates native ACK samples and leaves one-way and visual input latency unmeasured", () => {
+    const first = { id: 1, ok: true, positionConfirmed: true, eventToSendMs: 5, commandAckRttMs: 20,
+      hostProcessingMs: 4, ipcRoundTripMs: 3, mainToWindowsAckMs: 2, transportAckRoundTripMs: 16 };
+    const viewer = report("viewer", [
+      { inputDiagnostic: { hostSupported: true, latest: first, mouseEventsPerSecond: 1000, sendsPerSecond: 60, bufferedAmount: 9, coalesced: 940 } },
+      { inputDiagnostic: { hostSupported: true, latest: first, mouseEventsPerSecond: 1000, sendsPerSecond: 60, bufferedAmount: 18, coalesced: 940 } },
+      { inputDiagnostic: { hostSupported: true, latest: { ...first, id: 2, commandAckRttMs: 40 }, coalesced: 1000 } },
+    ]);
+    const result = JSON.parse(execFileSync(process.execPath, [resolve("scripts/perf-lab.mjs"), "report", viewer], { encoding: "utf8" }));
+    expect(result.input).toMatchObject({ enabled: true, samples: 2, windowsPositionConfirmedSamples: 2,
+      nativeAckRttMsAverage: 30, nativeAckRttMsP95: 40, nativeAckRttMsP99: 40, nativeAckRttMsMax: 40, nativeAckOver500MsSamples: 0,
+      commandLatencyMs: null, oneWayTransportMs: null, visualFeedbackLatencyMs: null,
+      mouseEventsPerSecond: 1000, sendsPerSecond: 60, bufferedAmountPeak: 18 });
+  });
+
   it("joins both peers without inventing unavailable counters", () => {
     const host = report("host", [
       { captureFps: 60, encodedFps: 58, sentFps: 58, encoder: "OpenH264", codec: "H264", codecProfile: "profile-level-id=42e01f", encoderFallbackReason: "Chromium escolheu software", gpu: { adapter: "Intel GPU", videoEncode: "enabled", hardwareH264Available: true }, encodeMs: 7, counters: { captured: 100, encoded: 98, sent: 98 } },
@@ -89,15 +113,71 @@ describe("performance report", () => {
 
   it("keeps requested video separate from runtime capture and sender parameters", () => {
     const host = report("host", [{
-      diagnosticLabel: "resolution-1080", lightweightMode: true,
-      configuredVideo: { resolution: "1920x1080", fps: 60, bitrate: 10000000 },
+      event: "diagnostic-preset-activated", preset: "1080p60", requestedWidth: 1920, requestedHeight: 1080, requestedFps: 60,
+      maxFramerate: 60, bitrateKbps: 14000, scaleResolutionDownBy: 1, adaptiveLocked: true,
+    }, {
+      diagnosticLabel: "capture-1080p60", lightweightMode: true,
+      configuredVideo: { resolution: "1920x1080", fps: 60, bitrate: 14000000, diagnostic: { preset: "1080p60", maxFramerate: 60, scaleResolutionDownBy: 1, lockAdaptive: true } },
       actualVideo: { capture: { width: 1280, height: 720, frameRate: 59 }, sender: { maxBitrate: 8000000, maxFramerate: 60, scaleResolutionDownBy: 1.5 } },
       captureFps: 49, encodedFps: 48, encoder: "Intel Quick Sync", limitation: "none",
     }]);
     const result = JSON.parse(execFileSync(process.execPath, [resolve("scripts/perf-lab.mjs"), "report", host], { encoding: "utf8" }));
-    expect(result.diagnostic).toMatchObject({ label: "resolution-1080", lightweightMode: { host: true, viewer: null }, pixelsPerSecond: 54374400 });
+    expect(result.diagnostic).toMatchObject({ label: "capture-1080p60", lightweightMode: { host: true, viewer: null }, pixelsPerSecond: 54374400 });
     expect(result.diagnostic.configured.resolution).toBe("1920x1080");
     expect(result.diagnostic.actual.capture.width).toBe(1280);
     expect(result.diagnostic.actual.sender.maxBitrate).toBe(8000000);
+    expect(result.validation).toMatchObject({
+      requested: { resolution: "1920x1080", fps: 60, bitrate: 14000000 },
+      trackSettings: { width: 1280, height: 720, frameRate: 59 },
+      sender: { maxBitrate: 8000000, maxFramerate: 60, scaleResolutionDownBy: 1.5 },
+    });
+    expect(result.validation.benchmark).toMatchObject({ status: "FAIL", activationValid: true, senderValid: false, trackValid: false, abortReason: "SENDER_PARAMETERS_MISMATCH" });
+  });
+
+  it("reports double scaling only when a reduced stream is enlarged by the viewer", () => {
+    const host = report("host", [{
+      bitrateKbps: 9000,
+      actualVideo: {
+        source: { width: 1366, height: 768 },
+        capture: { width: 1366, height: 768, frameRate: 60 },
+        cursorCapture: { requested: "never", applied: "never", supported: ["always", "motion", "never"] },
+        sender: { scaleResolutionDownBy: 1.5, degradationPreference: "maintain-framerate" },
+        outbound: { width: 910, height: 512, averageQp: 24 },
+      },
+    }]);
+    const viewer = report("viewer", [{
+      inboundVideo: { width: 910, height: 512 },
+      presentation: { videoWidth: 910, videoHeight: 512, renderedWidth: 1366, renderedHeight: 768, physicalWidth: 1366, physicalHeight: 768, devicePixelRatio: 1, objectFit: "contain" },
+    }]);
+    const result = JSON.parse(execFileSync(process.execPath, [resolve("scripts/perf-lab.mjs"), "report", host, `--peer=${viewer}`], { encoding: "utf8" }));
+    expect(result.imageQuality).toMatchObject({ doubleScaling: "YES", contentHint: null, actualOutgoingBitrateKbps: 9000, averageQp: 24 });
+    expect(result.imageQuality.resolutionPipeline).toMatchObject({ source: { width: 1366, height: 768 }, outbound: { width: 910, height: 512 }, inbound: { width: 910, height: 512 } });
+    expect(result.cursor).toMatchObject({ requested: "never", applied: "never" });
+  });
+
+  it.each([
+    ["always", "CURSOR_SUPPRESSION_FAILED; HOST CURSOR STILL CAPTURED; CURSOR DUPLICATION RISK"],
+    [null, "CURSOR DUPLICATION RISK (CAPTURE CURSOR UNVERIFIED)"],
+  ])("flags capture cursor applied=%s without claiming exclusion", (applied, warning) => {
+    const host = report("host", [{ actualVideo: { cursorCapture: { requested: "never", applied, supported: null } } }]);
+    const result = JSON.parse(execFileSync(process.execPath, [resolve("scripts/perf-lab.mjs"), "report", host], { encoding: "utf8" }));
+    expect(result.warnings).toContain(warning);
+  });
+
+  it("reports both ICE peers and the selected pair without inventing TURN segment RTT", () => {
+    const ice = { counts: { local: { host: 1, srflx: 1, relay: 0 }, remote: { host: 0, srflx: 0, relay: 1 } },
+      selected: { id: "pair-1", route: "relay", state: "succeeded", rttMs: 287, local: { type: "srflx", protocol: "UDP" }, remote: { type: "relay", protocol: "UDP" } },
+      classification: "UNKNOWN", failureReason: "NO_DIRECT_PAIR_STATS" };
+    const host = report("host", [{ ice, iceStates: { gathering: "complete" }, iceTransportPolicy: "all", iceRestartCount: 0,
+      actualVideo: { cursorCapture: { requested: "never", applied: "never" } } }]);
+    const viewer = report("viewer", [
+      { event: "ice-started", elapsedMs: 0, servers: [{ type: "turn", host: "relay.example.com", credential: "secret" }] },
+      { ice, iceStates: { gathering: "complete" }, route: "relay", transport: "UDP", latencyMs: 287, iceTransportPolicy: "all", iceRestartCount: 0 },
+    ]);
+    const result = JSON.parse(execFileSync(process.execPath, [resolve("scripts/perf-lab.mjs"), "report", host, `--peer=${viewer}`], { encoding: "utf8" }));
+    expect(result.ice).toMatchObject({ policy: "all", classification: "UNKNOWN", directFailureReason: "NO_DIRECT_PAIR_STATS",
+      selectedPair: { id: "pair-1", route: "relay" }, stun: { host: "SUCCESS", viewer: "SUCCESS" },
+      turn: { used: true, segmentRttMs: null }, timeline: [{ event: "ice-started", elapsedMs: 0 }] });
+    expect(JSON.stringify(result.ice)).not.toContain("secret");
   });
 });

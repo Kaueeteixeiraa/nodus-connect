@@ -7,7 +7,11 @@ const path = require("node:path");
 const productName = "Nodus Connect";
 const localAppData = realPath(process.env.LOCALAPPDATA || path.join(os.homedir(), "AppData", "Local"));
 let installDir = path.join(localAppData, "Programs", productName);
-const installedApp = path.basename(process.execPath).toLowerCase() === "nodus connect.exe" || process.argv.includes("--run-app");
+const uninstallMode = process.argv.includes("--uninstall");
+const installedApp = !uninstallMode && (path.basename(process.execPath).toLowerCase() === "nodus connect.exe" || process.argv.includes("--run-app"));
+if (uninstallMode && path.basename(process.execPath).toLowerCase() === "nodus connect.exe") installDir = path.dirname(process.execPath);
+let cancelRequested = false;
+let installing = false;
 
 let win;
 
@@ -24,15 +28,16 @@ if (installedApp) {
       return;
     }
 
+    const workArea = require("electron").screen.getPrimaryDisplay().workAreaSize;
     win = new BrowserWindow({
-      width: 700,
-      height: 620,
-      minWidth: 620,
-      minHeight: 560,
-      resizable: true,
+      width: Math.min(930, workArea.width - 24),
+      height: Math.min(600, workArea.height - 24),
+      resizable: false,
+      maximizable: false,
+      center: true,
       frame: false,
       titleBarStyle: "hidden",
-      title: "Nodus Connect Setup",
+      title: uninstallMode ? "Desinstalar Nodus Connect" : "Nodus Connect – Instalação",
       backgroundColor: "#050811",
       icon: path.resolve(__dirname, "../../build/icon.ico"),
       autoHideMenuBar: true,
@@ -42,13 +47,38 @@ if (installedApp) {
         preload: path.join(__dirname, "preload.cjs"),
       },
     });
+    win.on("close", (event) => {
+      if (!installing) return;
+      event.preventDefault();
+      cancelRequested = true;
+      win.webContents.send("cancel-requested");
+    });
     win.loadFile(path.join(__dirname, "index.html"));
+    const capturePath = process.argv.find((arg) => arg.startsWith("--capture-installer="))?.slice("--capture-installer=".length);
+    if (capturePath) {
+      win.webContents.once("did-finish-load", async () => {
+        await win.webContents.executeJavaScript("new Promise((resolve) => { const check = () => document.documentElement.dataset.ready ? resolve() : setTimeout(check, 50); check(); })");
+        try {
+          const image = await win.webContents.capturePage();
+          fs.writeFileSync(path.resolve(capturePath), image.toPNG());
+        } catch (error) {
+          log(`Captura visual: ${error?.stack || error}`);
+        } finally {
+          app.quit();
+        }
+      });
+    }
   });
 
   ipcMain.handle("install", async (event, options) => {
-    const send = (message, progress) => event.sender.send("progress", { message, progress });
+    const send = (message, progress, step) => event.sender.send("progress", { message, progress, step });
     return installNodus(send, options);
   });
+  ipcMain.handle("cancel-install", () => {
+    if (installing) cancelRequested = true;
+    return { ok: true };
+  });
+  ipcMain.handle("uninstall", (_event, options) => uninstallNodus(options));
 
   ipcMain.handle("system-info", async () => {
     let graphics = "Indisponivel";
@@ -66,6 +96,8 @@ if (installedApp) {
       version: app.getVersion(),
       logPath: path.join(os.tmpdir(), "nodus-connect-installer.log"),
       installDir,
+      mode: uninstallMode ? "uninstall" : fs.existsSync(path.join(installDir, "Nodus Connect.exe")) ? "update" : "install",
+      previewStage: process.argv.find((arg) => arg.startsWith("--visual-test="))?.split("=")[1] || "",
     };
   });
 
@@ -85,11 +117,19 @@ if (installedApp) {
     launchInstalledApp();
     return true;
   });
+  ipcMain.handle("set-desktop-shortcut", (_event, enabled) => setDesktopShortcut(Boolean(enabled)));
 
   ipcMain.handle("close", () => app.quit());
 }
 
 async function installNodus(send, rawOptions = {}) {
+  let stagingDir = "";
+  let backupDir = "";
+  let backupMoved = false;
+  let committed = false;
+  let restartService = false;
+  installing = true;
+  cancelRequested = false;
   try {
     const options = {
       desktopShortcut: rawOptions?.desktopShortcut !== false,
@@ -100,39 +140,68 @@ async function installNodus(send, rawOptions = {}) {
     const source = realPath(path.dirname(process.execPath));
     if (!fs.existsSync(path.join(source, "Nodus Connect Setup.exe"))) throw new Error("INSTALLER_SOURCE_NOT_FOUND");
 
-    send("Preparando instalação...", 8);
+    send("Preparando arquivos...", 4, "prepare");
     assertSafeInstallDir(options.installDir);
     if (isSameOrInside(source, options.installDir) || isSameOrInside(options.installDir, source)) throw new Error("INVALID_INSTALL_TARGET");
     installDir = options.installDir;
+    stagingDir = `${installDir}.installing`;
+    backupDir = `${installDir}.backup`;
+    assertSafeAuxiliaryDir(stagingDir, ".installing");
+    assertSafeAuxiliaryDir(backupDir, ".backup");
+    const payloadSize = getPayloadSize(source);
+    if (getFreeDiskBytes(installDir) < payloadSize * 1.15) throw new Error("INSUFFICIENT_DISK_SPACE");
 
-    send("Fechando versões abertas...", 16);
-    const restartService = stopNodusForUpdate();
+    send("Fechando versões abertas...", 10, "prepare");
+    restartService = stopNodusForUpdate();
+    throwIfCancelled();
 
-    send("Instalando Nodus Connect...", 24);
-    removeInstallDir();
-    fs.mkdirSync(installDir, { recursive: true });
-    copyTree(source, installDir, send, 24, 86);
-    renameInstalledExe();
+    removeDir(stagingDir);
+    removeDir(backupDir);
+    fs.mkdirSync(stagingDir, { recursive: true });
+    await copyTree(source, stagingDir, send, 14, 78);
+    renameInstalledExe(stagingDir);
+    throwIfCancelled();
 
-    send("Criando atalhos...", 92);
+    send("Configurando o sistema...", 84, "configure");
+    if (fs.existsSync(installDir)) {
+      fs.renameSync(installDir, backupDir);
+      backupMoved = true;
+    }
+    fs.renameSync(stagingDir, installDir);
+    committed = true;
+
+    send("Criando atalhos...", 92, "shortcuts");
     createShortcuts(options);
     writeUninstaller();
+    registerUninstaller();
     if (restartService) restartNodusService();
-    if (options.openAfterInstall) {
-      send("Abrindo Nodus Connect...", 98);
-      launchInstalledApp();
-    }
-    send("Tudo pronto.", 100);
+    if (backupMoved) removeDir(backupDir);
+    send("Instalação concluída.", 100, "finish");
     return { ok: true, installDir };
   } catch (error) {
     log(error?.stack || error?.message || String(error));
+    try {
+      if (committed && fs.existsSync(installDir)) removeDir(installDir);
+      if (backupMoved && fs.existsSync(backupDir)) fs.renameSync(backupDir, installDir);
+      if (stagingDir && fs.existsSync(stagingDir)) removeDir(stagingDir);
+      if (restartService) restartNodusService();
+    } catch (rollbackError) {
+      log(`Rollback: ${rollbackError?.stack || rollbackError}`);
+    }
     return { ok: false, error: friendlyError(error), logPath: path.join(os.tmpdir(), "nodus-connect-installer.log") };
+  } finally {
+    installing = false;
   }
 }
 
 function assertSafeInstallDir(target) {
   const resolved = path.resolve(target);
   if (!path.isAbsolute(resolved) || path.basename(resolved).toLowerCase() !== productName.toLowerCase()) throw new Error("Pasta de instalacao invalida.");
+}
+
+function assertSafeAuxiliaryDir(target, suffix) {
+  const resolved = path.resolve(target);
+  if (!resolved.toLowerCase().endsWith(`${productName}${suffix}`.toLowerCase())) throw new Error("Pasta auxiliar invalida.");
 }
 
 function normalizeInstallDir(value) {
@@ -161,22 +230,28 @@ function listFiles(dir) {
   });
 }
 
-function copyTree(source, target, send, startProgress, endProgress) {
+async function copyTree(source, target, send, startProgress, endProgress) {
   const files = listFiles(source);
   if (files.length === 0) throw new Error("EMPTY_PAYLOAD");
-  if (typeof fs.cpSync === "function") {
-    send("Copiando arquivos...", Math.round((startProgress + endProgress) / 2));
-    fs.cpSync(source, target, { recursive: true, force: true });
-    send("Finalizando arquivos...", endProgress);
-    return;
-  }
+  const totalBytes = files.reduce((total, file) => total + fs.statSync(file).size, 0);
+  let copiedBytes = 0;
   for (let index = 0; index < files.length; index++) {
+    throwIfCancelled();
     const from = files[index];
     const to = path.join(target, path.relative(source, from));
     fs.mkdirSync(path.dirname(to), { recursive: true });
     copyFile(from, to);
-    if (index % 10 === 0) send("Copiando arquivos...", startProgress + Math.round((index / files.length) * (endProgress - startProgress)));
+    copiedBytes += fs.statSync(from).size;
+    if (index % 8 === 0 || index === files.length - 1) {
+      const progress = startProgress + Math.round((copiedBytes / totalBytes) * (endProgress - startProgress));
+      send("Copiando arquivos...", progress, "copy");
+      await new Promise((resolve) => setImmediate(resolve));
+    }
   }
+}
+
+function throwIfCancelled() {
+  if (cancelRequested) throw new Error("INSTALL_CANCELLED");
 }
 
 function copyFile(from, to) {
@@ -232,10 +307,10 @@ function restartNodusService() {
   if (result.status !== 0) log(`Nao foi possivel reiniciar o servico: ${result.stderr || result.stdout || result.status}`);
 }
 
-function removeInstallDir() {
+function removeDir(target) {
   for (let attempt = 0; attempt < 12; attempt++) {
     try {
-      fs.rmSync(installDir, { recursive: true, force: true });
+      fs.rmSync(target, { recursive: true, force: true });
       return;
     } catch (error) {
       if (attempt === 11) throw error;
@@ -244,9 +319,9 @@ function removeInstallDir() {
   }
 }
 
-function renameInstalledExe() {
-  const setupExe = path.join(installDir, "Nodus Connect Setup.exe");
-  const appExe = path.join(installDir, "Nodus Connect.exe");
+function renameInstalledExe(target = installDir) {
+  const setupExe = path.join(target, "Nodus Connect Setup.exe");
+  const appExe = path.join(target, "Nodus Connect.exe");
   if (fs.existsSync(appExe)) fs.rmSync(appExe, { force: true });
   if (fs.existsSync(setupExe)) fs.renameSync(setupExe, appExe);
   if (!fs.existsSync(appExe)) throw new Error("APP_EXE_NOT_FOUND");
@@ -258,8 +333,8 @@ function wait(ms) {
 
 function createShortcuts(options) {
   const exe = path.join(installDir, "Nodus Connect.exe");
-  const programsDir = path.join(process.env.APPDATA || path.join(os.homedir(), "AppData", "Roaming"), "Microsoft", "Windows", "Start Menu", "Programs");
-  const desktop = path.join(os.homedir(), "Desktop", "Nodus Connect.lnk");
+  const programsDir = programsPath();
+  const desktop = desktopShortcutPath();
   const startDir = path.join(programsDir, "Nodus Connect");
   const startupDir = path.join(programsDir, "Startup");
   fs.rmSync(path.join(programsDir, "Nodus Connect Setup.lnk"), { force: true });
@@ -267,17 +342,19 @@ function createShortcuts(options) {
   fs.mkdirSync(startDir, { recursive: true });
   if (options.desktopShortcut) createShortcut(desktop, exe);
   createShortcut(path.join(startDir, "Nodus Connect.lnk"), exe);
+  createShortcut(path.join(startDir, "Desinstalar Nodus Connect.lnk"), exe, "--uninstall");
   if (options.startWithWindows) {
     fs.mkdirSync(startupDir, { recursive: true });
     createShortcut(path.join(startupDir, "Nodus Connect.lnk"), exe);
-  }
+  } else fs.rmSync(path.join(startupDir, "Nodus Connect.lnk"), { force: true });
 }
 
-function createShortcut(shortcutPath, targetPath) {
+function createShortcut(shortcutPath, targetPath, args = "") {
   const script = [
     "$w = New-Object -ComObject WScript.Shell",
     `$s = $w.CreateShortcut(${ps(shortcutPath)})`,
     `$s.TargetPath = ${ps(targetPath)}`,
+    `$s.Arguments = ${ps(args)}`,
     `$s.WorkingDirectory = ${ps(installDir)}`,
     `$s.IconLocation = ${ps(targetPath)}`,
     "$s.Save()",
@@ -287,14 +364,90 @@ function createShortcut(shortcutPath, targetPath) {
 
 function writeUninstaller() {
   const file = path.join(installDir, "Desinstalar Nodus Connect.cmd");
-  const desktop = path.join(os.homedir(), "Desktop", "Nodus Connect.lnk");
-  const startup = path.join(process.env.APPDATA || path.join(os.homedir(), "AppData", "Roaming"), "Microsoft", "Windows", "Start Menu", "Programs", "Startup", "Nodus Connect.lnk");
-  const parent = path.dirname(installDir);
-  const folder = path.basename(installDir);
-  fs.writeFileSync(
-    file,
-    `@echo off\r\ntaskkill /IM "Nodus Connect.exe" /F >nul 2>nul\r\ndel "${desktop}" >nul 2>nul\r\ndel "${startup}" >nul 2>nul\r\ncd /d "${parent}"\r\nrmdir /s /q "${folder}"\r\n`,
-  );
+  fs.writeFileSync(file, `@echo off\r\nstart "" "${path.join(installDir, "Nodus Connect.exe")}" --uninstall\r\n`);
+}
+
+function setDesktopShortcut(enabled) {
+  const shortcut = desktopShortcutPath();
+  if (!enabled) {
+    fs.rmSync(shortcut, { force: true });
+    return { ok: true };
+  }
+  fs.mkdirSync(path.dirname(shortcut), { recursive: true });
+  createShortcut(shortcut, path.join(installDir, "Nodus Connect.exe"));
+  return { ok: true };
+}
+
+function registerUninstaller() {
+  const key = "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Nodus Connect";
+  const exe = path.join(installDir, "Nodus Connect.exe");
+  const values = [
+    ["DisplayName", "REG_SZ", productName],
+    ["DisplayVersion", "REG_SZ", app.getVersion()],
+    ["Publisher", "REG_SZ", productName],
+    ["DisplayIcon", "REG_SZ", exe],
+    ["InstallLocation", "REG_SZ", installDir],
+    ["UninstallString", "REG_SZ", `\"${exe}\" --uninstall`],
+    ["NoModify", "REG_DWORD", "1"],
+    ["NoRepair", "REG_DWORD", "1"],
+    ["EstimatedSize", "REG_DWORD", String(Math.ceil(getPayloadSize(installDir) / 1024))],
+  ];
+  spawnSync("reg.exe", ["ADD", key, "/f"], { windowsHide: true, stdio: "ignore" });
+  for (const [name, type, value] of values) {
+    const result = spawnSync("reg.exe", ["ADD", key, "/v", name, "/t", type, "/d", value, "/f"], { windowsHide: true, stdio: "ignore" });
+    if (result.status !== 0) throw new Error("UNINSTALL_REGISTRATION_FAILED");
+  }
+}
+
+function unregisterUninstaller() {
+  spawnSync("reg.exe", ["DELETE", "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Nodus Connect", "/f"], { windowsHide: true, stdio: "ignore" });
+}
+
+function removeShortcuts() {
+  fs.rmSync(desktopShortcutPath(), { force: true });
+  fs.rmSync(path.join(programsPath(), "Startup", "Nodus Connect.lnk"), { force: true });
+  fs.rmSync(path.join(programsPath(), "Nodus Connect"), { recursive: true, force: true });
+}
+
+function uninstallNodus(options = {}) {
+  try {
+    assertSafeInstallDir(installDir);
+    const exe = path.join(installDir, "Nodus Connect.exe");
+    if (!fs.existsSync(exe)) throw new Error("APP_EXE_NOT_FOUND");
+    const serviceExe = path.join(installDir, "resources", "native", "nodus-service.exe");
+    if (fs.existsSync(serviceExe)) spawnSync(serviceExe, ["--uninstall"], { windowsHide: true, stdio: "ignore" });
+    removeShortcuts();
+    unregisterUninstaller();
+
+    const scriptPath = path.join(os.tmpdir(), `nodus-uninstall-${Date.now()}.ps1`);
+    const userData = path.join(process.env.APPDATA || path.join(os.homedir(), "AppData", "Roaming"), productName);
+    const lines = [
+      `$target = ${ps(installDir)}`,
+      `$currentPid = ${process.pid}`,
+      `Get-Process -Name 'Nodus Connect' -ErrorAction SilentlyContinue | Where-Object { $_.Id -ne $currentPid } | Stop-Process -Force -ErrorAction SilentlyContinue`,
+      `Wait-Process -Id $currentPid -Timeout 30 -ErrorAction SilentlyContinue`,
+      `Start-Sleep -Milliseconds 500`,
+      `Remove-Item -LiteralPath $target -Recurse -Force -ErrorAction SilentlyContinue`,
+    ];
+    if (options.removeUserData) lines.push(`Remove-Item -LiteralPath ${ps(userData)} -Recurse -Force -ErrorAction SilentlyContinue`);
+    lines.push(`Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue`);
+    fs.writeFileSync(scriptPath, lines.join("\r\n"));
+    const child = spawn("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", scriptPath], { detached: true, stdio: "ignore", windowsHide: true });
+    child.unref();
+    setTimeout(() => app.quit(), 900);
+    return { ok: true };
+  } catch (error) {
+    log(error?.stack || error?.message || String(error));
+    return { ok: false, error: "Não foi possível remover o Nodus Connect. Feche o programa e tente novamente." };
+  }
+}
+
+function programsPath() {
+  return path.join(process.env.APPDATA || path.join(os.homedir(), "AppData", "Roaming"), "Microsoft", "Windows", "Start Menu", "Programs");
+}
+
+function desktopShortcutPath() {
+  return path.join(app.getPath("desktop"), "Nodus Connect.lnk");
 }
 
 function launchInstalledApp() {
@@ -314,6 +467,8 @@ function friendlyError(error) {
     return "Não foi possível ler os arquivos do instalador. Feche esta janela e abra o setup novamente.";
   }
   if (message === "INVALID_INSTALL_TARGET") return "Escolha uma pasta diferente da pasta onde o setup está aberto.";
+  if (message === "INSTALL_CANCELLED") return "Instalação cancelada. Nenhuma alteração incompleta foi mantida.";
+  if (message === "INSUFFICIENT_DISK_SPACE") return "Não há espaço suficiente para instalar o Nodus Connect nesta unidade.";
   if (message.includes("Pasta de instalacao")) return "Não foi possível preparar a pasta de instalação.";
   if (message.startsWith("SERVICE_STOP")) return "Não foi possível interromper o serviço do Nodus. Feche o Nodus e execute o setup novamente.";
   return "Não foi possível concluir a instalação. Feche o Nodus e tente novamente.";

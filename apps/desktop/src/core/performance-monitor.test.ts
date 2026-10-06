@@ -1,5 +1,70 @@
 import { describe, expect, it } from "vitest";
-import { classifyDecoderImplementation, classifyEncoderImplementation, contentMotion, counterDelta, cumulativeMeanMs, diagnosePipeline, encoderFallbackReason, rtpJitterMs, smoothPipelineSample, type PipelineSample } from "./performance-monitor";
+import { classifyDecoderImplementation, classifyEncoderImplementation, contentMotion, counterDelta, cumulativeMeanMs, diagnosePipeline, encoderFallbackReason, InputLatencyDiagnostic, receiverPacketLoss, rtpJitterMs, smoothPipelineSample, type PipelineSample } from "./performance-monitor";
+import { assessQuality } from "./adaptive-quality";
+
+describe("receiver packet loss", () => {
+  it("does not invent 100 percent loss when remote-inbound lacks packetsReceived", () => {
+    const bogusRemoteLoss = 1 / Math.max(1, 1 + 0) * 100;
+    expect(bogusRemoteLoss).toBe(100);
+    const measured = receiverPacketLoss({ receivedAt: 900, packetLossPct: 0 }, 1000)!;
+    const sample = { ...host, availableKbps: 10000, bitrateKbps: 4000, lossPct: measured };
+    expect(assessQuality(sample).stage).toBe(0);
+    expect(assessQuality({ ...sample, lossPct: bogusRemoteLoss }).stage).toBe(4);
+  });
+
+  it("preserves real measured loss and compatibility with existing viewer feedback", () => {
+    expect(receiverPacketLoss({ receivedAt: 900, packetLossPct: 5 }, 1000)).toBe(5);
+    expect(receiverPacketLoss({ receivedAt: 900, packetLossPct: 100, packetLossPctValid: true }, 1000)).toBe(100);
+  });
+
+  it("keeps missing, stale and invalid feedback unavailable instead of reporting zero loss", () => {
+    expect(receiverPacketLoss(undefined, 1000)).toBeNull();
+    expect(receiverPacketLoss({ receivedAt: 0, packetLossPct: 0 }, 3000)).toBeNull();
+    expect(receiverPacketLoss({ receivedAt: 1001, packetLossPct: 0 }, 1000)).toBeNull();
+    expect(receiverPacketLoss({ receivedAt: 900 }, 1000)).toBeNull();
+    expect(receiverPacketLoss({ receivedAt: 900, packetLossPct: 0, packetLossPctValid: false }, 1000)).toBeNull();
+    for (const packetLossPct of [-1, 101, NaN, Infinity]) expect(receiverPacketLoss({ receivedAt: 900, packetLossPct }, 1000)).toBeNull();
+  });
+});
+
+describe("input latency measurement", () => {
+  it("negotiates probes and samples at most once per second", () => {
+    const diagnostic = new InputLatencyDiagnostic(0);
+    expect(diagnostic.probe(0)).toBeUndefined();
+    diagnostic.hostSupported = true;
+    expect(diagnostic.probe(0)).toBe(1);
+    expect(diagnostic.probe(999)).toBeUndefined();
+    expect(diagnostic.probe(1000)).toBe(2);
+  });
+
+  it("measures ACK RTT without pretending it is one-way command or visual latency", () => {
+    const diagnostic = new InputLatencyDiagnostic(0);
+    diagnostic.hostSupported = true;
+    diagnostic.eventToSendMs = 7;
+    const id = diagnostic.probe(10)!;
+    diagnostic.acknowledge(id, 70, { ok: true, positionConfirmed: true, hostProcessingMs: 12, ipcRoundTripMs: 8, mainToWindowsAckMs: 5 });
+    expect(diagnostic.snapshot(1000, 27)).toMatchObject({ bufferedAmount: 27, commandLatencyMs: null, visualFeedbackLatencyMs: null,
+      latest: { commandAckRttMs: 60, transportAckRoundTripMs: 48, eventToSendMs: 7, mainToWindowsAckMs: 5 } });
+    diagnostic.acknowledge(id, 900, { ok: true, hostProcessingMs: 0, ipcRoundTripMs: 0 });
+    expect(diagnostic.latest?.commandAckRttMs).toBe(60);
+  });
+
+  it("bounds pending probes, expires losses and does not turn timeouts into success", () => {
+    const diagnostic = new InputLatencyDiagnostic(0);
+    diagnostic.hostSupported = true;
+    for (let at = 0; at < 4000; at += 1000) diagnostic.probe(at);
+    expect(diagnostic.probe(4000)).toBeUndefined();
+    expect(diagnostic.snapshot(5000, 0)).toMatchObject({ pendingProbes: 3, probeTimeouts: 1, latest: null });
+    expect(diagnostic.probe(5000)).toBe(5);
+  });
+
+  it("records window rates and cumulative coalescing without React updates", () => {
+    const diagnostic = new InputLatencyDiagnostic(0);
+    diagnostic.events = 1000; diagnostic.sent = 60; diagnostic.received = 58; diagnostic.coalesced = 940;
+    expect(diagnostic.snapshot(1000, 18)).toMatchObject({ mouseEventsPerSecond: 1000, sendsPerSecond: 60, receivesPerSecond: 58, coalesced: 940 });
+    expect(diagnostic.snapshot(2000, 0).mouseEventsPerSecond).toBe(0);
+  });
+});
 
 const host: PipelineSample = {
   role: "host", targetFps: 60, captureFps: 60, encodedFps: 60, sentFps: 60, receivedFps: 0,

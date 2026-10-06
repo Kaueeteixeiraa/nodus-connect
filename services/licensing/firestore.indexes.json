@@ -1,0 +1,10 @@
+{
+  "indexes": [
+    { "collectionGroup": "license_licenses", "queryScope": "COLLECTION", "fields": [{ "fieldPath": "status", "order": "ASCENDING" }, { "fieldPath": "expiresAt", "order": "ASCENDING" }] },
+    { "collectionGroup": "license_licenses", "queryScope": "COLLECTION", "fields": [{ "fieldPath": "status", "order": "ASCENDING" }, { "fieldPath": "graceUntil", "order": "ASCENDING" }] },
+    { "collectionGroup": "license_licenses", "queryScope": "COLLECTION", "fields": [{ "fieldPath": "plan", "order": "ASCENDING" }, { "fieldPath": "status", "order": "ASCENDING" }] }
+    ,{ "collectionGroup": "license_devices", "queryScope": "COLLECTION", "fields": [{ "fieldPath": "status", "order": "ASCENDING" }, { "fieldPath": "lastSeenAt", "order": "ASCENDING" }] }
+    ,{ "collectionGroup": "license_subscriptions", "queryScope": "COLLECTION", "fields": [{ "fieldPath": "status", "order": "ASCENDING" }, { "fieldPath": "amountCents", "order": "ASCENDING" }] }
+  ],
+  "fieldOverrides": []
+}

@@ -1,4 +1,6 @@
 import { normalizeNodusId } from "../../../../packages/common/src/nodusId";
+import { relayLicenseHeaders, licenseEnded } from "./licensing";
+import { LicenseError, LICENSE_MESSAGES } from "../../../../packages/licensing/src/index";
 import {
   cloudAcceptSessionRequest,
   cloudCreateSessionRequest,
@@ -16,7 +18,7 @@ import {
 import type { LocalIdentity } from "./identity";
 import type { SessionPermission } from "../../../../packages/protocol/src/index";
 
-export type RemoteResolution = "1366x768" | "1280x720" | "1920x1080" | "1024x768";
+export type RemoteResolution = "native" | `${number}x${number}`;
 
 const DEFAULT_API_BASE = import.meta.env.VITE_NODUS_API ?? "";
 const AUTH_TOKEN_KEY = "nodus.coordination.auth-token.v1";
@@ -63,20 +65,22 @@ export interface SessionRequestRecord {
   preferredFps?: RemoteFrameRate;
 }
 
-export type RemoteFrameRate = 60 | 120;
+export type RemoteFrameRate = 30 | 45 | 60 | 90 | 120;
 
 export interface SignalMessage {
   seq: number;
   sessionId: string;
   from: string;
   to: string;
-  type: "offer" | "answer" | "ice-candidate" | "disconnect";
+  type: "offer" | "answer" | "ice-candidate" | "media-fallback" | "disconnect";
   payload: unknown;
   createdAt: string;
 }
 
 export interface CoordinationDevice {
   nodusId: string;
+  deviceId?: string;
+  deviceFingerprint?: string;
   ownerUid?: string;
   deviceName: string;
   status: "online" | "offline" | "connecting" | "in_session" | "error";
@@ -162,6 +166,8 @@ export async function registerPresence(identity: LocalIdentity): Promise<Coordin
     method: "PUT",
     body: JSON.stringify({
       nodusId: identity.nodusId,
+      deviceId: identity.deviceId,
+      deviceFingerprint: identity.deviceFingerprint,
       deviceName: identity.deviceName,
       status: "online",
       capabilities: ["desktop-shell", "presence", "screen-share", "remote-control", "realtime"],
@@ -174,7 +180,12 @@ export async function heartbeat(identity: LocalIdentity | string): Promise<Coord
   const nodusId = typeof identity === "string" ? identity : identity.nodusId;
   const normalized = normalizeNodusId(nodusId);
   if (!normalized) throw new Error("Nodus ID invalido");
-  return request(`/v1/presence/${normalized}/heartbeat`, { method: "POST" });
+  try {
+    return await request(`/v1/presence/${normalized}/heartbeat`, { method: "POST" });
+  } catch (error) {
+    if (typeof identity !== "string" && error instanceof Error && error.message === formatApiError("DEVICE_NOT_FOUND")) return registerPresence(identity);
+    throw error;
+  }
 }
 
 export async function unregisterPresence(identity: LocalIdentity | string): Promise<CoordinationDevice> {
@@ -199,6 +210,7 @@ export async function lookupDevice(nodusId: string): Promise<CoordinationDevice 
 }
 
 export async function createSessionRequest(input: {
+  sessionId?: string;
   requesterNodusId: string;
   requesterName: string;
   targetNodusId: string;
@@ -235,8 +247,9 @@ export async function acceptSessionRequest(id: string, targetName: string, grant
 }
 
 export async function denySessionRequest(id: string): Promise<SessionRequestRecord> {
-  if (firebaseConfigured()) return cloudDenySessionRequest(id);
-  return requestJson(`/v1/session-requests/${id}/deny`, { method: "POST" });
+  const result = firebaseConfigured() ? await cloudDenySessionRequest(id) : await requestJson<SessionRequestRecord>(`/v1/session-requests/${id}/deny`, { method: "POST" });
+  if (result.sessionId) licenseEnded(result.sessionId);
+  return result;
 }
 
 export async function sendSignal(
@@ -268,13 +281,18 @@ async function requestJson<T>(path: string, init: RequestInit = {}): Promise<T> 
     ...init,
     headers: {
       "content-type": "application/json",
+      ...await relayLicenseHeaders(),
       ...(getCoordinationAuthToken() ? { authorization: `Bearer ${getCoordinationAuthToken()}` } : {}),
       ...init.headers,
     },
   });
 
   const data = await response.json().catch(() => null);
-  if (!response.ok) throw new Error(formatApiError((data as { error?: string } | null)?.error, response.status));
+  if (!response.ok) {
+    const error = (data as { error?: string } | null)?.error;
+    if (error && Object.hasOwn(LICENSE_MESSAGES, error)) throw new LicenseError(error as keyof typeof LICENSE_MESSAGES);
+    throw new Error(formatApiError(error, response.status));
+  }
   return data as T;
 }
 

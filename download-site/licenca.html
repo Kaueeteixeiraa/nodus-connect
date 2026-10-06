@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="description" content="Nodus Business por R$ 200 mensais. Licença empresarial com até 20 dispositivos e 5 sessões simultâneas." />
+    <meta name="theme-color" content="#061124" />
+    <link rel="icon" href="/assets/nodus-logo.png" type="image/png" />
+    <link rel="stylesheet" href="/site.css" />
+    <title>Nodus Connect | Licença</title>
+  </head>
+  <body>
+    <main class="landing license-page">
+      <header class="topbar">
+        <a class="brand" href="/" aria-label="Nodus Connect">
+          <img src="/assets/nodus-logo.png" alt="" />
+          <span>Nodus <b>Connect</b></span>
+        </a>
+        <nav class="topnav" aria-label="Navegação principal">
+          <a class="license-link" href="/">Download</a>
+          <span class="platform">Para Windows</span>
+        </nav>
+      </header>
+      <section class="license" aria-labelledby="license-title">
+        <div class="license-inner">
+          <div class="license-heading">
+            <p class="eyebrow">Licença empresarial</p>
+            <h1 id="license-title">Nodus Business</h1>
+            <p class="intro">Acesso remoto completo para o suporte da sua empresa.</p>
+            <div class="license-features">
+              <div class="feature-tabs" role="tablist" aria-label="Recursos da licença">
+                <button type="button" role="tab" id="tab-support" aria-controls="features-support" aria-selected="true">Suporte</button>
+                <button type="button" role="tab" id="tab-image" aria-controls="features-image" aria-selected="false" tabindex="-1">Imagem</button>
+                <button type="button" role="tab" id="tab-license" aria-controls="features-license" aria-selected="false" tabindex="-1">Licença</button>
+              </div>
+              <div id="features-support" role="tabpanel" aria-labelledby="tab-support">
+                <ul><li>Visualização e controle de mouse e teclado</li><li>Transferência de arquivos e área de transferência</li><li>Áudio remoto e gravação de sessões</li></ul>
+              </div>
+              <div id="features-image" role="tabpanel" aria-labelledby="tab-image" hidden>
+                <ul><li>Ajustes de qualidade e resolução</li><li>Seleção de monitores e modos de visualização</li><li>Dispositivos recentes e favoritos</li></ul>
+              </div>
+              <div id="features-license" role="tabpanel" aria-labelledby="tab-license" hidden>
+                <ul><li>Chave empresarial para vincular seus dispositivos</li><li>Consulta de status e renovação no aplicativo</li><li>Recebimento de acessos sem consumir a cota gratuita</li></ul>
+              </div>
+            </div>
+          </div>
+          <div class="license-offer">
+            <p class="license-price"><span>R$</span> 200 <small>/ mês</small></p>
+            <p class="license-billing">Licença mensal para sua empresa</p>
+            <dl class="license-limits">
+              <div><dt>Acessos na licença ativa</dt><dd>Sem limite</dd></div>
+              <div><dt>Dispositivos vinculados</dt><dd>Até 20</dd></div>
+              <div><dt>Sessões simultâneas</dt><dd>Até 5</dd></div>
+            </dl>
+            <a class="download license-contact" href="https://wa.me/5543998453910?text=Ol%C3%A1%21%20Quero%20adquirir%20a%20licen%C3%A7a%20Nodus%20Business%20por%20R%24%20200%20mensais." target="_blank" rel="noopener noreferrer">
+              <span><b>Entre em contato para adquirir</b><small>Contratação e renovação pelo WhatsApp</small></span>
+              <span aria-hidden="true">↗</span>
+            </a>
+          </div>
+        </div>
+      </section>
+      <footer>
+        <span>Conexão real. Sem limites.</span>
+        <span>Nodus Connect · Versão 1.1.7</span>
+      </footer>
+    </main>
+    <script>
+      const tabs = [...document.querySelectorAll('.feature-tabs [role="tab"]')];
+      function selectTab(tab) {
+        tabs.forEach(item => {
+          const selected = item === tab;
+          item.setAttribute('aria-selected', String(selected));
+          item.tabIndex = selected ? 0 : -1;
+          document.getElementById(item.getAttribute('aria-controls')).hidden = !selected;
+        });
+      }
+      tabs.forEach((tab, index) => {
+        tab.addEventListener('click', () => selectTab(tab));
+        tab.addEventListener('keydown', event => {
+          if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+          event.preventDefault();
+          const next = event.key === 'Home' ? 0 : event.key === 'End' ? tabs.length - 1 : (index + (event.key === 'ArrowRight' ? 1 : -1) + tabs.length) % tabs.length;
+          selectTab(tabs[next]);
+          tabs[next].focus();
+        });
+      });
+    </script>
+  </body>
+</html>

@@ -1,0 +1,31 @@
+{
+  "name": "nodus-license-api",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "main": "dist/server.js",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "esbuild src/server.ts --bundle --platform=node --format=esm --packages=external --outfile=dist/server.js",
+    "start": "node dist/server.js",
+    "bootstrap": "tsx src/bootstrap.ts"
+  },
+  "dependencies": {
+    "firebase-admin": "13.10.0"
+  },
+  "devDependencies": {
+    "@firebase/rules-unit-testing": "^5.0.2",
+    "esbuild": "^0.25.0",
+    "tsx": "^4.20.3"
+  },
+  "overrides": {
+    "google-gax": { "uuid": "11.1.1" },
+    "teeny-request": { "uuid": "11.1.1" },
+    "@grpc/grpc-js": "1.13.6",
+    "gaxios@6.7.1": {
+      "uuid": "11.1.1"
+    }
+  }
+}

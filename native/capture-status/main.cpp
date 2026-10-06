@@ -14,11 +14,13 @@
 #include <iomanip>
 #include <iostream>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <thread>
 
 #include <winrt/base.h>
 #include <winrt/Windows.Foundation.h>
+#include <winrt/Windows.Foundation.Metadata.h>
 #include <winrt/Windows.Graphics.Capture.h>
 #include <winrt/Windows.Graphics.DirectX.h>
 #include <winrt/Windows.Graphics.DirectX.Direct3D11.h>
@@ -38,6 +40,8 @@ struct NativeMediaStatus {
 struct CaptureResult {
   bool attempted = false;
   bool ok = false;
+  bool cursorSuppressionRequested = false;
+  bool cursorSuppressionSettingAccepted = false;
   unsigned int frames = 0;
   int width = 0;
   int height = 0;
@@ -131,6 +135,10 @@ CaptureResult runCaptureTest(const ComPtr<ID3D11Device>& d3dDevice, int duration
     auto framePool = Direct3D11CaptureFramePool::CreateFreeThreaded(
       device, DirectXPixelFormat::B8G8R8A8UIntNormalized, 2, size);
     auto session = framePool.CreateCaptureSession(item);
+    result.cursorSuppressionRequested = true;
+    session.IsCursorCaptureEnabled(false);
+    result.cursorSuppressionSettingAccepted = !session.IsCursorCaptureEnabled();
+    if (!result.cursorSuppressionSettingAccepted) throw std::runtime_error("WGC cursor suppression setting rejected");
     std::atomic<unsigned int> frames = 0;
     std::atomic<long long> firstFrame = 0;
     std::atomic<long long> lastFrame = 0;
@@ -172,17 +180,21 @@ int wmain(int argc, wchar_t** argv) {
   CaptureResult capture;
   if (argc >= 2 && _wcsicmp(argv[1], L"--capture-test") == 0 && status.wgcSupported && device) {
     const int requested = argc >= 3 ? _wtoi(argv[2]) : 1500;
-    capture = runCaptureTest(device, std::clamp(requested, 250, 5000));
+    capture = runCaptureTest(device, std::clamp(requested, 250, 60000));
   }
 
   std::cout << std::fixed << std::setprecision(1)
     << "{\"windowsGraphicsCapture\":" << (status.wgcSupported ? "true" : "false")
+    << ",\"cursorSuppressionSupported\":" << (winrt::Windows::Foundation::Metadata::ApiInformation::IsPropertyPresent(L"Windows.Graphics.Capture.GraphicsCaptureSession", L"IsCursorCaptureEnabled") ? "true" : "false")
     << ",\"d3d11Hardware\":" << (status.d3d11Hardware ? "true" : "false")
     << ",\"hardwareH264\":" << (status.hardwareH264Encoders > 0 ? "true" : "false")
     << ",\"hardwareH264Encoders\":" << status.hardwareH264Encoders
     << ",\"adapter\":\"" << jsonEscape(utf8(status.adapter)) << "\"";
   if (capture.attempted) {
     std::cout << ",\"captureTest\":{\"ok\":" << (capture.ok ? "true" : "false")
+      << ",\"cursorSuppressionRequested\":" << (capture.cursorSuppressionRequested ? "true" : "false")
+      << ",\"cursorSuppressionSettingAccepted\":" << (capture.cursorSuppressionSettingAccepted ? "true" : "false")
+      << ",\"cursorSuppressionVisuallyConfirmed\":false"
       << ",\"frames\":" << capture.frames
       << ",\"fps\":" << capture.fps
       << ",\"width\":" << capture.width

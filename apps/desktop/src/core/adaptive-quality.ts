@@ -1,5 +1,7 @@
 export type AdaptiveStage = 0 | 1 | 2 | 3 | 4;
 
+export const DESKTOP_VIDEO_POLICY = { contentHint: "text", degradationPreference: "maintain-resolution" } as const;
+
 export type QualitySample = {
   rttMs: number;
   jitterMs: number;
@@ -20,20 +22,20 @@ export type QualitySample = {
 
 export const STAGE_LIMITS = [
   { height: 1080, fps: 120 },
-  { height: 900, fps: 90 },
-  { height: 720, fps: 60 },
-  { height: 720, fps: 45 },
-  { height: 720, fps: 30 },
+  { height: 1080, fps: 90 },
+  { height: 1080, fps: 60 },
+  { height: 1080, fps: 45 },
+  { height: 1080, fps: 30 },
 ] as const;
 
 export type QualityPressure = { stage: AdaptiveStage; reason: string; source: "network" | "local" | "none" };
 
 export function assessQuality(sample: QualitySample): QualityPressure {
-  const { rttMs, lossPct, availableKbps } = sample;
+  const { lossPct, availableKbps } = sample;
   const bandwidthBound = sample.activePicture && availableKbps > 0 && sample.bitrateKbps >= availableKbps * 0.7;
-  if (lossPct >= 10 || rttMs >= 320) return { stage: 4, reason: `network loss=${lossPct.toFixed(1)}% rtt=${rttMs}ms`, source: "network" };
-  if (lossPct >= 5 || rttMs >= 200) return { stage: 3, reason: `network loss=${lossPct.toFixed(1)}% rtt=${rttMs}ms`, source: "network" };
-  if (lossPct >= 2 || rttMs >= 120) return { stage: 2, reason: `network loss=${lossPct.toFixed(1)}% rtt=${rttMs}ms`, source: "network" };
+  if (lossPct >= 10) return { stage: 4, reason: `network loss=${lossPct.toFixed(1)}%`, source: "network" };
+  if (lossPct >= 5) return { stage: 3, reason: `network loss=${lossPct.toFixed(1)}%`, source: "network" };
+  if (lossPct >= 2) return { stage: 2, reason: `network loss=${lossPct.toFixed(1)}%`, source: "network" };
   if (sample.activePicture && (sample.limitation === "bandwidth" || (bandwidthBound && availableKbps < 8000))) {
     const stage = availableKbps <= 0 ? 1 : availableKbps < 1500 ? 4 : availableKbps < 2500 ? 3 : availableKbps < 4500 ? 2 : 1;
     return { stage, reason: `bandwidth available=${availableKbps}kbps used=${sample.bitrateKbps}kbps`, source: "network" };
@@ -61,6 +63,12 @@ export function nextBitrate(desired: number, previous?: number): number {
   const capped = previous ? Math.max(previous * 0.8, Math.min(previous * 1.2, desired)) : desired;
   const rounded = Math.round(capped / 50_000) * 50_000;
   return Math.max(300_000, Math.round(previous ? Math.max(previous * 0.8, Math.min(previous * 1.2, rounded)) : rounded));
+}
+
+export function nativeVideoBitrate(height: number, fps: number, stage: AdaptiveStage = 0): number {
+  const base = Math.max(4_000_000, Math.min(18_000_000, Math.round(14_000_000 * (height / 1080) ** 1.5 * (Math.min(60, fps) / 60) ** 0.65)));
+  const floor = height >= 1080 ? 6_000_000 : 3_000_000;
+  return Math.max(floor, Math.round(base * 0.65 ** stage));
 }
 
 export function advanceStage(current: AdaptiveState, recommended: AdaptiveStage, now: number, critical = false): AdaptiveState {

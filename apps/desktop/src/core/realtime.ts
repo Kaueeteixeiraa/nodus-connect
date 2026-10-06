@@ -1,6 +1,7 @@
 import { normalizeNodusId } from "../../../../packages/common/src/nodusId";
 import { apiBase, getCoordinationAuthToken, type SessionRequestRecord, type SignalMessage } from "./api";
 import { firebaseConfigured, subscribeCloudRealtime } from "./firebase";
+import { relayLicenseHeaders, licenseConfigured } from "./licensing";
 
 type RealtimeMessage =
   | { type: "ready"; nodusId: string }
@@ -11,6 +12,7 @@ type RealtimeMessage =
 
 interface RealtimeHandlers {
   onIncomingRequest?(request: SessionRequestRecord): void;
+  onIncomingRequests?(requests: SessionRequestRecord[]): void;
   onRequestUpdate?(request: SessionRequestRecord): void;
   onSignal?(signal: SignalMessage): void;
   onState?(state: "connecting" | "online" | "offline"): void;
@@ -22,6 +24,7 @@ export function connectRealtime(nodusIdInput: string, handlers: RealtimeHandlers
   let closed = false;
   let socket: WebSocket | null = null;
   let retryTimer = 0;
+  let retries = 0;
 
   function open() {
     if (!nodusId || closed) return;
@@ -38,13 +41,24 @@ export function connectRealtime(nodusIdInput: string, handlers: RealtimeHandlers
     if (token) url.searchParams.set("token", token);
 
     socket = new WebSocket(url);
-    socket.onopen = () => handlers.onState?.("online");
-    socket.onmessage = (event) => dispatch(JSON.parse(event.data) as RealtimeMessage);
-    socket.onclose = reconnect;
-    socket.onerror = () => socket?.close();
+    const current = socket;
+    socket.onopen = async () => {
+      if (closed || current !== socket) return;
+      if (!licenseConfigured()) { handlers.onState?.("online"); return; }
+      try { const headers = await relayLicenseHeaders(); if (!closed && current === socket && current.readyState === WebSocket.OPEN) current.send(JSON.stringify({ type: "license-auth", token: headers["x-nodus-license-identity"] })); } catch { current.close(); }
+    };
+    socket.onmessage = (event) => {
+      if (closed || current !== socket) return;
+      let message: RealtimeMessage;
+      try { message = JSON.parse(event.data); } catch { return; }
+      if (message && typeof message === "object") dispatch(message);
+    };
+    socket.onclose = () => { if (current === socket) reconnect(); };
+    socket.onerror = () => current.close();
   }
 
   function dispatch(message: RealtimeMessage) {
+    if (message.type === "ready") { retries = 0; handlers.onState?.("online"); }
     if (message.type === "incoming-request") handlers.onIncomingRequest?.(message.request);
     if (message.type === "session-request-update") handlers.onRequestUpdate?.(message.request);
     if (message.type === "signal") handlers.onSignal?.(message.signal);
@@ -54,7 +68,7 @@ export function connectRealtime(nodusIdInput: string, handlers: RealtimeHandlers
     if (closed) return;
     handlers.onState?.("offline");
     window.clearTimeout(retryTimer);
-    retryTimer = window.setTimeout(open, 2_000);
+    retryTimer = window.setTimeout(open, Math.min(30_000, 2_000 * 2 ** Math.min(retries++, 4)));
   }
 
   open();

@@ -24,7 +24,11 @@
     {
       "from": "native/bin",
       "to": "native",
-      "filter": ["nodus-capture-status.exe", "nodus-service.exe"]
+      "filter": ["nodus-capture-status.exe", "nodus-service.exe", "nodus-wgc-media.exe"]
+    },
+    {
+      "from": "work/gstreamer-runtime-package",
+      "to": "native/gstreamer"
     }
   ],
   "win": {

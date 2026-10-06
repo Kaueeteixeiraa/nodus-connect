@@ -41,6 +41,12 @@
   padding-top: 22px !important;
 }
 
+.apex-app:not(.remote-mode) .desktop-main {
+  width: 100%;
+  max-width: 1200px;
+  margin-inline: auto;
+}
+
 .devices-main > .device-catalog {
   padding: 14px 16px 12px;
 }
@@ -301,7 +307,7 @@
 .device-menu-actions button:hover { background: rgba(30, 117, 175, .22); color: #fff; }
 .device-menu-actions .device-menu-delete { border-bottom: 0; color: #ffb5bd; }
 .device-menu-actions .device-menu-delete:hover { background: #3a202b; }
-.device-menu-actions form { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 6px; padding: 7px; border-bottom: 1px solid rgba(125, 181, 223, .16); }
+.device-menu-actions form { display: grid; grid-template-columns: minmax(0, 1fr); gap: 6px; padding: 7px; border-bottom: 1px solid rgba(125, 181, 223, .16); }
 .device-menu-actions input { min-width: 0; padding: 7px 8px; border: 1px solid rgba(79, 174, 234, .46); border-radius: 4px; background: #0a1a29; color: #e8f6ff; font: inherit; font-size: .72rem; }
 .device-menu-actions form button { padding: 7px 8px; border: 1px solid rgba(79, 174, 234, .54); border-radius: 4px; color: #6bd0ff; }
 
@@ -1969,17 +1975,36 @@ button[type="submit"]:hover,
   background: rgba(4, 9, 17, 0.48);
 }
 
-/* Account entry keeps authentication focused while preserving every supported sign-in path. */
 .access-gate {
   padding: 22px;
+  background: url("./assets/nodus-future-grid.png") center / cover no-repeat, var(--bg);
 }
 
 .access-card {
-  width: min(460px, 100%);
-  gap: 0;
-  padding: 32px;
-  border-radius: 16px;
+  width: min(360px, 100%);
+  gap: 12px;
+  padding: 24px;
+  border-radius: 8px;
   background: rgba(4, 16, 31, 0.94);
+}
+
+:root[data-theme] .access-gate .access-card.access-entry { width:min(380px,100%); padding:16px; gap:12px; border:0; background:transparent; box-shadow:none; backdrop-filter:none; }
+.access-brand { display:grid; justify-items:center; gap:16px; padding-bottom:24px; text-align:center; }
+.access-brand img { width:176px; height:176px; object-fit:contain; filter:var(--nodus-logo-filter, none); }
+.access-card .access-brand h1 { margin:0; color:var(--text); font-size:30px; line-height:1.2; letter-spacing:0; }
+.access-brand h1 span { display:block; margin-top:3px; color:var(--theme-accent, var(--blue-light)); font-size:18px; font-weight:500; }
+@media (max-height:520px) {
+  .access-brand { gap:8px; padding-bottom:12px; }
+  .access-brand img { width:96px; height:96px; }
+  .access-card .access-brand h1 { font-size:24px; }
+}
+
+.access-card .google-signin-logo {
+  width: 22px;
+  height: 22px;
+  flex-shrink: 0;
+  object-fit: cover;
+  border-radius: 50%;
 }
 
 .account-heading h1 {
@@ -3036,7 +3061,7 @@ button[type="submit"]:hover,
 .sidebar-status .status-dot { width: 9px; height: 9px; border-radius: 50%; background: #1ce699; box-shadow: 0 0 12px rgba(28, 230, 153, 0.9); }
 .sidebar-status .status-dot.offline,.sidebar-status .status-dot.error { background: #f07180; box-shadow: none; }
 
-.app-workspace { min-width: 0; min-height: 0; display: grid; grid-template-rows: 88px minmax(0, 1fr); }
+.app-workspace { min-width: 0; min-height: 0; display: grid; grid-template-rows: auto minmax(0, 1fr); }
 .workspace-header {
   position: relative;
   z-index: 50;
@@ -3465,7 +3490,6 @@ button[type="submit"]:hover,
 .remote-mode *, .remote-mode *::before, .remote-mode *::after { animation: none !important; transition: none !important; }
 .remote-header { display:flex; align-items:center; gap:24px; min-width:0; padding:10px 28px; border-bottom:1px solid rgba(45,157,234,.28); background:rgba(2,10,20,.96); }
 .remote-brand { display:flex; align-items:center; gap:12px; min-width:155px; color:#f5fbff; font-size:17px; letter-spacing:.06em; }.remote-brand strong span { display:block; color:#24baff; font-size:13px; letter-spacing:0; }.remote-mark { display:grid; place-items:center; width:46px; height:46px; background:transparent; color:#fff; font-size:26px; font-weight:900; }
-.session-render-monitor { position:fixed; width:1px; height:1px; opacity:0; pointer-events:none; }
 .remote-peer { display:flex; align-items:center; gap:10px; min-width:200px; color:#42bdff; }.remote-peer strong,.remote-peer small { display:block; }.remote-peer strong { color:#f1f7ff; font-size:16px; }.remote-peer small { margin-top:3px; color:#9cc3e7; font-size:12px; }
 .remote-chips { display:flex; align-items:center; gap:10px; min-width:0; flex:1; }.remote-chips span { display:inline-flex; align-items:center; gap:7px; min-height:39px; padding:0 13px; border:1px solid rgba(37,139,211,.35); border-radius:8px; color:#cfe8fb; font-size:12px; font-weight:800; white-space:nowrap; }.remote-chips span svg { color:#21dca0; }.remote-chips span:nth-child(2) svg,.remote-chips span:nth-child(3) svg,.remote-chips span:nth-child(4) svg { color:#27bfff; }
 .remote-top-actions { display:flex; align-items:center; gap:10px; }.remote-icon-button { display:grid; place-items:center; width:43px; height:40px; border:1px solid rgba(50,151,226,.36); border-radius:7px; background:#061526; color:#cbe9ff; cursor:pointer; }.remote-end { min-height:42px; padding:0 17px; border-radius:8px; font-size:12px; }
@@ -3583,7 +3607,7 @@ button[type="submit"]:hover,
 }
 
 .app-workspace {
-  grid-template-rows: 88px minmax(0, 1fr) 36px;
+  grid-template-rows: auto minmax(0, 1fr) 36px;
 }
 
 .workspace-header {
@@ -3604,6 +3628,18 @@ button[type="submit"]:hover,
 .workspace-actions {
   gap: 12px;
 }
+
+.settings-column { display: grid; align-content: start; gap: 12px; min-width: 0; }
+.license-panel { grid-column: 1 / -1; min-width: 0; display: grid; align-content: start; gap: 16px; }
+.license-panel header { display: flex; align-items: center; gap: 10px; }
+.license-panel h2 { margin: 0; font-size: 20px; }
+.license-panel dl { display: grid; grid-template-columns: minmax(100px, 180px) minmax(0, 1fr); gap: 12px; margin: 0; }
+.license-panel dt { color: var(--text-muted); }
+.license-panel dd { margin: 0; overflow-wrap: anywhere; }
+.license-panel progress { display: block; width: 100%; max-width: 420px; height: 8px; margin: 10px 0; accent-color: var(--theme-accent, var(--blue)); }
+.license-panel label { display: grid; gap: 8px; max-width: 480px; }
+.license-panel input { width: 100%; min-width: 0; padding: 12px; border: 1px solid var(--theme-line, var(--line)); border-radius: 6px; color: var(--text); background: var(--theme-control, var(--surface)); }
+.license-panel button { justify-self: start; max-width: 100%; white-space: normal; }
 
 .workspace-search {
   width: min(260px, 24vw);
@@ -3663,6 +3699,24 @@ button[type="submit"]:hover,
   border-radius: 50%;
   background: currentColor;
   box-shadow: 0 0 8px currentColor;
+}
+
+.logout-button {
+  --logout-accent: color-mix(in srgb, #ff4f68 78%, var(--theme-accent, #ff4f68));
+  display: inline-grid;
+  width: 38px;
+  height: 38px;
+  flex: 0 0 auto;
+  place-items: center;
+  border: 1px solid color-mix(in srgb, var(--logout-accent) 52%, transparent);
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--logout-accent) 18%, var(--theme-control, #07182b));
+  color: var(--logout-accent);
+}
+
+.logout-button:hover {
+  border-color: var(--logout-accent);
+  background: color-mix(in srgb, var(--logout-accent) 28%, var(--theme-control, #07182b));
 }
 
 .desktop-main {
@@ -4430,6 +4484,13 @@ button[type="submit"]:hover,
 .settings-group-icon { width: 34px; height: 34px; }
 .settings-group-icon svg, .switch-icon svg { width: 17px; height: 17px; }
 .settings-group-body { padding: 0 12px; }
+.profile-name-field > div { display: flex; gap: 8px; margin-top: 7px; }
+.profile-name-field input { min-width: 0; flex: 1; }
+.profile-name-field button { flex: 0 0 auto; }
+.settings-backup-actions { display:flex; flex-wrap:wrap; gap:8px; padding:12px 0; }
+.settings-backup-actions :is(button,label) { display:inline-flex; align-items:center; gap:6px; min-height:34px; cursor:pointer; }
+.settings-backup-actions input { display:none; }
+.settings-backup-actions span { flex-basis:100%; color:var(--text-soft); font-size:.65rem; }
 
 .settings-group .switch-row {
   display: grid;
@@ -4471,6 +4532,7 @@ button[type="submit"]:hover,
 @media (max-width: 620px) {
   .settings-heading { display: grid; gap: 5px; }
   .settings-tabs { grid-template-columns: 1fr; }
+  .profile-name-field > div { display: grid; }
 }
 
 .device-card > strong {
@@ -4949,7 +5011,7 @@ button[type="submit"]:hover,
   }
 
   .app-workspace {
-    grid-template-rows: 88px minmax(0, 1fr) 36px;
+    grid-template-rows: auto minmax(0, 1fr) 36px;
   }
 
   .dashboard-overview,
@@ -5167,11 +5229,11 @@ button[type="submit"]:hover,
   background-size: cover !important;
 }
 
-:root[data-theme="japan"] .apex-app:not(.remote-mode) { background: linear-gradient(rgba(255, 241, 222, .72), rgba(244, 224, 204, .82)), url("./assets/theme-feudal-japan.png") center / cover no-repeat; }
-:root[data-theme="sakura-night"] .apex-app:not(.remote-mode) { background: linear-gradient(rgba(8, 10, 30, .72), rgba(10, 7, 28, .88)), url("./assets/theme-sakura-night.png") center / cover no-repeat; }
-:root[data-theme="neo-tokyo"] .apex-app:not(.remote-mode) { background: linear-gradient(rgba(5, 5, 25, .78), rgba(5, 5, 25, .88)), url("./assets/theme-neo-tokyo.png") center / cover no-repeat; }
-:root[data-theme="cosmos"] .apex-app:not(.remote-mode) { background: linear-gradient(rgba(6, 4, 24, .76), rgba(6, 4, 24, .9)), url("./assets/theme-cosmos.png") center / cover no-repeat; }
-:root[data-theme="arctic"] .apex-app:not(.remote-mode) { background: linear-gradient(rgba(239, 251, 255, .72), rgba(224, 246, 252, .86)), url("./assets/theme-arctic.png") center / cover no-repeat; }
+:root[data-theme="japan"] :is(.apex-app:not(.remote-mode), .access-gate) { background: linear-gradient(rgba(255, 241, 222, .72), rgba(244, 224, 204, .82)), url("./assets/theme-feudal-japan.png") center / cover no-repeat; }
+:root[data-theme="sakura-night"] :is(.apex-app:not(.remote-mode), .access-gate) { background: linear-gradient(rgba(8, 10, 30, .72), rgba(10, 7, 28, .88)), url("./assets/theme-sakura-night.png") center / cover no-repeat; }
+:root[data-theme="neo-tokyo"] :is(.apex-app:not(.remote-mode), .access-gate) { background: linear-gradient(rgba(5, 5, 25, .78), rgba(5, 5, 25, .88)), url("./assets/theme-neo-tokyo.png") center / cover no-repeat; }
+:root[data-theme="cosmos"] :is(.apex-app:not(.remote-mode), .access-gate) { background: linear-gradient(rgba(6, 4, 24, .76), rgba(6, 4, 24, .9)), url("./assets/theme-cosmos.png") center / cover no-repeat; }
+:root[data-theme="arctic"] :is(.apex-app:not(.remote-mode), .access-gate) { background: linear-gradient(rgba(239, 251, 255, .72), rgba(224, 246, 252, .86)), url("./assets/theme-arctic.png") center / cover no-repeat; }
 
 :root[data-theme="japan"] .workspace-header { background: linear-gradient(90deg, rgba(255, 245, 232, .94), rgba(255, 241, 224, .72), rgba(255, 245, 232, .94)), url("./assets/theme-feudal-japan.png") center / cover no-repeat; }
 :root[data-theme="sakura-night"] .workspace-header { background: linear-gradient(90deg, rgba(9, 10, 31, .92), rgba(12, 10, 34, .66), rgba(9, 10, 31, .92)), url("./assets/theme-sakura-night.png") center / cover no-repeat; }
@@ -5445,6 +5507,45 @@ button[type="submit"]:hover,
   background: var(--gradient) !important;
   color: #fff !important;
   box-shadow: 0 9px 20px color-mix(in srgb, var(--theme-accent) 24%, transparent) !important;
+}
+
+:root[data-theme] .apex-app .recent-device-row > .recent-device-connect {
+  padding: 0 8px;
+  font-size: .7rem;
+}
+:root[data-theme] :is(.apex-app, .access-gate, .device-menu-actions) :is(.recent-device-row > .recent-device-connect, .connection-overview .connect-box > button, .device-access:not(:disabled), .themed-action) {
+  --connect-accent: var(--theme-accent, var(--blue));
+  min-width: 0;
+  gap: 6px;
+  border: 1px solid color-mix(in srgb, var(--connect-accent) 72%, transparent) !important;
+  border-radius: 7px;
+  background: linear-gradient(135deg, color-mix(in srgb, var(--connect-accent) 60%, #000), color-mix(in srgb, var(--connect-accent) 42%, #000)) !important;
+  color: #fff !important;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .14), 0 3px 8px color-mix(in srgb, var(--connect-accent) 12%, transparent) !important;
+  font-weight: 700;
+  white-space: nowrap;
+  cursor: pointer;
+}
+:root[data-theme] :is(.apex-app, .access-gate, .device-menu-actions) :is(.recent-device-row > .recent-device-connect, .connection-overview .connect-box > button, .device-access:not(:disabled), .themed-action) svg { flex-shrink: 0; }
+:root[data-theme] :is(.apex-app, .access-gate, .device-menu-actions) :is(.recent-device-row > .recent-device-connect, .connection-overview .connect-box > button, .device-access:not(:disabled), .themed-action):not(:disabled):hover {
+  border-color: var(--connect-accent) !important;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .2), 0 4px 12px color-mix(in srgb, var(--connect-accent) 24%, transparent) !important;
+}
+:root[data-theme] :is(.apex-app, .access-gate, .device-menu-actions) :is(.recent-device-row > .recent-device-connect, .connection-overview .connect-box > button, .device-access:not(:disabled), .themed-action):focus-visible {
+  outline: 2px solid var(--connect-accent);
+  outline-offset: 3px;
+}
+:root[data-theme] :is(.apex-app, .access-gate, .device-menu-actions) :is(.recent-device-row > .recent-device-connect, .connection-overview .connect-box > button, .device-access:not(:disabled), .themed-action):not(:disabled):active { box-shadow: inset 0 2px 4px rgba(0, 0, 0, .22) !important; }
+:is(.apex-app, .access-gate, .device-menu-actions) .themed-action { display: inline-flex; align-items: center; justify-content: center; min-height: 40px; padding: 8px 12px; font-family: inherit; font-size: .75rem; }
+.access-card > .themed-action { width:100%; min-height:44px; white-space:normal !important; }
+.access-card > .themed-action:hover { transform:none; }
+:root[data-theme] :is(.apex-app, .device-menu-actions) .themed-action:disabled {
+  border-color: var(--theme-line, var(--line)) !important;
+  background: var(--theme-control, var(--surface-light)) !important;
+  color: var(--text-soft) !important;
+  box-shadow: none !important;
+  opacity: .55;
+  cursor: not-allowed;
 }
 
 /* Remaining controls with legacy blue/near-black declarations. */
@@ -5909,6 +6010,10 @@ button[type="submit"]:hover,
   margin: 12px 0 0;
 }
 
+:is(.viewer-session-error, .host-session-feedback)[data-kind="success"] { border-color: #23875c; background: #082a20; color: #9ff2c7; }
+:is(.viewer-session-error, .host-session-feedback)[data-kind="info"] { border-color: #277b9a; background: #082637; color: #ace5ff; }
+:is(.viewer-session-error, .host-session-feedback)[data-kind="warning"] { border-color: #a77623; background: #332609; color: #ffe0a0; }
+
 .host-stop-sharing {
   display: inline-flex;
   align-items: center;
@@ -5992,6 +6097,8 @@ button[type="submit"]:hover,
 .viewer-session-switcher form button:hover:not(:disabled) { background:#0d3658; color:#fff; }
 .viewer-session-switcher form button:disabled { opacity:.38; cursor:not-allowed; }
 .viewer-toolbar { display:flex; align-items:stretch; justify-content:center; min-width:0; gap:6px; }
+.viewer-toolbar button { flex:1 1 0; }
+.viewer-toolbar button span { min-width:0; overflow:hidden; text-overflow:ellipsis; }
 .viewer-toolbar button,.viewer-live-metrics button { display:inline-flex; align-items:center; justify-content:center; gap:7px; min-width:0; min-height:38px; padding:0 11px; border:1px solid rgba(43,145,214,.3); border-radius:7px; background:#061321; color:#bfe2fa; font:inherit; font-size:10px; font-weight:800; white-space:nowrap; cursor:pointer; }
 .viewer-toolbar button:hover,.viewer-toolbar button.active,.viewer-toolbar button[aria-pressed="true"] { border-color:#19aff3; background:#08243c; color:#ecf9ff; }
 .viewer-toolbar button svg,.viewer-live-metrics button svg { flex:0 0 auto; color:#37c7ff; }
@@ -6004,17 +6111,23 @@ button[type="submit"]:hover,
 .viewer-session-body { padding:5px; overflow:hidden; }
 .viewer-stage { position:relative; width:100%; height:100%; }
 .viewer-session-v2 .viewer-stage .remote-viewer-surface { position:relative; width:100%; height:100%; border-radius:7px; }
+.remote-local-cursor { position:absolute; z-index:3; top:0; left:0; pointer-events:none; opacity:0; transform:translate3d(-100px,-100px,0); will-change:transform,opacity; }
+.remote-local-cursor svg { display:block; fill:#fff; stroke:#111; stroke-width:1.5; stroke-linejoin:round; }
 .viewer-session-v2 .remote-viewer-surface:fullscreen { border:0; border-radius:0; background:#000; }
 .viewer-session-v2 .remote-viewer-surface video { width:100%; height:100%; object-fit:contain; background:#000; }
-.viewer-tool-popover { position:absolute; z-index:7; top:8px; left:50%; width:min(440px,calc(100% - 24px)); max-height:min(520px,calc(100% - 20px)); overflow:auto; padding:14px; transform:translateX(-50%); border:1px solid rgba(50,164,237,.55); border-radius:9px; background:rgba(3,16,29,.97); box-shadow:0 18px 55px rgba(0,0,0,.55); backdrop-filter:blur(18px); }
+.viewer-session-v2 .viewer-stage .remote-viewer-surface[data-view-scale="native"] { display:block; overflow:auto; scrollbar-width:thin; }
+.viewer-session-v2 .remote-viewer-surface[data-view-scale="native"] video { display:block; width:var(--remote-native-width, 100%); height:var(--remote-native-height, 100%); max-width:none; max-height:none; margin:0 auto; }
+.viewer-tool-popover { position:fixed; z-index:12; overflow:auto; padding:14px; border:1px solid rgba(50,164,237,.55); border-radius:0 0 8px 8px; background:#03101d; box-shadow:0 8px 20px rgba(0,0,0,.3); scrollbar-width:thin; }
 .viewer-tool-title { display:flex; align-items:center; justify-content:space-between; gap:12px; padding-bottom:10px; border-bottom:1px solid rgba(50,151,219,.2); }
 .viewer-tool-title strong { color:#f0f9ff; font-size:13px; }
 .viewer-tool-title button { display:grid; width:28px; height:28px; place-items:center; border:0; border-radius:5px; background:transparent; color:#9fc5df; cursor:pointer; }
 .viewer-tool-title button:hover { background:rgba(45,164,235,.14); color:#fff; }
-.viewer-tool-actions { display:grid; grid-template-columns:1fr 1fr; gap:8px; padding-top:12px; }
+.viewer-tool-actions { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; padding-top:12px; }
+.viewer-tool-actions button span,.viewer-control-indicator span { min-width:0; overflow-wrap:anywhere; white-space:normal; }
 .viewer-tool-actions button { display:flex; align-items:center; gap:8px; min-height:42px; padding:8px 10px; border:1px solid rgba(48,151,221,.32); border-radius:7px; background:#071a2c; color:#d8efff; font:inherit; font-size:10px; font-weight:800; cursor:pointer; }
 .viewer-tool-actions button:hover { border-color:#2ec2ff; background:#0a2944; }
 .viewer-tool-actions button.active { border-color:#20dca0; background:rgba(13,92,76,.42); color:#f1fffb; }
+.viewer-tool-actions button[aria-pressed="true"] { border-color:#20dca0; background:rgba(13,92,76,.42); color:#f1fffb; }
 .viewer-tool-actions button.active svg { color:#25dfa4; }
 .viewer-tool-actions button:disabled { opacity:.45; cursor:not-allowed; }
 .viewer-tool-actions button svg { color:#3bc8ff; }
@@ -6079,7 +6192,8 @@ button[type="submit"]:hover,
   .viewer-session-switcher > select { display:none; }
   .viewer-topbar { grid-template-columns:minmax(90px,1fr) auto auto; }
   .viewer-live-metrics { display:none; }
-  .viewer-toolbar button:nth-child(3),.viewer-toolbar button:nth-child(6) { display:none; }
+  .viewer-toolbar { justify-content:flex-start; overflow-x:auto; scrollbar-width:thin; }
+  .viewer-toolbar button { flex:0 0 38px; }
   .viewer-tool-fields label { grid-template-columns:1fr; gap:5px; }
   .viewer-session-v2 .remote-footer span:first-child { display:none; }
   .viewer-session-v2 .remote-footer { justify-content:flex-end; }
@@ -6187,7 +6301,12 @@ button[type="submit"]:hover,
   color: var(--theme-accent, var(--blue-light));
   font-weight: 700;
   cursor: pointer;
+  flex-shrink: 0;
 }
+.update-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 6px 12px; }
+.update-row .update-status { grid-column: 1 / -1; height: 2.6em; line-height: 1.3; overflow-wrap: anywhere; }
+.update-row .update-check > span { color: inherit; font-size: inherit; }
+.update-row .update-check .is-checking { animation: rotate 1s linear infinite !important; }
 .update-row .update-check:hover:not(:disabled) { background: color-mix(in srgb, var(--theme-accent, var(--blue)) 12%, var(--theme-control, var(--surface-light))); }
 .update-row .update-check:disabled { opacity: .6; cursor: wait; }
 .update-row .update-check:focus-visible { outline: 2px solid var(--theme-accent, var(--blue)); outline-offset: 2px; }

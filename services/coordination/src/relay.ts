@@ -5,6 +5,8 @@ import { PresenceRegistry, type PresenceInput } from "./registry.js";
 import { SignalingRegistry, type SignalMessage } from "./signaling.js";
 import type { SessionPermission } from "../../../packages/protocol/src/index.js";
 import { AuthRegistry } from "./auth.js";
+import { RelayLicenseGate } from "./license-gate.js";
+import { LicenseError } from "../../../packages/licensing/src/index.js";
 
 type IceServer = { urls: string | string[]; username?: string; credential?: string };
 
@@ -14,6 +16,7 @@ export function createRelayServer() {
   const clients = new Map<string, Set<WebSocket>>();
   const auth = new AuthRegistry();
   const authRequired = process.env.NODUS_AUTH_REQUIRED === "1";
+  const licenses = new RelayLicenseGate();
 
   const server = createServer(async (request, response) => {
     setCors(response);
@@ -21,6 +24,7 @@ export function createRelayServer() {
 
     try {
       const url = new URL(request.url ?? "/", `http://${request.headers.host ?? "localhost"}`);
+      const licenseToken = String(request.headers["x-nodus-license-identity"] ?? "");
 
       if (request.method === "GET" && url.pathname === "/health") {
         return json(response, 200, { ok: true, service: "nodus-coordination", realtime: true });
@@ -51,13 +55,16 @@ export function createRelayServer() {
       }
 
       if (request.method === "PUT" && url.pathname === "/v1/presence") {
-        const record = registry.upsert((await readJson(request)) as PresenceInput);
+        const input = await readJson(request) as PresenceInput;
+        await licenses.authorize(licenseToken, { kind: "identity", nodusId: normalizeWsId(input.nodusId) });
+        const record = registry.upsert(input);
         notify(clients, record.nodusId, "presence", { device: record });
         return json(response, 200, record);
       }
 
       const heartbeatMatch = url.pathname.match(/^\/v1\/presence\/(\d{9})\/heartbeat$/);
       if (request.method === "POST" && heartbeatMatch) {
+        await licenses.authorize(licenseToken, { kind: "identity", nodusId: heartbeatMatch[1] });
         const record = registry.heartbeat(heartbeatMatch[1]);
         notify(clients, record.nodusId, "presence", { device: record });
         return json(response, 200, record);
@@ -65,6 +72,7 @@ export function createRelayServer() {
 
       const offlineMatch = url.pathname.match(/^\/v1\/presence\/(\d{9})$/);
       if (request.method === "DELETE" && offlineMatch) {
+        await licenses.authorize(licenseToken, { kind: "identity", nodusId: offlineMatch[1] });
         const record = registry.offline(offlineMatch[1]);
         notify(clients, record.nodusId, "presence", { device: record });
         return json(response, 200, record);
@@ -81,7 +89,9 @@ export function createRelayServer() {
       }
 
       if (request.method === "POST" && url.pathname === "/v1/session-requests") {
-        const item = signaling.createRequest((await readJson(request)) as Parameters<SignalingRegistry["createRequest"]>[0]);
+        const input = await readJson(request) as Parameters<SignalingRegistry["createRequest"]>[0];
+        await licenses.authorize(licenseToken, { kind: "request", sessionId: input.sessionId, from: normalizeWsId(input.requesterNodusId), to: normalizeWsId(input.targetNodusId) });
+        const item = signaling.createRequest(input);
         notify(clients, item.targetNodusId, "incoming-request", { request: item });
         notify(clients, item.requesterNodusId, "session-request-update", { request: item });
         return json(response, 201, item);
@@ -89,17 +99,22 @@ export function createRelayServer() {
 
       const pendingMatch = url.pathname.match(/^\/v1\/session-requests\/target\/(\d{9})$/);
       if (request.method === "GET" && pendingMatch) {
+        await licenses.authorize(licenseToken, { kind: "identity", nodusId: pendingMatch[1] });
         return json(response, 200, signaling.listPending(pendingMatch[1]));
       }
 
       const requestMatch = url.pathname.match(/^\/v1\/session-requests\/([0-9a-f-]+)$/);
       if (request.method === "GET" && requestMatch) {
-        return json(response, 200, signaling.getRequest(requestMatch[1]));
+        const item = signaling.getRequest(requestMatch[1]);
+        await licenses.authorize(licenseToken, { kind: "identity", nodusId: item.requesterNodusId });
+        return json(response, 200, item);
       }
 
       const acceptMatch = url.pathname.match(/^\/v1\/session-requests\/([0-9a-f-]+)\/accept$/);
       if (request.method === "POST" && acceptMatch) {
         const body = (await readJson(request)) as { targetName?: string; grantedPermissions?: SessionPermission[] };
+        const pending = signaling.getRequest(acceptMatch[1]);
+        await licenses.authorize(licenseToken, { kind: "accept", sessionId: pending.sessionId, from: pending.targetNodusId, to: pending.requesterNodusId });
         const item = signaling.acceptRequest(acceptMatch[1], body.targetName ?? "", body.grantedPermissions);
         notify(clients, item.requesterNodusId, "session-request-update", { request: item });
         notify(clients, item.targetNodusId, "session-request-update", { request: item });
@@ -108,6 +123,7 @@ export function createRelayServer() {
 
       const denyMatch = url.pathname.match(/^\/v1\/session-requests\/([0-9a-f-]+)\/deny$/);
       if (request.method === "POST" && denyMatch) {
+        await licenses.authorize(licenseToken, { kind: "identity", nodusId: signaling.getRequest(denyMatch[1]).targetNodusId });
         const item = signaling.denyRequest(denyMatch[1]);
         notify(clients, item.requesterNodusId, "session-request-update", { request: item });
         notify(clients, item.targetNodusId, "session-request-update", { request: item });
@@ -117,24 +133,27 @@ export function createRelayServer() {
       const signalMatch = url.pathname.match(/^\/v1\/sessions\/([0-9a-f-]+)\/signals$/);
       if (signalMatch && request.method === "POST") {
         const body = (await readJson(request)) as Omit<SignalMessage, "seq" | "createdAt" | "sessionId">;
+        await licenses.authorize(licenseToken, { kind: "signal", sessionId: signalMatch[1], from: normalizeWsId(body.from), to: normalizeWsId(body.to) });
         const item = signaling.addSignal({ ...body, sessionId: signalMatch[1] });
         notify(clients, item.to, "signal", { signal: item });
         return json(response, 201, item);
       }
 
       if (signalMatch && request.method === "GET") {
+        if (await licenses.enforced()) { const self = normalizeWsId(url.searchParams.get("to")); await licenses.authorize(licenseToken, { kind: "signal", sessionId: signalMatch[1], from: self, to: signaling.sessionPeer(signalMatch[1], self) }); }
         return json(response, 200, signaling.getSignals(signalMatch[1], url.searchParams.get("to") ?? "", url.searchParams.get("after") ?? "0"));
       }
 
       return json(response, 404, { error: "NOT_FOUND" });
     } catch (error) {
+      if (error instanceof LicenseError) return json(response, error.code === "UNAUTHORIZED" ? 401 : error.code === "SERVER_UNAVAILABLE" ? 503 : 403, { error: error.code });
       const message = error instanceof Error ? error.message : "INTERNAL_ERROR";
       const status = message === "AUTH_REQUIRED" ? 401 : message === "AUTH_RATE_LIMITED" ? 429 : message.startsWith("INVALID") || message.startsWith("AUTH_INVALID") ? 400 : message === "AUTH_EMAIL_EXISTS" ? 409 : message.endsWith("_NOT_FOUND") ? 404 : 500;
       return json(response, status, { error: message });
     }
   });
 
-  const wss = new WebSocketServer({ noServer: true });
+  const wss = new WebSocketServer({ noServer: true, maxPayload: 16_384 });
   server.on("upgrade", (request, socket, head) => {
     try {
       const url = new URL(request.url ?? "/", `http://${request.headers.host ?? "localhost"}`);
@@ -149,14 +168,27 @@ export function createRelayServer() {
     }
   });
 
-  wss.on("connection", (socket: WebSocket, _request: IncomingMessage, nodusId: string) => {
-    const bucket = clients.get(nodusId) ?? new Set<WebSocket>();
-    bucket.add(socket);
-    clients.set(nodusId, bucket);
-    sendWs(socket, "ready", { nodusId });
+  wss.on("connection", async (socket: WebSocket, _request: IncomingMessage, nodusId: string) => {
+    let bucket: Set<WebSocket> | undefined;
+    const register = () => { if (socket.readyState !== WebSocket.OPEN) return; bucket = clients.get(nodusId) ?? new Set<WebSocket>(); bucket.add(socket); clients.set(nodusId, bucket); sendWs(socket, "ready", { nodusId }); };
+    let token = "";
+    let registered = false;
+    const watchdog = setTimeout(() => { if (!registered) socket.close(1008, "Authentication required"); }, 8000);
+    socket.once("message", async data => {
+      try {
+        const message = JSON.parse(data.toString());
+        if (message.type !== "license-auth" || typeof message.token !== "string") throw new Error();
+        token = message.token;
+        await licenses.authorize(token, { kind: "identity", nodusId });
+        if (!registered) { registered = true; clearTimeout(watchdog); register(); }
+      } catch { socket.close(1008, "Authentication failed"); }
+    });
+    try { if (!await licenses.enforced()) { registered = true; clearTimeout(watchdog); register(); } } catch { socket.close(1013, "Licensing unavailable"); }
+    const validation = setInterval(() => { licenses.authorize(token, { kind: "identity", nodusId }).catch(() => socket.close(1008, "Authentication required")); }, 30_000); validation.unref();
     socket.on("close", () => {
-      bucket.delete(socket);
-      if (bucket.size === 0) clients.delete(nodusId);
+      clearTimeout(watchdog); clearInterval(validation);
+      bucket?.delete(socket);
+      if (bucket?.size === 0 && clients.get(nodusId) === bucket) clients.delete(nodusId);
     });
   });
 
@@ -248,7 +280,7 @@ function splitUrls(value?: string): string[] {
 function setCors(response: ServerResponse) {
   response.setHeader("access-control-allow-origin", "*");
   response.setHeader("access-control-allow-methods", "GET,PUT,POST,OPTIONS");
-  response.setHeader("access-control-allow-headers", "content-type, authorization");
+  response.setHeader("access-control-allow-headers", "content-type, authorization, x-nodus-license-identity");
 }
 
 function send(response: ServerResponse, status: number, body = "") {
