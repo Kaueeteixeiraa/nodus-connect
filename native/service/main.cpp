@@ -138,12 +138,22 @@ int runInputHelper() {
   _setmode(_fileno(stdin), _O_BINARY);
   InputPacket packet{};
   bool pressedKeys[256]{};
+  bool extendedKeys[256]{};
+  bool pressedButtons[3]{};
   while (std::fread(&packet, sizeof(packet), 1, stdin) == 1) {
+    if (packet.type == 7) {
+      POINT point{};
+      const bool ok = GetCursorPos(&point) != FALSE;
+      std::printf("P %d %d %ld %ld\n", packet.delta, ok ? 1 : 0, point.x, point.y);
+      std::fflush(stdout);
+      continue;
+    }
     if (packet.type == 1) {
       SetCursorPos(packet.x, packet.y);
     } else if (packet.type == 2 || packet.type == 3) {
       SetCursorPos(packet.x, packet.y);
       sendMouseButton(packet.button, packet.type == 2);
+      if (packet.button < 3) pressedButtons[packet.button] = packet.type == 2;
     } else if (packet.type == 4) {
       INPUT input{};
       input.type = INPUT_MOUSE;
@@ -158,6 +168,7 @@ int runInputHelper() {
       if (packet.type == 6) input.ki.dwFlags |= KEYEVENTF_KEYUP;
       SendInput(1, &input, sizeof(input));
       pressedKeys[packet.keyCode] = packet.type == 5;
+      extendedKeys[packet.keyCode] = (packet.button & 1) != 0;
     }
   }
   for (WORD key = 1; key < 256; ++key) {
@@ -165,8 +176,11 @@ int runInputHelper() {
     INPUT input{};
     input.type = INPUT_KEYBOARD;
     input.ki.wVk = key;
-    input.ki.dwFlags = KEYEVENTF_KEYUP;
+    input.ki.dwFlags = KEYEVENTF_KEYUP | (extendedKeys[key] ? KEYEVENTF_EXTENDEDKEY : 0);
     SendInput(1, &input, sizeof(input));
+  }
+  for (std::uint8_t button = 0; button < 3; ++button) {
+    if (pressedButtons[button]) sendMouseButton(button, false);
   }
   return 0;
 }
@@ -240,18 +254,114 @@ bool restoreSystemCursors(bool dryRun) {
   return true;
 }
 
+class HostOnlyPointer {
+  HWND window = nullptr;
+  HCURSOR arrow = nullptr;
+  POINT hotspot{}, previous{};
+  bool attempted = false, visible = false;
+
+  static LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
+    if (message == WM_NCCREATE) SetWindowLongPtrW(hwnd, GWLP_USERDATA,
+      reinterpret_cast<LONG_PTR>(reinterpret_cast<CREATESTRUCTW*>(lparam)->lpCreateParams));
+    auto* pointer = reinterpret_cast<HostOnlyPointer*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+    if (message == WM_NCHITTEST) return HTTRANSPARENT;
+    if (message == WM_MOUSEACTIVATE) return MA_NOACTIVATE;
+    if (message == WM_ERASEBKGND) return 1;
+    if (message == WM_PAINT && pointer) {
+      PAINTSTRUCT paint;
+      HDC dc = BeginPaint(hwnd, &paint);
+      RECT rect;
+      GetClientRect(hwnd, &rect);
+      SetDCBrushColor(dc, RGB(255, 0, 255));
+      FillRect(dc, &rect, static_cast<HBRUSH>(GetStockObject(DC_BRUSH)));
+      DrawIconEx(dc, 0, 0, pointer->arrow, GetSystemMetrics(SM_CXCURSOR),
+        GetSystemMetrics(SM_CYCURSOR), 0, nullptr, DI_NORMAL);
+      EndPaint(hwnd, &paint);
+      return 0;
+    }
+    return DefWindowProcW(hwnd, message, wparam, lparam);
+  }
+
+  bool start() {
+    if (attempted) return window != nullptr;
+    attempted = true;
+    // Older Windows treats EXCLUDEFROMCAPTURE as a black rectangle, not exclusion.
+    using VersionFunction = LONG (WINAPI*)(OSVERSIONINFOW*);
+    auto versionFunction = reinterpret_cast<VersionFunction>(GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "RtlGetVersion"));
+    OSVERSIONINFOW version{};
+    version.dwOSVersionInfoSize = sizeof(version);
+    if (!versionFunction || versionFunction(&version) || version.dwBuildNumber < 19041) {
+      std::puts("[CURSOR] Host-only pointer unavailable: capture exclusion requires Windows build 19041+");
+      return false;
+    }
+    arrow = static_cast<HCURSOR>(CopyIcon(LoadCursorW(nullptr, MAKEINTRESOURCEW(OCR_NORMAL))));
+    if (!arrow) return false;
+    ICONINFO icon{};
+    if (GetIconInfo(arrow, &icon)) {
+      hotspot = { static_cast<LONG>(icon.xHotspot), static_cast<LONG>(icon.yHotspot) };
+      if (icon.hbmMask) DeleteObject(icon.hbmMask);
+      if (icon.hbmColor) DeleteObject(icon.hbmColor);
+    }
+    WNDCLASSW cls{};
+    cls.lpfnWndProc = windowProc;
+    cls.hInstance = GetModuleHandleW(nullptr);
+    cls.lpszClassName = L"NodusHostOnlyPointer";
+    if (!RegisterClassW(&cls)) return false;
+    window = CreateWindowExW(WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE | WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
+      cls.lpszClassName, L"", WS_POPUP, 0, 0, GetSystemMetrics(SM_CXCURSOR), GetSystemMetrics(SM_CYCURSOR),
+      nullptr, nullptr, cls.hInstance, this);
+    DWORD affinity = 0;
+    if (!window || !SetLayeredWindowAttributes(window, RGB(255, 0, 255), 255, LWA_COLORKEY)
+      || !SetWindowDisplayAffinity(window, WDA_EXCLUDEFROMCAPTURE)
+      || !GetWindowDisplayAffinity(window, &affinity) || affinity != WDA_EXCLUDEFROMCAPTURE) {
+      std::printf("[CURSOR] Host-only pointer unavailable: capture exclusion failed, Windows error %lu\n", GetLastError());
+      if (window) DestroyWindow(window);
+      window = nullptr;
+      return false;
+    }
+    std::puts("[CURSOR] Host-only pointer ready: capture exclusion affinity=17 (visual validation required)");
+    std::fflush(stdout);
+    return true;
+  }
+public:
+  ~HostOnlyPointer() {
+    if (window) DestroyWindow(window);
+    if (arrow) DestroyCursor(arrow);
+  }
+  bool prepare() { return start(); }
+  void hide() {
+    if (window && visible) ShowWindow(window, SW_HIDE);
+    visible = false;
+  }
+  void update() {
+    if (!start()) return;
+    POINT point;
+    if (!GetCursorPos(&point) || (visible && point.x == previous.x && point.y == previous.y)) return;
+    SetWindowPos(window, HWND_TOPMOST, point.x - hotspot.x, point.y - hotspot.y, 0, 0,
+      SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+    if (!visible) { InvalidateRect(window, nullptr, FALSE); UpdateWindow(window); }
+    previous = point;
+    visible = true;
+  }
+};
+
 class RemoteCursorVisibility {
   bool hidden = false;
+  bool remoteOwner = false;
   bool dryRun;
   HANDLE armed;
+  HostOnlyPointer pointer;
 public:
   RemoteCursorVisibility(bool dryRun, HANDLE armed) : dryRun(dryRun), armed(armed) {}
   ~RemoteCursorVisibility() { restore(); }
 
   bool isHidden() const { return hidden; }
+  bool isRemoteOwner() const { return remoteOwner; }
 
   bool hide() {
+    remoteOwner = true;
     if (hidden) return true;
+    if (!dryRun) pointer.prepare();
     std::puts("[CURSOR] Hiding local host cursor");
     // Arm recovery before the first desktop-wide change; never write the cursor scheme.
     if (!SetEvent(armed)) {
@@ -277,16 +387,25 @@ public:
     }
     std::puts(dryRun ? "[CURSOR] Local host cursor hidden (dry run)" : "[CURSOR] Local host cursor hidden");
     std::fflush(stdout);
+    update();
     return true;
   }
 
   bool restore() {
+    pointer.hide();
     if (!hidden) return true;
     if (!restoreSystemCursors(dryRun)) return false;
     hidden = false;
+    remoteOwner = false;
     ResetEvent(armed);
     return true;
   }
+  bool yieldToHost() {
+    remoteOwner = false;
+    if (!dryRun && pointer.prepare()) { pointer.update(); return true; }
+    return restore();
+  }
+  void update() { if (hidden && !dryRun) pointer.update(); }
 };
 
 class PhysicalMouseActivity {
@@ -436,11 +555,12 @@ int runCursorVisibilityHelper(DWORD parentPid, bool dryRun) {
         if (wake != WAIT_TIMEOUT && wake != WAIT_OBJECT_0 + 2) break;
         // Raw device input distinguishes the host's mouse from Nodus SetCursorPos/SendInput.
         const bool localActivity = physicalMouse.take();
-        if (!dryRun && localActivity && cursor.isHidden()) {
+        if (!dryRun && localActivity && cursor.isRemoteOwner()) {
           std::puts("[CURSOR] Physical host mouse active");
           std::fflush(stdout);
-          if (!cursor.restore()) break;
+          if (!cursor.yieldToHost()) break;
         }
+        cursor.update();
         DWORD available = 0, count = 0;
         if (!PeekNamedPipe(input, nullptr, 0, nullptr, &available, nullptr)) break;
         if (!available) continue;
@@ -590,6 +710,10 @@ void WINAPI serviceMain(DWORD argc, LPWSTR* argv) {
 }
 
 int wmain(int argc, wchar_t** argv) {
+  if (argc >= 2 && _wcsicmp(argv[1], L"--cursor-overlay-probe") == 0) {
+    HostOnlyPointer pointer;
+    return pointer.prepare() ? 0 : 1;
+  }
   if (argc >= 2 && _wcsicmp(argv[1], L"--send-sas") == 0) return requestServiceSas();
   if (argc >= 4 && _wcsicmp(argv[1], L"--windows-key-helper") == 0)
     return runWindowsKeyHelper(std::wcstoul(argv[2], nullptr, 10), reinterpret_cast<HWND>(std::wcstoull(argv[3], nullptr, 10)));

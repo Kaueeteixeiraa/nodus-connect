@@ -55,6 +55,7 @@ import {
   Settings2,
   ShieldCheck,
   Star,
+  UserRound,
   Volume2,
   VolumeX,
   Wifi,
@@ -99,6 +100,10 @@ import {
   signOutFirebaseAccount,
   syncCloudUser,
   subscribeCloudDevicePresence,
+  subscribeCloudAccessBlock,
+  subscribeCloudSignals,
+  getCloudUsageDiagnostics,
+  PENDING_REQUEST_TTL_MS,
 } from "./core/firebase";
 import { connectRealtime } from "./core/realtime";
 import {
@@ -132,9 +137,13 @@ import {
 import { createFileCryptoSession, decryptFileChunk, deriveFileCryptoKey, encryptFileChunk, type FileCryptoSession } from "./core/file-crypto";
 import { CapturePool, type CaptureLease, type PooledCapture } from "./core/capture-pool";
 import nodusLogo from "./assets/nodus-logo.png?inline";
+import googleLogo from "./assets/google-logo.png";
+import LicensePanel from "./LicensePanel";
+import { checkLicense, licenseConfigured, licenseEstablished, licenseEnded, licenseFeedback, reserveLicense } from "./core/licensing";
+import { LicenseError } from "../../../packages/licensing/src/index";
 import nodusIcon from "./assets/nodus-logo-icon.png?inline";
-import { advanceStage, assessQuality, nativeVideoBitrate, nextBitrate, STAGE_LIMITS, type AdaptiveStage, type AdaptiveState, type QualitySample } from "./core/adaptive-quality";
-import { classifyDecoderImplementation, contentMotion, counterDelta, cumulativeMeanMs, diagnosePipeline, encoderFallbackReason, rtpJitterMs, smoothPipelineSample, type EncoderKind, type EncoderVendor, type PipelineBottleneck, type PipelineSample } from "./core/performance-monitor";
+import { advanceStage, assessQuality, DESKTOP_VIDEO_POLICY, nativeVideoBitrate, nextBitrate, STAGE_LIMITS, type AdaptiveStage, type AdaptiveState, type QualitySample } from "./core/adaptive-quality";
+import { classifyDecoderImplementation, contentMotion, counterDelta, cumulativeMeanMs, diagnosePipeline, encoderFallbackReason, InputLatencyDiagnostic, receiverPacketLoss, rtpJitterMs, smoothPipelineSample, type InputDiagnosticAck, type EncoderKind, type EncoderVendor, type PipelineBottleneck, type PipelineSample } from "./core/performance-monitor";
 
 const releaseNotes = [
   { version: "0.4.25", changes: ["Diagnóstico ICE detalhado e seleção correta da rota de conexão."] },
@@ -150,7 +159,7 @@ const releaseNotes = [
 const Standby3D = lazy(() => import("./Standby3D"));
 
 type ServiceState = "connecting" | "online" | "offline" | "error";
-type SettingsSection = "general" | "access" | "connection" | "resolution" | "appearance";
+type SettingsSection = "general" | "access" | "connection" | "appearance" | "license";
 type View = "connection" | "devices" | "recents" | "favorites" | "files" | "settings";
 const themeOptions: { id: LocalSettings["theme"]; label: string; description: string }[] = [
   { id: "dark", label: "Padrão", description: "Visual Nodus atual" },
@@ -231,7 +240,7 @@ type SessionMetrics = {
   encoderVendor: EncoderVendor;
 };
 type RemoteInputMessage =
-  | { type: "mouseMove"; x: number; y: number }
+  | { type: "mouseMove"; x: number; y: number; probeId?: number }
   | { type: "mouseDown" | "mouseUp"; button: number; x: number; y: number }
   | { type: "wheel"; delta: number }
   | ({ type: "keyDown" | "keyUp" } & RemoteKeyInput)
@@ -245,7 +254,9 @@ type RemoteInputMessage =
   | { type: "input-lock-status"; mouse: boolean; keyboard: boolean; ok: boolean; error?: string }
   | { type: "host-mouse-activity" }
   | { type: "latency-ping" | "latency-pong"; sentAt: number }
-  | { type: "receiver-stats"; jitterBufferMs: number; jitterBufferMsValid: boolean; jitterBufferTargetMs: number | null; jitterBufferMinimumMs: number | null; renderFps: number; droppedFrames: number; freezes: number; packetLossPct?: number }
+  | { type: "input-diagnostic-capability" }
+  | ({ type: "input-diagnostic-ack"; id: number } & InputDiagnosticAck)
+  | { type: "receiver-stats"; jitterBufferMs: number; jitterBufferMsValid: boolean; jitterBufferTargetMs: number | null; jitterBufferMinimumMs: number | null; renderFps: number; droppedFrames: number; freezes: number; packetLossPct?: number; packetLossPctValid?: boolean }
   | { type: "sender-stats"; captureFps: number; encodedFps: number; sentFps: number; encodeMs: number; limitation: string; encoder: string; fallbackReason?: string; appliedFps?: number; appliedWidth?: number; appliedHeight?: number; appliedBitrateKbps?: number; profileChangeCount?: number; timeSinceLastProfileChangeMs?: number | null; adaptationReason?: string; quality?: SessionMetrics["quality"] }
   | { type: "admin-request" }
   | { type: "secure-attention" }
@@ -327,6 +338,8 @@ export function App({ initialIdentity }: { initialIdentity: LocalIdentity }) {
   const [, setLocaleRevision] = useState(0);
   const [feedback, setFeedback] = useState("");
   const [activeView, setActiveView] = useState<View>("connection");
+  const [workspaceWindows, setWorkspaceWindows] = useState<Array<{ window: Window; container: HTMLElement; view: View }>>([]);
+  const workspaceWindowsRef = useRef(new Set<Window>());
   const [settingsSection, setSettingsSection] = useState<SettingsSection>("general");
   const [recents, setRecents] = useState<RecentDevice[]>(() => loadRecents());
   const [hiddenCatalogDevices, setHiddenCatalogDevices] = useState<string[]>(() => loadHiddenCatalogDevices());
@@ -337,7 +350,7 @@ export function App({ initialIdentity }: { initialIdentity: LocalIdentity }) {
   const [currentUser, setCurrentUser] = useState<LocalUser | null>(() => loadUser());
   const [folders, setFolders] = useState<DeviceFolder[]>(() => loadFolders());
   const [accessLog, setAccessLog] = useState<AccessLogEntry[]>(() => loadAccessLog());
-  const [appVersion, setAppVersion] = useState("0.0.1");
+  const [appVersion, setAppVersion] = useState("1.1.6");
   const [nativeGoogleClient, setNativeGoogleClient] = useState(false);
   const [gpuDiagnostics, setGpuDiagnostics] = useState<GpuDiagnostics | null>(null);
   const [serverIceServers, setServerIceServers] = useState<RTCIceServer[]>([]);
@@ -375,11 +388,11 @@ export function App({ initialIdentity }: { initialIdentity: LocalIdentity }) {
   const fileCryptoRef = useRef(new Map<string, { local: FileCryptoSession; remote: Promise<CryptoKey> | null }>());
   const fileCryptoSessionsRef = useRef(new Map<string, Promise<FileCryptoSession>>());
   const incomingFilesRef = useRef(new Map<string, IncomingFileTransfer>());
-  const pendingPointerRef = useRef<{ sessionId: string; x: number; y: number } | null>(null);
+  const pendingPointerRef = useRef<{ sessionId: string; x: number; y: number; eventAt: number } | null>(null);
   const pointerFrameRef = useRef(0);
   const pressedPointerButtonsRef = useRef(new Set<number>());
   const lastPointerPointRef = useRef<{ x: number; y: number } | null>(null);
-  const signalTimersRef = useRef(new Map<string, number>());
+  const signalConnectionsRef = useRef(new Map<string, { close(): void }>());
   const lastSignalSeqRef = useRef(new Map<string, number>());
   const pendingCandidatesRef = useRef(new Map<string, RTCIceCandidateInit[]>());
   const reconnectTimersRef = useRef(new Map<string, number>());
@@ -392,6 +405,8 @@ export function App({ initialIdentity }: { initialIdentity: LocalIdentity }) {
   const iceRestartHistoryRef = useRef(new Map<string, { count: number; at: number; reason: string }>());
   const hostInputRateRef = useRef(new Map<string, { at: number; count: number }>());
   const controlLatencyRef = useRef(new Map<string, number>());
+  const inputDiagnosticsRef = useRef(new Map<string, InputLatencyDiagnostic>());
+  const inputDiagnosticEnabledRef = useRef(false);
   const receiverFeedbackRef = useRef(new Map<string, Extract<RemoteInputMessage, { type: "receiver-stats" }> & { receivedAt: number }>());
   const senderFeedbackRef = useRef(new Map<string, Extract<RemoteInputMessage, { type: "sender-stats" }>>());
   const gpuDiagnosticsRef = useRef<GpuDiagnostics | null>(null);
@@ -463,14 +478,41 @@ export function App({ initialIdentity }: { initialIdentity: LocalIdentity }) {
     if (serviceState === "offline") return "Offline";
     return "Conexao ativa";
   }, [serviceState]);
-  const pageTitle = activeView === "favorites" ? "Favoritos" : activeView === "settings" ? "Configurações" : activeView === "devices" ? "Dispositivos" : "Bem-vindo de volta";
-  const pageSubtitle = activeView === "favorites"
-    ? "Seus dispositivos mais importantes em um só lugar."
-    : activeView === "settings"
-      ? "Personalize o funcionamento do Nodus Connect."
-      : activeView === "devices"
-        ? "Gerencie todos os seus dispositivos em um só lugar."
-        : "Acesso remoto simples, rápido e seguro.";
+  useEffect(() => window.nodusDesktop?.onOpenWorkspace?.(() => {
+    if (!currentUser || !identity.deviceNameConfirmed) return;
+    const child = window.open("about:blank", "", "width=1180,height=760");
+    if (!child) return;
+    child.name = `nodus-workspace-${crypto.randomUUID()}`;
+    child.document.title = "Nodus Connect";
+    document.head.querySelectorAll('style, link[rel="stylesheet"]').forEach((node) => {
+      const clone = node.cloneNode(true) as HTMLElement;
+      if (node instanceof HTMLLinkElement) clone.setAttribute("href", node.href);
+      child.document.head.appendChild(clone);
+    });
+    const container = child.document.createElement("div");
+    container.id = "root";
+    child.document.body.appendChild(container);
+    workspaceWindowsRef.current.add(child);
+    child.addEventListener("beforeunload", () => {
+      workspaceWindowsRef.current.delete(child);
+      setWorkspaceWindows((current) => current.filter((item) => item.window !== child));
+    }, { once: true });
+    setWorkspaceWindows((current) => [...current, { window: child, container, view: "connection" }]);
+  }), [currentUser, identity.deviceNameConfirmed]);
+
+  useEffect(() => {
+    const cleanups = workspaceWindows.map(({ window: child }) => {
+      child.document.documentElement.dataset.theme = activeTheme;
+      child.document.documentElement.dataset.mode = settings.lightweightMode ? "simple" : "full";
+      return applyLanguage(settings.language, child.document);
+    });
+    return () => cleanups.forEach((cleanup) => cleanup());
+  }, [workspaceWindows, activeTheme, settings.language, settings.lightweightMode]);
+
+  useEffect(() => () => { workspaceWindowsRef.current.forEach((child) => child.close()); workspaceWindowsRef.current.clear(); }, []);
+  useEffect(() => {
+    if (!currentUser) workspaceWindowsRef.current.forEach((child) => child.close());
+  }, [currentUser]);
 
   useEffect(() => {
     sessionsRef.current = sessionRuntimes;
@@ -512,7 +554,11 @@ export function App({ initialIdentity }: { initialIdentity: LocalIdentity }) {
   }, [settings.lightweightMode]);
 
   useEffect(() => {
-    window.nodusDesktop?.getPerformanceDiagnostic().then((value) => { performanceDiagnosticRef.current = value; setVideoOnlyDiagnostic(value?.videoOnly === true); }).catch(() => undefined);
+    window.nodusDesktop?.getPerformanceDiagnostic().then((value) => {
+      inputDiagnosticEnabledRef.current = value?.inputLatency === true;
+      performanceDiagnosticRef.current = value?.inputOnly ? null : value;
+      setVideoOnlyDiagnostic(value?.videoOnly === true);
+    }).catch(() => undefined);
   }, []);
 
   useEffect(() => {
@@ -652,7 +698,7 @@ export function App({ initialIdentity }: { initialIdentity: LocalIdentity }) {
       } catch {
         if (!disposed) setServiceState(navigator.onLine ? "error" : "offline");
       }
-    }, 5_000);
+    }, 15_000);
 
     return () => {
       disposed = true;
@@ -660,6 +706,20 @@ export function App({ initialIdentity }: { initialIdentity: LocalIdentity }) {
       unregisterPresence(identity).catch(() => undefined);
     };
   }, [identity, settings.coordinationUrl]);
+
+  useEffect(() => {
+    if (serviceState !== "online" || !licenseConfigured() || !identity.deviceNameConfirmed) return;
+    let disposed = false;
+    const stopOutgoing = () => {
+      if (disposed) return;
+      sessionsRef.current.filter(item => item.session.role === "viewer").forEach(item => endSession(item.session.sessionId, true));
+    };
+    const watch = firebaseConfigured() ? subscribeCloudAccessBlock(identity.nodusId, stopOutgoing) : null;
+    const refresh = () => checkLicense(identity).then(info => { if (info.code === "DEVICE_REVOKED") stopOutgoing(); }).catch(() => undefined);
+    refresh();
+    const timer = window.setInterval(refresh, 60_000);
+    return () => { disposed = true; window.clearInterval(timer); watch?.close(); };
+  }, [identity, serviceState]);
 
   useEffect(() => {
     const nodusIds = recentPresenceIds ? recentPresenceIds.split(",") : [];
@@ -687,31 +747,11 @@ export function App({ initialIdentity }: { initialIdentity: LocalIdentity }) {
   useEffect(() => {
     if (!identity.deviceNameConfirmed) return;
     const realtime = connectRealtime(identity.nodusId, {
+      onIncomingRequests: setIncomingRequests,
       onIncomingRequest: (request) => {
         setIncomingRequests((items) => (items.some((item) => item.id === request.id) ? items : [request, ...items]));
       },
-      onRequestUpdate: (request) => {
-        if (outgoingRequestRef.current?.id !== request.id) return;
-        outgoingRequestRef.current = request;
-        setOutgoingRequest(request);
-        if (request.status === "denied") {
-          setFeedback("Pedido recusado pelo outro computador.");
-          outgoingRequestRef.current = null;
-          setOutgoingRequest(null);
-        }
-        if (request.status === "accepted" && request.sessionId) {
-          recordAccess({
-            nodusId: request.targetNodusId,
-            deviceName: request.targetName ?? "Dispositivo remoto",
-            direction: "outgoing",
-            result: "accepted",
-          });
-          setFeedback("Autorizado. Estabelecendo conexao segura...");
-          outgoingRequestRef.current = null;
-          setOutgoingRequest(null);
-          startViewerSession(request).catch(() => setFeedback("Nao foi possivel iniciar o acesso remoto."));
-        }
-      },
+      onRequestUpdate: handleRequestUpdate,
       onSignal: (signal) => {
         handleSignal(signal).catch(() => updateRuntime(signal.sessionId, { error: "Falha temporaria na conexao." }));
       },
@@ -721,18 +761,42 @@ export function App({ initialIdentity }: { initialIdentity: LocalIdentity }) {
 
   useEffect(() => {
     if (!identity.deviceNameConfirmed) return;
+    if (firebaseConfigured()) {
+      const timer = window.setInterval(() => {
+        const now = Date.now();
+        setIncomingRequests(items => items.some(item => now - Date.parse(item.createdAt) >= PENDING_REQUEST_TTL_MS)
+          ? items.filter(item => now - Date.parse(item.createdAt) < PENDING_REQUEST_TTL_MS) : items);
+      }, 30_000);
+      return () => window.clearInterval(timer);
+    }
+    let busy = false, disposed = false;
     const timer = window.setInterval(async () => {
+      if (busy || disposed) return;
+      busy = true;
       try {
-        setIncomingRequests(await listIncomingRequests(identity.nodusId));
+        const requests = await listIncomingRequests(identity.nodusId);
+        if (!disposed) setIncomingRequests(requests);
       } catch {
-        setIncomingRequests([]);
-      }
+        if (!disposed) setIncomingRequests([]);
+      } finally { busy = false; }
     }, 2_000);
-    return () => window.clearInterval(timer);
+    return () => { disposed = true; window.clearInterval(timer); };
   }, [identity, settings.coordinationUrl]);
 
   useEffect(() => {
     if (!outgoingRequest || outgoingRequest.status !== "pending") return;
+    if (firebaseConfigured()) {
+      let disposed = false;
+      // Recover an acceptance delivered before React published the pending request.
+      getSessionRequest(outgoingRequest.id).then(request => { if (!disposed) handleRequestUpdate(request); }).catch(() => undefined);
+      const timer = window.setTimeout(() => {
+        if (outgoingRequestRef.current?.id !== outgoingRequest.id) return;
+        outgoingRequestRef.current = null;
+        setOutgoingRequest(null);
+        setFeedback("Solicitacao expirada. Tente novamente.");
+      }, Math.max(0, PENDING_REQUEST_TTL_MS - (Date.now() - Date.parse(outgoingRequest.createdAt))));
+      return () => { disposed = true; window.clearTimeout(timer); };
+    }
     const timer = window.setInterval(async () => {
       try {
         const current = await getSessionRequest(outgoingRequest.id);
@@ -760,6 +824,32 @@ export function App({ initialIdentity }: { initialIdentity: LocalIdentity }) {
     }, 700);
     return () => window.clearInterval(timer);
   }, [outgoingRequest, settings.coordinationUrl]);
+
+  useEffect(() => {
+    if (!firebaseConfigured()) return;
+    let previous = getCloudUsageDiagnostics();
+    const timer = window.setInterval(() => {
+      const current = getCloudUsageDiagnostics();
+      const delta = Object.fromEntries(Object.entries(current).filter(([key, value]) => key !== "measuredAt" && typeof value === "number")
+        .map(([key, value]) => [key, Number(value) - Number(previous[key as keyof typeof previous])]));
+      logDiagnostic(`cloud-usage ${JSON.stringify({ intervalMs: current.measuredAt - previous.measuredAt, ...delta, approximate: true, includesSecurityRuleReads: false, includesLicenseServerOperations: false })}`);
+      previous = current;
+    }, 60_000);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  function handleRequestUpdate(request: SessionRequestRecord) {
+    if (outgoingRequestRef.current?.id !== request.id) return;
+    if (request.status === "pending") return;
+    outgoingRequestRef.current = null;
+    setOutgoingRequest(null);
+    if (request.status === "denied") setFeedback("Pedido recusado pelo outro computador.");
+    if (request.status === "accepted" && request.sessionId) {
+      recordAccess({ nodusId: request.targetNodusId, deviceName: request.targetName ?? "Dispositivo remoto", direction: "outgoing", result: "accepted" });
+      setFeedback("Autorizado. Estabelecendo conexao segura...");
+      startViewerSession(request).catch(() => setFeedback("Nao foi possivel iniciar o acesso remoto."));
+    }
+  }
 
   useEffect(() => {
     const video = remoteVideoRef.current;
@@ -886,6 +976,8 @@ export function App({ initialIdentity }: { initialIdentity: LocalIdentity }) {
       return;
     }
 
+    let reservedSession: string | undefined;
+    let requestCreated = false;
     try {
       setFeedback("Localizando dispositivo...");
       iceWarmupRef.current = fetchIceServers(settings.coordinationUrl).then((servers) => {
@@ -898,7 +990,9 @@ export function App({ initialIdentity }: { initialIdentity: LocalIdentity }) {
         return;
       }
       setRecents(saveRecent(device));
+      reservedSession = await reserveLicense(identity, normalized);
       const request = await createSessionRequest({
+        ...(reservedSession ? { sessionId: reservedSession } : {}),
         requesterNodusId: identity.nodusId,
         requesterName: currentUser ? `${currentUser.name} - ${identity.deviceName}` : identity.deviceName,
         targetNodusId: normalized,
@@ -907,6 +1001,7 @@ export function App({ initialIdentity }: { initialIdentity: LocalIdentity }) {
         preferredResolution: settings.preferredResolution,
         preferredFps: settings.maxFps,
       });
+      requestCreated = true;
       recordAccess({
         nodusId: device.nodusId,
         deviceName: device.deviceName,
@@ -919,7 +1014,8 @@ export function App({ initialIdentity }: { initialIdentity: LocalIdentity }) {
       if (!rememberTargetPassword) setTargetPassword("");
       setFeedback("Dispositivo encontrado. Aguardando autorizacao...");
     } catch (error) {
-      setFeedback(error instanceof Error ? error.message : "Nao foi possivel conectar ao dispositivo.");
+      if (reservedSession && !requestCreated) licenseEnded(reservedSession);
+      setFeedback(error instanceof LicenseError ? licenseFeedback(error) : error instanceof Error ? error.message : "Nao foi possivel conectar ao dispositivo.");
     }
   }
 
@@ -1012,7 +1108,6 @@ export function App({ initialIdentity }: { initialIdentity: LocalIdentity }) {
     sessionId: string,
     patch: Partial<Omit<SessionRuntime, "session">> & { session?: Partial<RemoteSession> },
   ) {
-    if (patch.error && !patch.error.startsWith("Captura legada:")) syncHostCursorVisibility(sessionId);
     setSessionRuntimes((current) => {
       const next = current.map((item) => {
         if (item.session.sessionId !== sessionId) return item;
@@ -1039,6 +1134,7 @@ export function App({ initialIdentity }: { initialIdentity: LocalIdentity }) {
 
   function syncHostCursorVisibility(excludeSessionId?: string) {
     const active = sessionsRef.current.some((runtime) => runtime.session.sessionId !== excludeSessionId
+      && !nativeHostSessionsRef.current.has(runtime.session.sessionId)
       && shouldHideHostCursor(runtime.session.role, peersRef.current.get(runtime.session.sessionId)?.connectionState ?? "closed", runtime.session.permissions, settings.allowRemoteControl, runtime.error));
     window.nodusDesktop?.setHostCursorActive?.(active).catch(() => undefined);
   }
@@ -1182,7 +1278,7 @@ export function App({ initialIdentity }: { initialIdentity: LocalIdentity }) {
       session: { role: "host", sessionId: request.sessionId, remoteNodusId, remoteName: request.requesterName, status: "Preparando compartilhamento", permissions },
       remoteStream: null, shareStream: captureLease?.stream ?? null, controlReady: false, error: "", metrics: emptyMetrics(),
     });
-    if (preferNative) startSignalPolling(request.sessionId, identity.nodusId);
+    if (preferNative) startSignalListening(request.sessionId, identity.nodusId);
     const nativeVideo = preferNative && await startHostNativeMedia(request.sessionId, remoteNodusId, settings.preferredDisplayId, request.preferredResolution ?? settings.preferredResolution, request.preferredFps ?? settings.maxFps, permissions.includes("audio:remote"), peer.getConfiguration().iceServers ?? []);
     if (preferNative && !nativeVideo) requireLegacyCaptureAllowed(allowLegacyFallback);
     if (!nativeVideo && !captureLease) captureLease = await acquireHostCapture(request.preferredResolution ?? settings.preferredResolution, request.preferredFps ?? settings.maxFps, settings.preferredDisplayId, permissions.includes("audio:remote"));
@@ -1195,7 +1291,7 @@ export function App({ initialIdentity }: { initialIdentity: LocalIdentity }) {
     }
     if (!nativeVideo && captureLease) captureCleanupRef.current.set(request.sessionId, captureLease.release);
     for (const track of (nativeVideo ? [] : stream?.getTracks() ?? []).filter((track) => track.readyState === "live" && (track.kind === "video" || permissions.includes("audio:remote")))) {
-      if (track.kind === "video") track.contentHint = performanceDiagnosticRef.current?.contentHint ?? (settings.connectionQuality === "high" ? "detail" : "motion");
+      if (track.kind === "video") track.contentHint = performanceDiagnosticRef.current?.contentHint ?? DESKTOP_VIDEO_POLICY.contentHint;
       const sender = peer.addTrack(track, stream!);
       logDiagnostic(`track-added id=${request.sessionId} kind=${track.kind} state=${track.readyState}`);
       const transceiver = peer.getTransceivers().find((item) => item.sender === sender);
@@ -1215,7 +1311,7 @@ export function App({ initialIdentity }: { initialIdentity: LocalIdentity }) {
       error: nativeVideo ? "" : "Captura legada: remocao do cursor do host nao garantida.",
     });
     window.nodusDesktop?.setRemoteControlActive(settings.allowRemoteControl).catch(() => undefined);
-    if (!preferNative) startSignalPolling(request.sessionId, identity.nodusId);
+    if (!preferNative) startSignalListening(request.sessionId, identity.nodusId);
   }
 
   async function startViewerSession(request: SessionRequestRecord) {
@@ -1230,7 +1326,7 @@ export function App({ initialIdentity }: { initialIdentity: LocalIdentity }) {
     const videoTransceiver = peer.addTransceiver("video", { direction: "recvonly" });
     preferDesktopCodecs(videoTransceiver, "receive");
     configureLowLatencyReceiver(videoTransceiver.receiver);
-    if (permissions.includes("audio:remote")) peer.addTransceiver("audio", { direction: "recvonly" });
+    if (permissions.includes("audio:remote")) configureLowLatencyReceiver(peer.addTransceiver("audio", { direction: "recvonly" }).receiver);
     if (permissions.some((item) => item === "mouse:control" || item === "keyboard:control" || item === "clipboard:sync")) {
       attachViewerControl(request.sessionId, peer.createDataChannel("control"));
       attachViewerPointer(request.sessionId, peer.createDataChannel("pointer", { ordered: false, maxRetransmits: 0 }));
@@ -1260,7 +1356,7 @@ export function App({ initialIdentity }: { initialIdentity: LocalIdentity }) {
       type: "offer",
       payload: peer.localDescription,
     });
-    startSignalPolling(request.sessionId, identity.nodusId);
+    startSignalListening(request.sessionId, identity.nodusId);
   }
 
   async function ensureSessionIceServers() {
@@ -1328,6 +1424,7 @@ export function App({ initialIdentity }: { initialIdentity: LocalIdentity }) {
     };
     peer.onicegatheringstatechange = () => logIceEvent(sessionId, role, "ice-gathering-state", { state: peer.iceGatheringState });
     peer.ontrack = (event) => {
+      configureLowLatencyReceiver(event.receiver);
       const currentStream = sessionsRef.current.find((item) => item.session.sessionId === sessionId)?.remoteStream;
       const stream = new MediaStream(currentStream?.getTracks() ?? event.streams[0]?.getTracks() ?? []);
       stream.getTracks().filter((track) => track.kind === event.track.kind && track.id !== event.track.id).forEach((track) => stream.removeTrack(track));
@@ -1340,6 +1437,7 @@ export function App({ initialIdentity }: { initialIdentity: LocalIdentity }) {
       logIceEvent(sessionId, role, "peer-connection-state", { state: peer.connectionState });
       updateRuntime(sessionId, { session: { status: connectionLabel(peer.connectionState) } });
       syncHostCursorVisibility();
+      if (peer.connectionState === "connected") licenseEstablished(sessionId, () => endSession(sessionId, true)).catch(() => logDiagnostic(`license-lifecycle-pending id=${sessionId}`));
     };
     peer.oniceconnectionstatechange = () => {
       logDiagnostic(`ice-state id=${sessionId} role=${role} state=${peer.iceConnectionState}`);
@@ -1562,10 +1660,13 @@ export function App({ initialIdentity }: { initialIdentity: LocalIdentity }) {
         const fps = role === "host" ? encodedFps || sentFps || captureFps : decodedFps || receivedFps;
         const lostDelta = Math.max(0, lost - (previous?.lost ?? lost));
         const receivedDelta = Math.max(0, received - (previous?.receivedPackets ?? received));
-        const lossPct = lostDelta / Math.max(1, lostDelta + receivedDelta) * 100;
+        const receiverFeedback = receiverFeedbackRef.current.get(sessionId);
+        // remote-inbound-rtp may omit packetsReceived; use the viewer's measured loss instead.
+        const measuredLossPct = role === "host" ? receiverPacketLoss(receiverFeedback, now)
+          : previous ? lostDelta / Math.max(1, lostDelta + receivedDelta) * 100 : null;
+        const lossPct = measuredLossPct ?? 0;
         statsRef.current.set(sessionId, { bytes, captured, encoded, sent, received: receivedFrames, decoded, encodeTime, decodeTime, qpSum, packetSendDelay, packetsSent, jitterBufferDelay, jitterBufferTargetDelay, jitterBufferMinimumDelay, jitterBufferEmitted, freezes, freezeDuration, dropped, lost, receivedPackets: received, at: now });
         const targetFps = native ? appliedVideoRef.current.get(sessionId)?.fps ?? 60 : requestedFpsRef.current.get(sessionId) ?? settings.maxFps;
-        const receiverFeedback = receiverFeedbackRef.current.get(sessionId);
         const senderFeedback = senderFeedbackRef.current.get(sessionId);
         const render = renderStatsRef.current.get(sessionId);
         const renderFps = role === "host" ? receiverFeedback?.renderFps ?? 0 : render?.fps ?? 0;
@@ -1580,7 +1681,6 @@ export function App({ initialIdentity }: { initialIdentity: LocalIdentity }) {
           freezes: role === "host" ? receiverFeedback?.freezes : freezeDelta,
         };
         if (native) {
-          sample.lossPct = receiverFeedback && now - receiverFeedback.receivedAt < 3000 ? receiverFeedback.packetLossPct ?? 0 : 0;
           sample.availableKbps = 0;
         }
         const quality = await applyAdaptiveQuality(sessionId, peer, role, sample);
@@ -1644,7 +1744,8 @@ export function App({ initialIdentity }: { initialIdentity: LocalIdentity }) {
           if (channel?.readyState === "open" && channel.bufferedAmount < 16_384) {
             channel.send(JSON.stringify({ type: "latency-ping", sentAt: Date.now() } satisfies RemoteInputMessage));
             channel.send(JSON.stringify({ type: "receiver-stats", jitterBufferMs, jitterBufferMsValid: measuredJitterBufferMs !== null,
-              jitterBufferTargetMs, jitterBufferMinimumMs, renderFps: render?.fps ?? 0, droppedFrames, freezes: freezeDelta, packetLossPct: lossPct } satisfies RemoteInputMessage));
+              jitterBufferTargetMs, jitterBufferMinimumMs, renderFps: render?.fps ?? 0, droppedFrames, freezes: freezeDelta,
+              packetLossPct: lossPct, packetLossPctValid: measuredLossPct !== null } satisfies RemoteInputMessage));
           }
         }
         logMediaDiagnostic(`media-stats id=${sessionId} role=${role} capture=${captureFps} encoded=${encodedFps} sent=${sentFps} received=${receivedFps} decoded=${decodedFps} bitrate=${bitrateKbps} encodeMs=${encodeMs} dropped=${droppedFrames} limit=${limitation} encoder=${encoder || "pending"}`);
@@ -1657,6 +1758,8 @@ export function App({ initialIdentity }: { initialIdentity: LocalIdentity }) {
         const iceRestart = iceRestartHistoryRef.current.get(sessionId);
         window.nodusDesktop?.writePerformance?.(JSON.stringify({ at: new Date().toISOString(), sessionId, role, ...metrics,
           targetFps, activePicture, transport, lightweightMode: settings.lightweightMode, diagnosticLabel: diagnostic?.label ?? null,
+          packetLossPctValid: measuredLossPct !== null,
+          packetLossSource: measuredLossPct === null ? "unavailable" : role === "host" ? "receiver-feedback" : "inbound-rtp",
           iceStates: { gathering: peer.iceGatheringState, connection: peer.iceConnectionState, peer: peer.connectionState },
           iceTransportPolicy: peer.getConfiguration().iceTransportPolicy ?? "all",
           iceRestartCount: iceRestart?.count ?? 0, iceRestartReason: iceRestart?.reason ?? null,
@@ -1675,6 +1778,7 @@ export function App({ initialIdentity }: { initialIdentity: LocalIdentity }) {
           localCursorPosition: viewerSurface?.dataset.localCursorPosition ?? null,
           remoteInputPosition: viewerSurface?.dataset.remoteInputPosition ?? null,
           localCursorLatencyMs: viewerSurface?.dataset.localCursorLatencyMs ? Number(viewerSurface.dataset.localCursorLatencyMs) : null,
+          inputDiagnostic: inputDiagnostic(sessionId)?.snapshot(performance.now(), pointerChannelsRef.current.get(sessionId)?.bufferedAmount ?? 0) ?? null,
           renderMeasurement: role === "viewer" ? "presentedFrames" : null,
           renderCallbacksFps: role === "viewer" ? render?.callbackFps ?? null : null,
           renderDisplay: renderDisplayRef.current.get(sessionId) ?? null,
@@ -1798,7 +1902,7 @@ export function App({ initialIdentity }: { initialIdentity: LocalIdentity }) {
       const parameters = sender.getParameters();
       if (!parameters.encodings.length) parameters.encodings = [{}];
       const before = { ...parameters.encodings[0] };
-      parameters.degradationPreference = performanceDiagnosticRef.current?.degradationPreference ?? (requestedQuality === "high" ? "maintain-resolution" : "maintain-framerate");
+      parameters.degradationPreference = performanceDiagnosticRef.current?.degradationPreference ?? DESKTOP_VIDEO_POLICY.degradationPreference;
       parameters.encodings[0].maxBitrate = roundedBitrate;
       parameters.encodings[0].maxFramerate = fps;
       parameters.encodings[0].scaleResolutionDownBy = scale;
@@ -1830,7 +1934,9 @@ export function App({ initialIdentity }: { initialIdentity: LocalIdentity }) {
       const [targetWidth, targetHeight] = diagnostic?.nativeResolution && source?.width && source?.height
         ? [source.width, source.height] : resolutionForSource(diagnostic?.resolution as RemoteResolution ?? resolution, source ? { id: "", name: "", displayId: "", width: source.width ?? 0, height: source.height ?? 0 } : undefined);
       const scale = diagnostic?.scaleResolutionDownBy ?? Math.max(1, (source?.width ?? targetWidth) / targetWidth, (source?.height ?? targetHeight) / targetHeight);
-      parameters.degradationPreference = diagnostic?.degradationPreference ?? (settings.connectionQuality === "high" ? "maintain-resolution" : "maintain-framerate");
+      parameters.degradationPreference = diagnostic?.degradationPreference ?? DESKTOP_VIDEO_POLICY.degradationPreference;
+      const contentHint = diagnostic?.contentHint ?? DESKTOP_VIDEO_POLICY.contentHint;
+      if (sender.track && sender.track.contentHint !== contentHint) sender.track.contentHint = contentHint;
       parameters.encodings[0].maxBitrate = diagnostic?.bitrate ?? (settings.connectionQuality === "high" || diagnostic?.preset === "clean-desktop" ? (requestedFps > 60 && !diagnostic ? 24_000_000 : 14_000_000) : 10_000_000);
       parameters.encodings[0].maxFramerate = boundedFrameRate(diagnostic?.maxFramerate ?? diagnostic?.fps ?? requestedFps);
       parameters.encodings[0].scaleResolutionDownBy = scale;
@@ -1845,18 +1951,19 @@ export function App({ initialIdentity }: { initialIdentity: LocalIdentity }) {
     controlChannelsRef.current.set(sessionId, channel);
     channel.onopen = () => {
       updateRuntime(sessionId, { controlReady: true });
+      if (inputDiagnosticEnabledRef.current) channel.send(JSON.stringify({ type: "input-diagnostic-capability" } satisfies RemoteInputMessage));
       if (captureSources.length) channel.send(JSON.stringify({ type: "screen-options", displays: captureSources } satisfies RemoteInputMessage));
     };
     channel.onclose = () => updateRuntime(sessionId, { controlReady: false });
     channel.onmessage = (event) => {
       try {
         if (typeof event.data !== "string" || event.data.length > 1_000_000) return;
+        const message = JSON.parse(event.data) as RemoteInputMessage;
         const now = Date.now();
         const rate = hostInputRateRef.current.get(sessionId);
         const current = !rate || now - rate.at >= 1000 ? { at: now, count: 1 } : { ...rate, count: rate.count + 1 };
         hostInputRateRef.current.set(sessionId, current);
-        if (current.count > 500) return;
-        const message = JSON.parse(event.data) as RemoteInputMessage;
+        if (current.count > 500 && message.type !== "keyUp" && message.type !== "mouseUp") return;
         const permissions = sessionsRef.current.find((item) => item.session.sessionId === sessionId)?.session.permissions ?? [];
         if (message.type === "latency-ping") {
           channel.send(JSON.stringify({ type: "latency-pong", sentAt: message.sentAt } satisfies RemoteInputMessage));
@@ -1925,15 +2032,29 @@ export function App({ initialIdentity }: { initialIdentity: LocalIdentity }) {
     channel.binaryType = "arraybuffer";
     pointerChannelsRef.current.set(sessionId, channel);
     channel.onmessage = (event) => {
+      const receivedAt = performance.now();
       const permissions = sessionsRef.current.find((item) => item.session.sessionId === sessionId)?.session.permissions ?? [];
       if (!settings.allowRemoteControl || !permissions.includes("mouse:control") || !(event.data instanceof ArrayBuffer)) return;
       const message = decodePointerMessage(event.data);
       if (!message) return;
+      const diagnostic = inputDiagnostic(sessionId);
+      if (diagnostic) diagnostic.received++;
       const now = Date.now();
-      const rate = hostInputRateRef.current.get(sessionId);
+      const rate = hostInputRateRef.current.get(`${sessionId}:pointer`);
       const current = !rate || now - rate.at >= 1000 ? { at: now, count: 1 } : { ...rate, count: rate.count + 1 };
-      hostInputRateRef.current.set(sessionId, current);
-      if (current.count <= 240) window.nodusDesktop?.applyRemoteInput(message);
+      hostInputRateRef.current.set(`${sessionId}:pointer`, current);
+      if (current.count > 240) { if (diagnostic) diagnostic.rateDrops++; return; }
+      if (!message.probeId || !diagnostic || !window.nodusDesktop?.measureRemoteInput) {
+        window.nodusDesktop?.applyRemoteInput(message);
+        return;
+      }
+      const ipcAt = performance.now();
+      window.nodusDesktop.measureRemoteInput(message).then((result) => {
+        const now = performance.now();
+        const control = controlChannelsRef.current.get(sessionId);
+        if (control?.readyState === "open") control.send(JSON.stringify({ type: "input-diagnostic-ack", id: message.probeId!, ...result,
+          hostProcessingMs: now - receivedAt, ipcRoundTripMs: now - ipcAt } satisfies RemoteInputMessage));
+      }).catch(() => undefined);
     };
   }
 
@@ -1949,6 +2070,15 @@ export function App({ initialIdentity }: { initialIdentity: LocalIdentity }) {
         const message = JSON.parse(event.data) as RemoteInputMessage;
         if (message.type === "latency-pong") {
           controlLatencyRef.current.set(sessionId, Math.max(0, Date.now() - message.sentAt));
+          return;
+        }
+        if (message.type === "input-diagnostic-capability") {
+          const diagnostic = inputDiagnostic(sessionId);
+          if (diagnostic) diagnostic.hostSupported = true;
+          return;
+        }
+        if (message.type === "input-diagnostic-ack") {
+          inputDiagnostic(sessionId)?.acknowledge(message.id, performance.now(), message);
           return;
         }
         if (message.type === "sender-stats") {
@@ -2144,23 +2274,32 @@ export function App({ initialIdentity }: { initialIdentity: LocalIdentity }) {
     if (channel.readyState !== "open") throw new Error("Conexao encerrada.");
   }
 
-  function startSignalPolling(sessionId: string, selfNodusId: string) {
-    const currentTimer = signalTimersRef.current.get(sessionId);
-    if (currentTimer) window.clearInterval(currentTimer);
+  function startSignalListening(sessionId: string, selfNodusId: string) {
+    signalConnectionsRef.current.get(sessionId)?.close();
+    const onError = () => updateRuntime(sessionId, { error: "Falha temporaria na conexao." });
+    if (firebaseConfigured()) {
+      signalConnectionsRef.current.set(sessionId, subscribeCloudSignals(sessionId, selfNodusId, handleSignal, onError));
+      return;
+    }
     lastSignalSeqRef.current.set(sessionId, 0);
+    let busy = false, closed = false;
     const poll = async () => {
+      if (busy || closed) return;
+      busy = true;
       try {
         const signals = await getSignals(sessionId, selfNodusId, lastSignalSeqRef.current.get(sessionId) ?? 0);
         for (const signal of signals) {
+          if (closed) return;
           lastSignalSeqRef.current.set(sessionId, Math.max(lastSignalSeqRef.current.get(sessionId) ?? 0, signal.seq));
           await handleSignal(signal);
         }
       } catch {
-        updateRuntime(sessionId, { error: "Falha temporaria na conexao." });
-      }
+        if (!closed) onError();
+      } finally { busy = false; }
     };
     poll();
-    signalTimersRef.current.set(sessionId, window.setInterval(poll, 180));
+    const timer = window.setInterval(poll, 180);
+    signalConnectionsRef.current.set(sessionId, { close() { closed = true; window.clearInterval(timer); } });
   }
 
   async function handleSignal(signal: SignalMessage) {
@@ -2258,7 +2397,7 @@ export function App({ initialIdentity }: { initialIdentity: LocalIdentity }) {
         } catch { requestFallback(); }
       }, 15_000));
       videoPeer.ontrack = (event) => {
-        if (event.track.kind === "video") configureLowLatencyReceiver(event.receiver);
+        configureLowLatencyReceiver(event.receiver);
         const current = sessionsRef.current.find((item) => item.session.sessionId === sessionId)?.remoteStream;
         const stream = new MediaStream(current?.getTracks() ?? []);
         if (event.track.kind === "video") stream.getVideoTracks().forEach((track) => stream.removeTrack(track));
@@ -2350,14 +2489,14 @@ export function App({ initialIdentity }: { initialIdentity: LocalIdentity }) {
   }
 
   function cleanupSession(sessionId: string, stopShare: boolean) {
+    licenseEnded(sessionId);
     syncHostCursorVisibility(sessionId);
     window.nodusDesktop?.setHostInputLock({ sessionId, mouse: false, keyboard: false }).catch(() => undefined);
     setHostInputLocks((current) => { const next = { ...current }; delete next[sessionId]; return next; });
     pressedPointerButtonsRef.current.clear();
     lastPointerPointRef.current = null;
-    const timer = signalTimersRef.current.get(sessionId);
-    if (timer) window.clearInterval(timer);
-    signalTimersRef.current.delete(sessionId);
+    signalConnectionsRef.current.get(sessionId)?.close();
+    signalConnectionsRef.current.delete(sessionId);
     const reconnectTimer = reconnectTimersRef.current.get(sessionId);
     if (reconnectTimer) window.clearTimeout(reconnectTimer);
     reconnectTimersRef.current.delete(sessionId);
@@ -2368,7 +2507,9 @@ export function App({ initialIdentity }: { initialIdentity: LocalIdentity }) {
     iceClassificationRef.current.delete(sessionId);
     iceRestartHistoryRef.current.delete(sessionId);
     hostInputRateRef.current.delete(sessionId);
+    hostInputRateRef.current.delete(`${sessionId}:pointer`);
     controlLatencyRef.current.delete(sessionId);
+    inputDiagnosticsRef.current.delete(sessionId);
     receiverFeedbackRef.current.delete(sessionId);
     senderFeedbackRef.current.delete(sessionId);
     const qualityTimer = qualityTimersRef.current.get(sessionId);
@@ -2672,7 +2813,7 @@ export function App({ initialIdentity }: { initialIdentity: LocalIdentity }) {
   function prepareCaptureStream(source: MediaStream): PooledCapture {
     // Keep the Chromium capture track on the native WebRTC path; a canvas adds a full-frame copy and pacing queue.
     const track = source.getVideoTracks()[0];
-    if (track) track.contentHint = performanceDiagnosticRef.current?.contentHint ?? (settings.connectionQuality === "high" ? "detail" : "motion");
+    if (track) track.contentHint = performanceDiagnosticRef.current?.contentHint ?? DESKTOP_VIDEO_POLICY.contentHint;
     return {
       stream: source,
       setReduced: () => false,
@@ -2732,7 +2873,7 @@ export function App({ initialIdentity }: { initialIdentity: LocalIdentity }) {
       captureLease.release();
       return;
     }
-    track.contentHint = performanceDiagnosticRef.current?.contentHint ?? (settings.connectionQuality === "high" ? "detail" : "motion");
+    track.contentHint = performanceDiagnosticRef.current?.contentHint ?? DESKTOP_VIDEO_POLICY.contentHint;
     const capture = track.getSettings();
     logMediaDiagnostic(`capture-switched width=${capture.width || 0} height=${capture.height || 0} fps=${capture.frameRate || 0}`);
     try {
@@ -2785,10 +2926,35 @@ export function App({ initialIdentity }: { initialIdentity: LocalIdentity }) {
     sendRemoteInputToSession(activeSession?.sessionId, message);
   }
 
-  function sendRemoteInputToSession(sessionId: string | null | undefined, message: RemoteInputMessage) {
+  function inputDiagnostic(sessionId: string) {
+    if (!inputDiagnosticEnabledRef.current) return undefined;
+    let diagnostic = inputDiagnosticsRef.current.get(sessionId);
+    if (!diagnostic) { diagnostic = new InputLatencyDiagnostic(performance.now()); inputDiagnosticsRef.current.set(sessionId, diagnostic); }
+    return diagnostic;
+  }
+
+  function sendRemoteInputToSession(sessionId: string | null | undefined, message: RemoteInputMessage, eventAt?: number) {
     if (message.type === "mouseMove" && sessionId) {
       const pointer = pointerChannelsRef.current.get(sessionId);
-      if (pointer?.readyState === "open" && pointer.bufferedAmount <= 256) pointer.send(encodePointerMessage(message.x, message.y));
+      const diagnostic = inputDiagnostic(sessionId);
+      if (pointer?.readyState !== "open") {
+        const control = controlChannelsRef.current.get(sessionId);
+        if (control?.readyState === "open" && control.bufferedAmount <= 256) control.send(JSON.stringify(message));
+        return;
+      }
+      if (pointer?.readyState === "open" && pointer.bufferedAmount <= 256) {
+        if (!diagnostic) { pointer.send(encodePointerMessage(message.x, message.y)); return; }
+        const start = performance.now();
+        diagnostic.eventToSendMs = eventAt === undefined ? null : Math.max(0, start - eventAt);
+        const id = diagnostic.probe(start);
+        const packet = encodePointerMessage(message.x, message.y, id);
+        if (diagnostic) {
+          diagnostic.serializationMs = performance.now() - start;
+          diagnostic.eventToSendMs = eventAt === undefined ? null : Math.max(0, performance.now() - eventAt);
+        }
+        try { pointer.send(packet); } catch { if (id) diagnostic?.cancel(id); return; }
+        if (diagnostic) diagnostic.sent++;
+      } else if (diagnostic && pointer?.readyState === "open") diagnostic.bufferDrops++;
       return;
     }
     const channel = sessionId ? controlChannelsRef.current.get(sessionId) : null;
@@ -2923,13 +3089,17 @@ export function App({ initialIdentity }: { initialIdentity: LocalIdentity }) {
     const point = remotePoint(event.currentTarget, event.nativeEvent);
     if (!point) return;
     lastPointerPointRef.current = point;
-    pendingPointerRef.current = { sessionId: activeSession.sessionId, ...point };
+    const diagnostic = inputDiagnostic(activeSession.sessionId);
+    if (diagnostic) { diagnostic.events++; if (pendingPointerRef.current?.sessionId === activeSession.sessionId) diagnostic.coalesced++; }
+    pendingPointerRef.current = { sessionId: activeSession.sessionId, ...point, eventAt: event.timeStamp };
     if (pointerFrameRef.current) return;
+    pendingPointerRef.current = null;
+    sendRemoteInputToSession(activeSession.sessionId, { type: "mouseMove", ...point }, event.timeStamp);
     pointerFrameRef.current = window.requestAnimationFrame(() => {
       pointerFrameRef.current = 0;
       const pending = pendingPointerRef.current;
       pendingPointerRef.current = null;
-      if (pending) sendRemoteInputToSession(pending.sessionId, { type: "mouseMove", x: pending.x, y: pending.y });
+      if (pending) sendRemoteInputToSession(pending.sessionId, { type: "mouseMove", x: pending.x, y: pending.y }, pending.eventAt);
     });
   }
 
@@ -2938,6 +3108,7 @@ export function App({ initialIdentity }: { initialIdentity: LocalIdentity }) {
     const point = remotePoint(event.currentTarget, event.nativeEvent);
     if (type === "mouseDown" && !point) return;
     if (type === "mouseUp" && !pressedPointerButtonsRef.current.has(event.button)) return;
+    pendingPointerRef.current = null;
     event.preventDefault();
     if (type === "mouseDown") pressedPointerButtonsRef.current.add(event.button);
     else pressedPointerButtonsRef.current.delete(event.button);
@@ -2985,13 +3156,15 @@ export function App({ initialIdentity }: { initialIdentity: LocalIdentity }) {
         onGoogle={loginWithGoogle}
         googleReady={nativeGoogleClient}
         onLocal={loginLocal}
-        onNodus={loginWithNodus}
-        onNodusRegister={registerWithNodus}
       />
     );
   }
 
-  return (
+  const renderWorkspace = (activeView: View, setActiveView: (view: View) => void, showSessionInMain: boolean, primary: boolean) => {
+    const connectFromWorkspace = (nodusId: string) => { if (!primary) window.focus(); return connectToDevice(nodusId); };
+    const pageTitle = activeView === "favorites" ? "Favoritos" : activeView === "settings" ? "Configurações" : activeView === "devices" ? "Dispositivos" : "Bem-vindo de volta";
+    const pageSubtitle = activeView === "favorites" ? "Seus dispositivos mais importantes em um só lugar." : activeView === "settings" ? "Personalize o funcionamento do Nodus Connect." : activeView === "devices" ? "Gerencie todos os seus dispositivos em um só lugar." : "Acesso remoto simples, rápido e seguro.";
+    return (
     <div data-theme={activeTheme} className={`${settings.lightweightMode ? "apex-app simple-mode" : "apex-app"}${showSessionInMain ? " remote-mode" : ""}${videoOnlyDiagnostic && showSessionInMain && activeSession?.role === "viewer" ? " video-only-diagnostic" : ""}`}>
       {!settings.lightweightMode && !videoOnlyDiagnostic && <div className="page-noise" />}
       <aside className="app-sidebar">
@@ -3053,7 +3226,7 @@ export function App({ initialIdentity }: { initialIdentity: LocalIdentity }) {
           </div>
         </header>
         <main className={showSessionInMain ? "desktop-main session-main" : `desktop-main ${activeView}-main`}>
-          {incomingRequests[0] && (
+          {primary && incomingRequests[0] && (
             <IncomingRequest request={incomingRequests[0]} onAccept={acceptIncoming} onDeny={denyIncoming} />
           )}
         {showSessionInMain && activeSession ? (
@@ -3067,6 +3240,7 @@ export function App({ initialIdentity }: { initialIdentity: LocalIdentity }) {
               error={sessionError}
               fileReady={activeFileReady}
               metrics={activeRuntime?.metrics ?? emptyMetrics()}
+              showConnectionMetrics={settings.showConnectionMetrics}
               gpuDiagnostics={gpuDiagnostics}
               recording={recordingSessionId === activeSession.sessionId}
               transfers={fileTransfers.filter((item) => item.sessionId === activeSession.sessionId)}
@@ -3112,7 +3286,7 @@ export function App({ initialIdentity }: { initialIdentity: LocalIdentity }) {
               identity={identity}
               items={recents}
               nodusIdLabel={visibleNodusId}
-              onConnect={connectToDevice}
+              onConnect={connectFromWorkspace}
               onCopy={copyNodusId}
               onDeleteDevice={onDeleteDevice}
               onRenameDevice={onRenameDevice}
@@ -3121,7 +3295,7 @@ export function App({ initialIdentity }: { initialIdentity: LocalIdentity }) {
               onOpenConnectionSettings={() => { setSettingsSection("connection"); setActiveView("settings"); }}
               onOpenPasswordSettings={() => { setSettingsSection("access"); setActiveView("settings"); }}
               onOpenSupport={openSupport}
-              onSubmit={connect}
+              onSubmit={(event) => { if (!primary) window.focus(); return connect(event); }}
               onTargetChange={updateTargetId}
               onTargetPasswordChange={setTargetPassword}
               onRememberTargetPasswordChange={setRememberTargetPassword}
@@ -3134,11 +3308,12 @@ export function App({ initialIdentity }: { initialIdentity: LocalIdentity }) {
               targetPassword={targetPassword}
               rememberTargetPassword={rememberTargetPassword}
             />}
-            {activeView === "devices" && <Devices identity={identity} items={recents.filter((item) => !hiddenCatalogDevices.includes(item.nodusId))} favorites={favorites} nodusIdLabel={visibleNodusId} onConnect={connectToDevice} onDeleteDevice={onDeleteDevice} onRenameDevice={onRenameDevice} onToggleFavorite={onToggleFavorite} statusLabel={statusLabel} />}
-            {activeView === "favorites" && <FavoritesPage favorites={favorites} items={recents.filter((item) => favorites.includes(item.nodusId))} onConnect={connectToDevice} onDeleteDevice={onDeleteFavorite} onRenameDevice={onRenameDevice} onOpenDevices={() => setActiveView("devices")} onToggleFavorite={onToggleFavorite} />}
+            {activeView === "devices" && <Devices identity={identity} items={recents.filter((item) => !hiddenCatalogDevices.includes(item.nodusId))} favorites={favorites} nodusIdLabel={visibleNodusId} onConnect={connectFromWorkspace} onDeleteDevice={onDeleteDevice} onRenameDevice={onRenameDevice} onToggleFavorite={onToggleFavorite} statusLabel={statusLabel} />}
+            {activeView === "favorites" && <FavoritesPage favorites={favorites} items={recents.filter((item) => favorites.includes(item.nodusId))} onConnect={connectFromWorkspace} onDeleteDevice={onDeleteFavorite} onRenameDevice={onRenameDevice} onOpenDevices={() => setActiveView("devices")} onToggleFavorite={onToggleFavorite} />}
             {activeView === "recents" && <DeviceList empty="Nenhum dispositivo recente." favorites={favorites} items={recents} folders={folders} onCreateFolder={(name) => setFolders(createFolder(name))} onMove={setRecents} onRename={setRecents} onUpdate={setRecents} onWake={wakeDevice} onToggleFavorite={onToggleFavorite} />}
             {activeView === "files" && <FileTransferPanel activeSession={activeSession} channelReady={activeFileReady} transfers={fileTransfers} onSendFile={sendFile} />}
             {activeView === "settings" && <Settings
+              identity={identity}
               appVersion={appVersion}
               captureSources={captureSources}
               currentUser={currentUser}
@@ -3161,19 +3336,21 @@ export function App({ initialIdentity }: { initialIdentity: LocalIdentity }) {
         )}
       </main>
       {!showSessionInMain && <footer className="workspace-footer"><div><span className="footer-online" /> Nodus conectado</div><div><LockKeyhole aria-hidden="true" size={15} /> Conexão criptografada</div></footer>}
-      {confirmDisconnectId && (
+      {primary && confirmDisconnectId && (
         <ConfirmDialog
           remoteName={sessionsRef.current.find((item) => item.session.sessionId === confirmDisconnectId)?.session.remoteName ?? "este acesso"}
           onCancel={() => setConfirmDisconnectId(null)}
           onConfirm={() => disconnectSession(confirmDisconnectId, true)}
         />
       )}
-      {standby && (settings.threeDimensionalStandby
+      {primary && standby && (settings.threeDimensionalStandby
         ? <Suspense fallback={<StandbyScreen />}><Standby3D /></Suspense>
         : <StandbyScreen />)}
       </div>
     </div>
   );
+  };
+  return <>{renderWorkspace(activeView, setActiveView, showSessionInMain, true)}{workspaceWindows.map((item) => createPortal(renderWorkspace(item.view, (view) => setWorkspaceWindows((current) => current.map((entry) => entry.window === item.window ? { ...entry, view } : entry)), false, false), item.container, item.window.name))}</>;
 }
 
 function StandbyScreen() {
@@ -3213,7 +3390,7 @@ function ConfirmDialog({
         <h2>Desconectar de {remoteName}?</h2>
         <p className="note">A tela e o controle remoto serao encerrados neste computador.</p>
         <div className="confirm-actions">
-          <button className="secondary-button" onClick={onCancel} type="button">Cancelar</button>
+          <button className="secondary-button themed-action" onClick={onCancel} type="button">Cancelar</button>
           <button className="danger-button" onClick={onConfirm} type="button">Desconectar</button>
         </div>
       </section>
@@ -3416,30 +3593,33 @@ function DeviceMenu({ className, deleteLabel = "Remover da lista", name, onDelet
     const trigger = details?.querySelector("summary");
     if (!details?.open || !trigger) return;
     const triggerRect = trigger.getBoundingClientRect();
+    const viewport = details.ownerDocument.defaultView ?? window;
     const gap = 6;
-    const width = Math.min(menuRef.current?.offsetWidth || 168, window.innerWidth - gap * 2);
+    const width = Math.min(menuRef.current?.offsetWidth || 168, viewport.innerWidth - gap * 2);
     const height = menuRef.current?.offsetHeight || 88;
-    const fitsBelow = window.innerHeight - triggerRect.bottom >= height + gap;
+    const fitsBelow = viewport.innerHeight - triggerRect.bottom >= height + gap;
     const fitsAbove = triggerRect.top >= height + gap;
     const nextPlacement = fitsBelow || !fitsAbove ? "below" : "above";
     setPosition({
-      left: Math.max(gap, Math.min(triggerRect.right - width, window.innerWidth - width - gap)),
+      left: Math.max(gap, Math.min(triggerRect.right - width, viewport.innerWidth - width - gap)),
       top: nextPlacement === "below" ? triggerRect.bottom + gap : Math.max(gap, triggerRect.top - height - gap),
     });
   };
   useEffect(() => {
     if (!open) return;
-    window.addEventListener("resize", updatePlacement);
-    window.addEventListener("scroll", updatePlacement, true);
+    const owner = detailsRef.current?.ownerDocument ?? document;
+    const viewport = owner.defaultView ?? window;
+    viewport.addEventListener("resize", updatePlacement);
+    viewport.addEventListener("scroll", updatePlacement, true);
     const closeOnOutsidePress = (event: PointerEvent) => {
       const target = event.target as Node;
       if (!detailsRef.current?.contains(target) && !menuRef.current?.contains(target)) detailsRef.current && (detailsRef.current.open = false);
     };
-    document.addEventListener("pointerdown", closeOnOutsidePress, true);
+    owner.addEventListener("pointerdown", closeOnOutsidePress, true);
     return () => {
-      window.removeEventListener("resize", updatePlacement);
-      window.removeEventListener("scroll", updatePlacement, true);
-      document.removeEventListener("pointerdown", closeOnOutsidePress, true);
+      viewport.removeEventListener("resize", updatePlacement);
+      viewport.removeEventListener("scroll", updatePlacement, true);
+      owner.removeEventListener("pointerdown", closeOnOutsidePress, true);
     };
   }, [open]);
   const closeMenu = () => {
@@ -3454,9 +3634,9 @@ function DeviceMenu({ className, deleteLabel = "Remover da lista", name, onDelet
   }} ref={detailsRef}>
     <summary aria-label="Mais ações" title="Mais ações"><MoreHorizontal aria-hidden="true" size={18} /></summary>
   </details>{open && createPortal(<div className="device-menu-actions" ref={menuRef} style={position}>
-    {onRename && (editing ? <form onSubmit={(event) => { event.preventDefault(); onRename(draftName); closeMenu(); }}><input aria-label="Novo nome do dispositivo" autoFocus onChange={(event) => setDraftName(event.target.value)} value={draftName} /><button type="submit">Salvar</button></form> : <button onClick={() => setEditing(true)} type="button">Renomear</button>)}
+    {onRename && (editing ? <form onSubmit={(event) => { event.preventDefault(); onRename(draftName); closeMenu(); }}><input aria-label="Novo nome do dispositivo" autoFocus onChange={(event) => setDraftName(event.target.value)} value={draftName} /><button className="themed-action" disabled={!draftName.trim()} type="submit"><Save aria-hidden="true" size={15} />Salvar</button></form> : <button onClick={() => setEditing(true)} type="button">Renomear</button>)}
     <button className="device-menu-delete" onClick={() => { onDelete(); closeMenu(); }} type="button">{deleteLabel}</button>
-  </div>, document.body)}</>;
+  </div>, detailsRef.current?.ownerDocument.body ?? document.body)}</>;
 }
 
 function FavoritesPage({ favorites, items, onConnect, onDeleteDevice, onRenameDevice, onOpenDevices, onToggleFavorite }: { favorites: string[]; items: RecentDevice[]; onConnect: (nodusId: string) => void; onDeleteDevice: (nodusId: string) => void; onRenameDevice: (nodusId: string, currentName: string) => void; onOpenDevices: () => void; onToggleFavorite: (nodusId: string) => void }) {
@@ -3465,7 +3645,7 @@ function FavoritesPage({ favorites, items, onConnect, onDeleteDevice, onRenameDe
   return (
     <section className="favorites-page">
       <div className="favorites-tools"><label><Search aria-hidden="true" size={19} /><input placeholder="Buscar nos favoritos..." value={query} onChange={(event) => setQuery(event.target.value)} /></label><span>{favorites.length} favorito{favorites.length === 1 ? "" : "s"}</span></div>
-      {visibleItems.length ? <div className="favorites-list">{visibleItems.map((item, index) => <RecentDeviceRow favorite item={item} key={item.nodusId} onConnect={onConnect} onDeleteDevice={onDeleteDevice} onRenameDevice={onRenameDevice} onToggleFavorite={onToggleFavorite} tone={["blue", "red", "sunset", "forest"][index % 4] as DeviceTone} />)}</div> : <section className="favorites-empty"><Star aria-hidden="true" /><h2>Nenhum dispositivo favorito</h2><p>Adicione dispositivos aos favoritos para encontrá-los rapidamente aqui.</p><button className="secondary-button" onClick={onOpenDevices} type="button">Ver dispositivos <ArrowRight aria-hidden="true" size={16} /></button></section>}
+      {visibleItems.length ? <div className="favorites-list">{visibleItems.map((item, index) => <RecentDeviceRow favorite item={item} key={item.nodusId} onConnect={onConnect} onDeleteDevice={onDeleteDevice} onRenameDevice={onRenameDevice} onToggleFavorite={onToggleFavorite} tone={["blue", "red", "sunset", "forest"][index % 4] as DeviceTone} />)}</div> : <section className="favorites-empty"><Star aria-hidden="true" /><h2>Nenhum dispositivo favorito</h2><p>Adicione dispositivos aos favoritos para encontrá-los rapidamente aqui.</p><button className="secondary-button themed-action" onClick={onOpenDevices} type="button">Ver dispositivos <ArrowRight aria-hidden="true" size={16} /></button></section>}
     </section>
   );
 }
@@ -3722,62 +3902,27 @@ function AccessGate({
   identity,
   onGoogle,
   onLocal,
-  onNodus,
-  onNodusRegister,
 }: {
   error: string;
   googleReady: boolean;
   identity: LocalIdentity;
   onGoogle: () => void;
   onLocal: (name: string) => void;
-  onNodus: (email: string, password: string) => void;
-  onNodusRegister: (email: string, password: string, name: string) => void;
 }) {
-  const [authName, setAuthName] = useState(identity.deviceName);
-  const [email, setEmail] = useState("");
-  const [password, setPassword] = useState("");
-  const [registering, setRegistering] = useState(false);
-  const [showPassword, setShowPassword] = useState(false);
-  const [remember, setRemember] = useState(true);
-  const [notice, setNotice] = useState("");
-
-  const selectMode = (nextRegistering: boolean) => {
-    setRegistering(nextRegistering);
-    setNotice("");
-  };
-
   return (
     <main className="access-gate">
-      <div className="page-noise" />
-      <section className="access-card">
-        <header className="account-heading">
-          <h1>Bem-vindo ao Nodus.</h1>
-          <p>Entre para sincronizar seus dispositivos e preferências.</p>
+      <section className="access-card access-entry" aria-label="Acesso ao Nodus">
+        <header className="access-brand" translate="no">
+          <img src={nodusLogo} alt="" />
+          <h1>NODUS<span>Connect</span></h1>
         </header>
-        <div className="account-tabs" role="tablist" aria-label="Tipo de conta">
-          <button className={!registering ? "active" : ""} onClick={() => selectMode(false)} type="button" role="tab" aria-selected={!registering}>Entrar</button>
-          <button className={registering ? "active" : ""} onClick={() => selectMode(true)} type="button" role="tab" aria-selected={registering}>Criar conta</button>
-        </div>
-        <button className="account-google" data-available={googleReady} onClick={onGoogle} type="button" title={googleReady ? "Continuar com Google" : "O login Google requer o aplicativo instalado"}>
-          <span aria-hidden="true">G</span>
-          Continuar com o Google
+        <button className="themed-action" onClick={() => onLocal(identity.deviceName)} type="button">
+          <UserRound aria-hidden="true" size={18} /><span>Entrar sem conta</span><ArrowRight aria-hidden="true" size={18} />
         </button>
-        <div className="account-divider" aria-hidden="true"><span />ou<span /></div>
-        <form className="account-form" onSubmit={(event) => {
-          event.preventDefault();
-          if (registering) onNodusRegister(email, password, authName);
-          else onNodus(email, password);
-        }}>
-          {registering && <label>Nome<div className="account-input"><input autoComplete="name" value={authName} onChange={(event) => setAuthName(event.target.value)} placeholder="Como devemos chamar você" /></div></label>}
-          <label>E-mail<div className="account-input"><Mail aria-hidden="true" size={17} /><input autoComplete="email" type="email" value={email} onChange={(event) => setEmail(event.target.value)} placeholder="Digite seu e-mail" /></div></label>
-          <label>Senha<div className="account-input"><LockKeyhole aria-hidden="true" size={17} /><input autoComplete={registering ? "new-password" : "current-password"} type={showPassword ? "text" : "password"} value={password} onChange={(event) => setPassword(event.target.value)} placeholder="Digite sua senha" /><button className="password-toggle" onClick={() => setShowPassword((value) => !value)} type="button" aria-label={showPassword ? "Ocultar senha" : "Mostrar senha"}>{showPassword ? <EyeOff size={17} /> : <Eye size={17} />}</button></div></label>
-          {!registering && <div className="account-options"><label className="remember-control"><input checked={remember} onChange={(event) => setRemember(event.target.checked)} type="checkbox" />Lembrar de mim</label><span className="forgot-password" role="note" title="Recuperação de senha ainda não disponível.">Recuperação indisponível</span></div>}
-          <button className="account-submit" disabled={!email || !password || (registering && !authName.trim())} type="submit">{registering ? "Criar conta Nodus" : "Entrar no Nodus"}<ArrowRight size={18} /></button>
-        </form>
-        <div className="account-separator" />
-        <button className="guest-access" onClick={() => onLocal(identity.deviceName)} type="button">Continuar sem uma conta<ArrowRight size={17} /></button>
-        <p className="account-security"><ShieldCheck size={17} />Seus dados estão protegidos com criptografia de ponta a ponta.</p>
-        {(notice || error) && <p className="account-feedback">{notice || error}</p>}
+        <button className="themed-action" data-available={googleReady} onClick={onGoogle} type="button" title={googleReady ? "Entrar com o Google" : "O login Google requer o aplicativo instalado"}>
+          <img className="google-signin-logo" src={googleLogo} alt="" /><span>Entrar com o Google</span><ArrowRight aria-hidden="true" size={18} />
+        </button>
+        {error && <p className="account-feedback" role="alert">{error}</p>}
       </section>
     </main>
   );
@@ -3907,6 +4052,7 @@ function RemoteSessionPanel({
   onRecord,
   onSendFile,
   metrics,
+  showConnectionMetrics,
   gpuDiagnostics,
   maxFps,
   recording,
@@ -3938,6 +4084,7 @@ function RemoteSessionPanel({
   error: string;
   fileReady: boolean;
   metrics: SessionMetrics;
+  showConnectionMetrics: boolean;
   gpuDiagnostics: GpuDiagnostics | null;
   maxFps: LocalSettings["maxFps"];
   recording: boolean;
@@ -3976,6 +4123,7 @@ function RemoteSessionPanel({
   const isViewer = session.role === "viewer";
   type SessionTool = "control" | "transfer" | "monitor" | "quality" | "actions" | "connection";
   const [activeTool, setActiveTool] = useState<SessionTool | null>(null);
+  const [viewScale, setViewScale] = useState<"fit" | "native">("fit");
   const [recordingAudioMode, setRecordingAudioMode] = useState<RecordingAudioMode>("remote");
   const [nextNodusId, setNextNodusId] = useState("");
   const toolButtonsRef = useRef(new Map<string, HTMLButtonElement>());
@@ -4012,6 +4160,27 @@ function RemoteSessionPanel({
     };
   }, [activeTool, session.sessionId]);
   const viewerSurfaceRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    if (!isViewer) return;
+    const surface = viewerSurfaceRef.current;
+    const video = remoteVideoRef.current;
+    if (!surface || !video) return;
+    const updateSize = () => {
+      const size = nativeVideoSize(video.videoWidth, video.videoHeight, window.devicePixelRatio);
+      surface.style.setProperty("--remote-native-width", size.width);
+      surface.style.setProperty("--remote-native-height", size.height);
+    };
+    updateSize();
+    surface.scrollTo(0, 0);
+    video.addEventListener("loadedmetadata", updateSize);
+    video.addEventListener("resize", updateSize);
+    window.addEventListener("resize", updateSize);
+    return () => {
+      video.removeEventListener("loadedmetadata", updateSize);
+      video.removeEventListener("resize", updateSize);
+      window.removeEventListener("resize", updateSize);
+    };
+  }, [isViewer, session.sessionId, viewScale, remoteVideoRef]);
   const localCursorRef = useRef<HTMLDivElement | null>(null);
   const pressedKeysRef = useRef(new Map<string, RemoteKeyInput>());
   const onKeyInputRef = useRef(onKeyInput);
@@ -4046,12 +4215,8 @@ function RemoteSessionPanel({
     }
   };
   const yieldCursorToHost = () => {
-    if (localCursorRef.current) localCursorRef.current.style.opacity = "0";
     const surface = viewerSurfaceRef.current;
-    if (!surface) return;
-    surface.style.cursor = "none";
-    surface.dataset.localCursorOverlay = "false";
-    surface.dataset.physicalViewerCursorHidden = "true";
+    if (surface && surface.dataset.localCursorOverlay !== "true") hideLocalCursor(surface);
   };
   useEffect(() => {
     const onHostMouseActivity = (event: Event) => {
@@ -4065,44 +4230,79 @@ function RemoteSessionPanel({
   }, [canControlMouse]);
   useEffect(() => {
     if (!isViewer || !canControlKeyboard) return;
+    let acceptingKeys = true;
+    let disposed = false;
+    const remoteFocused = () => document.visibilityState !== "hidden" && (document.activeElement === viewerSurfaceRef.current || Boolean(viewerSurfaceRef.current?.contains(document.activeElement)));
     const releasePressedKeys = () => {
       pressedKeysRef.current.forEach((input) => onKeyInputRef.current("keyUp", { ...input, repeat: false }));
       pressedKeysRef.current.clear();
     };
+    const releaseCapture = () => {
+      acceptingKeys = false;
+      releasePressedKeys();
+      window.nodusDesktop?.setRemoteKeyboardCapture(false).catch(() => undefined);
+    };
+    const forwardInput = (type: "keyDown" | "keyUp", input: RemoteKeyInput) => {
+      if (disposed) return false;
+      const keyCode = virtualKeyFromCode(input.code) || input.keyCode;
+      if (!Number.isInteger(keyCode) || keyCode <= 0 || keyCode >= 256) return false;
+      input = { ...input, keyCode };
+      const keyId = `${input.code}:${keyCode}`;
+      const held = pressedKeysRef.current.has(keyId);
+      if (type === "keyDown") {
+        if (!acceptingKeys || !remoteFocused()) return false;
+        if (held && !input.repeat) return true;
+        pressedKeysRef.current.set(keyId, input);
+      } else {
+        if (!held) return false;
+        pressedKeysRef.current.delete(keyId);
+      }
+      onKeyInputRef.current(type, input);
+      return true;
+    };
     const forward = (type: "keyDown" | "keyUp", event: KeyboardEvent) => {
+      if (window.nodusDesktop?.onRemoteKeyInput) {
+        if (remoteFocused()) {
+          event.preventDefault();
+          event.stopPropagation();
+        }
+        return;
+      }
       const input = toRemoteKeyInput(event);
-      if (!input) return;
-      const keyId = `${input.code}:${input.location}:${input.keyCode}`;
-      const remoteFocused = document.activeElement === viewerSurfaceRef.current || Boolean(viewerSurfaceRef.current?.contains(document.activeElement));
-      if (!remoteFocused && !(type === "keyUp" && pressedKeysRef.current.has(keyId))) return;
+      if (!input || !forwardInput(type, input)) return;
       event.preventDefault();
       event.stopPropagation();
-      if (type === "keyDown") pressedKeysRef.current.set(keyId, input);
-      else pressedKeysRef.current.delete(keyId);
-      onKeyInputRef.current(type, input);
     };
     const onKeyDown = (event: KeyboardEvent) => forward("keyDown", event);
     const onKeyUp = (event: KeyboardEvent) => forward("keyUp", event);
     const restoreCapture = () => {
-      if (document.activeElement === viewerSurfaceRef.current) window.nodusDesktop?.setRemoteKeyboardCapture(true).catch(() => undefined);
+      if (!remoteFocused()) return;
+      acceptingKeys = true;
+      window.nodusDesktop?.setRemoteKeyboardCapture(true).catch(() => undefined);
     };
-    const removeNativeListener = window.nodusDesktop?.onRemoteKeyInput?.((type, input) => {
-      const keyId = `${input.code}:${input.location}:${input.keyCode}`;
-      if (type === "keyDown") pressedKeysRef.current.set(keyId, input);
-      else pressedKeysRef.current.delete(keyId);
-      onKeyInputRef.current(type, input);
-    });
+    const onFocusOut = (event: FocusEvent) => {
+      if (viewerSurfaceRef.current?.contains(event.target as Node) && !viewerSurfaceRef.current.contains(event.relatedTarget as Node | null)) releaseCapture();
+    };
+    const onVisibilityChange = () => { if (document.visibilityState === "hidden") releaseCapture(); else restoreCapture(); };
+    const removeNativeListener = window.nodusDesktop?.onRemoteKeyInput?.(forwardInput);
     window.addEventListener("keydown", onKeyDown, true);
     window.addEventListener("keyup", onKeyUp, true);
-    window.addEventListener("blur", releasePressedKeys);
+    window.addEventListener("blur", releaseCapture);
     window.addEventListener("focus", restoreCapture);
+    document.addEventListener("focusout", onFocusOut);
+    document.addEventListener("focusin", restoreCapture);
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    restoreCapture();
     return () => {
-      releasePressedKeys();
+      releaseCapture();
+      disposed = true;
       window.removeEventListener("keydown", onKeyDown, true);
       window.removeEventListener("keyup", onKeyUp, true);
-      window.removeEventListener("blur", releasePressedKeys);
+      window.removeEventListener("blur", releaseCapture);
       window.removeEventListener("focus", restoreCapture);
-      window.nodusDesktop?.setRemoteKeyboardCapture(false).catch(() => undefined);
+      document.removeEventListener("focusout", onFocusOut);
+      document.removeEventListener("focusin", restoreCapture);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
       removeNativeListener?.();
     };
   }, [canControlKeyboard, isViewer, session.sessionId]);
@@ -4161,17 +4361,19 @@ function RemoteSessionPanel({
         }}>
           {toolbar.map(({ id, label, icon: Icon, disabled }) => <button aria-selected={activeTool === id} aria-expanded={activeTool === id} aria-controls={`viewer-panel-${session.sessionId}-${id}`} id={`viewer-tab-${session.sessionId}-${id}`} role="tab" ref={(button) => { if (id && button) toolButtonsRef.current.set(id, button); else if (id) toolButtonsRef.current.delete(id); }} className={id && activeTool === id ? "active" : ""} disabled={disabled} key={label} onClick={() => id && toggleTool(id)} title={disabled ? "Ainda não disponível nesta sessão" : label} type="button"><Icon aria-hidden="true" size={17} /><span>{label}</span></button>)}
         </nav>
-        <div className="viewer-live-metrics">
+        {showConnectionMetrics && <div className="viewer-live-metrics">
           <button aria-label="Métricas da conexão" onClick={() => toggleTool("connection")} title="Métricas da conexão" type="button"><Activity aria-hidden="true" size={15} />{metrics.latencyMs ? `${metrics.latencyMs} ms` : "..."}</button>
           <button aria-label="Quadros recebidos por segundo" onClick={() => toggleTool("connection")} title="Quadros recebidos por segundo" type="button"><Gauge aria-hidden="true" size={15} />{metrics.fps ? `${metrics.fps} FPS` : "..."}</button>
           <button aria-label="Resolução solicitada" onClick={() => toggleTool("quality")} title="Resolução solicitada" type="button"><Monitor aria-hidden="true" size={15} />{resolutionLabel(remoteResolution)}</button>
-        </div>
+        </div>}
         <button className="danger-button viewer-end-session" onClick={onDisconnect} type="button"><Power aria-hidden="true" size={16} /><span>Encerrar sessão</span></button>
       </header>
       <div className="viewer-session-body">
         <div className="remote-stage viewer-stage">
           <div
             className="video-shell control-surface remote-viewer-surface"
+            data-view-scale={viewScale}
+            onScroll={() => hideLocalCursor()}
             onContextMenu={(event) => event.preventDefault()}
             onMouseDown={(event) => {
               viewerSurfaceRef.current?.focus({ preventScroll: true });
@@ -4201,7 +4403,9 @@ function RemoteSessionPanel({
             {activeTool === "control" && <div className="viewer-tool-actions control-options"><button aria-pressed={hostInputLock.mouse} disabled={!canControlMouse} onClick={() => onHostInputLockChange({ ...hostInputLock, mouse: !hostInputLock.mouse })} title={canControlMouse ? (hostInputLock.mouse ? "Liberar mouse do computador remoto" : "Bloquear mouse do computador remoto") : controlUnavailable} type="button"><MousePointer2 aria-hidden="true" size={18} /><span>{hostInputLock.mouse ? "Liberar mouse do host" : "Bloquear mouse do host"}</span></button><button aria-pressed={hostInputLock.keyboard} disabled={!canControlKeyboard} onClick={() => onHostInputLockChange({ ...hostInputLock, keyboard: !hostInputLock.keyboard })} title={canControlKeyboard ? (hostInputLock.keyboard ? "Liberar teclado do computador remoto" : "Bloquear teclado do computador remoto") : controlUnavailable} type="button"><Keyboard aria-hidden="true" size={18} /><span>{hostInputLock.keyboard ? "Liberar teclado do host" : "Bloquear teclado do host"}</span></button><button disabled={!canControlKeyboard} onClick={() => sendShortcut([{ keyCode: 164, code: "AltLeft", location: 1, repeat: false }, { keyCode: 9, code: "Tab", location: 0, repeat: false }])} title={canControlKeyboard ? "Alternar janela no computador remoto" : controlUnavailable} type="button"><Keyboard aria-hidden="true" size={18} /><span>Alt+Tab</span></button><button disabled={!canControlKeyboard} onClick={() => sendShortcut([{ keyCode: 91, code: "MetaLeft", location: 1, repeat: false }])} title={canControlKeyboard ? "Abrir menu Iniciar no computador remoto" : controlUnavailable} type="button"><Keyboard aria-hidden="true" size={18} /><span>Tecla Windows</span></button><button disabled={!canControlKeyboard} onClick={onSecureAttention} title={canControlKeyboard ? "Enviar Ctrl+Alt+Del ao computador remoto" : controlUnavailable} type="button"><Keyboard aria-hidden="true" size={18} /><span>Ctrl+Alt+Del</span></button><button disabled={!audioAvailable} title={audioTooltip} onClick={onToggleRemoteAudio} type="button">{!audioAvailable || remoteAudioMuted ? <VolumeX aria-hidden="true" size={18} /> : <Volume2 aria-hidden="true" size={18} />}<span>{!audioAvailable ? "Áudio indisponível" : remoteAudioMuted ? "Ativar áudio" : "Silenciar áudio"}</span></button><span title={controlReady ? "Canal de controle conectado" : controlUnavailable} className="viewer-control-state"><i className={controlReady ? "online" : ""} />{controlReady ? "Canal de controle conectado" : "Preparando controles"}</span></div>}
             {activeTool === "transfer" && <div className="viewer-transfer-panel"><div className="viewer-transfer-destination"><FolderOpen aria-hidden="true" size={16} /><span><strong>Destino</strong>Documentos no computador remoto</span></div><label title={fileReady ? "Enviar arquivo para Documentos no computador remoto" : "Transferência indisponível. Verifique a permissão e aguarde o canal de arquivos."} className={fileReady ? "session-upload" : "session-upload disabled"}><FileUp aria-hidden="true" size={18} />Enviar arquivo<input disabled={!fileReady} type="file" onChange={(event) => { const file = event.currentTarget.files?.[0]; if (file) onSendFile(file); event.currentTarget.value = ""; }} /></label><div className="viewer-tool-actions"><button title={clipboardTooltip} disabled={!controlReady || !session.permissions.includes("clipboard:sync")} onClick={onClipboard} type="button"><Clipboard aria-hidden="true" size={18} /><span>Enviar texto copiado</span></button></div><div className="viewer-transfer-list">{transfers.length === 0 ? <p>Nenhuma transferência nesta sessão.</p> : transfers.slice(0, 3).map((item) => <div className="session-transfer-item" key={item.id}><div><strong translate="no">{item.fileName}</strong><span>{fileStatusLabel(item)} · {formatBytes(item.size)}</span></div>{item.url && !item.savedPath && <a download={item.fileName} href={item.url}>Baixar</a>}</div>)}</div></div>}
             {activeTool === "monitor" && <div className="viewer-tool-fields"><label><span>Monitor remoto</span><select defaultValue="" disabled={remoteDisplays.length < 2} onChange={(event) => event.target.value && onDisplayChange(event.target.value)}><option value="">{remoteDisplays.length > 1 ? "Selecionar monitor" : "Monitor principal"}</option>{remoteDisplays.map((display, index) => <option key={display.id} value={display.id}>Monitor {index + 1}</option>)}</select></label></div>}
-            {activeTool === "quality" && <><div className="viewer-tool-fields"><label><span>Perfil solicitado</span><select value={connectionQuality} onChange={(event) => onQualityChange(event.target.value as LocalSettings["connectionQuality"])}><option value="auto">Automática</option><option value="high">Alta</option><option value="balanced">Equilibrada</option><option value="economy">Economia</option></select></label><label><span>Resolução solicitada</span><select value={remoteResolution} onChange={(event) => onResolutionChange(event.target.value as RemoteResolution)}>{resolutionOptions(remoteDisplays, remoteResolution).map((resolution) => <option key={resolution} value={resolution}>{resolutionLabel(resolution)}</option>)}</select></label><label><span>FPS solicitado</span><select value={maxFps} onChange={(event) => onFpsChange(Number(event.target.value) as LocalSettings["maxFps"])}><option value={30}>30 FPS</option><option value={60}>60 FPS</option><option value={120}>120 FPS</option></select></label></div><dl className="viewer-connection-details"><div><dt>Vídeo aplicado</dt><dd>{metrics.appliedFps ? `${metrics.appliedFps} FPS · ${metrics.appliedWidth} × ${metrics.appliedHeight}` : "Aguardando confirmação do host"}</dd></div><div><dt>FPS recebidos</dt><dd>{metrics.fps || "-"}</dd></div><div><dt>FPS apresentados</dt><dd>{metrics.renderFps || "-"}</dd></div></dl></>}
+            {activeTool === "quality" && <><div className="viewer-tool-fields"><label><span>Perfil solicitado</span><select value={connectionQuality} onChange={(event) => onQualityChange(event.target.value as LocalSettings["connectionQuality"])}><option value="auto">Automática</option><option value="high">Alta</option><option value="balanced">Equilibrada</option><option value="economy">Economia</option></select></label><label><span>Resolução solicitada</span><select value={remoteResolution} onChange={(event) => onResolutionChange(event.target.value as RemoteResolution)}>{resolutionOptions(remoteDisplays, remoteResolution).map((resolution) => <option key={resolution} value={resolution}>{resolutionLabel(resolution)}</option>)}</select></label><label><span>FPS solicitado</span><select value={maxFps} onChange={(event) => onFpsChange(Number(event.target.value) as LocalSettings["maxFps"])}><option value={30}>30 FPS</option><option value={60}>60 FPS</option><option value={120}>120 FPS</option></select></label>
+              <label><span>Visualização</span><select value={viewScale} onChange={(event) => setViewScale(event.target.value as "fit" | "native")}><option value="fit">Ajustar à janela</option><option value="native">Original (1:1)</option></select></label>
+            </div><dl className="viewer-connection-details"><div><dt>Vídeo aplicado</dt><dd>{metrics.appliedFps ? `${metrics.appliedFps} FPS · ${metrics.appliedWidth} × ${metrics.appliedHeight}` : "Aguardando confirmação do host"}</dd></div><div><dt>FPS recebidos</dt><dd>{metrics.fps || "-"}</dd></div><div><dt>FPS apresentados</dt><dd>{metrics.renderFps || "-"}</dd></div></dl></>}
             {activeTool === "actions" && <><div className="viewer-tool-fields"><label><span>Áudio da gravação</span><select disabled={recording} value={recordingAudioMode} onChange={(event) => setRecordingAudioMode(event.target.value as RecordingAudioMode)}><option value="none">Sem áudio</option><option value="remote">Áudio remoto</option><option value="microphone">Meu microfone</option><option value="both">Remoto e microfone</option></select></label></div><div className="viewer-tool-actions"><button title="Alternar tela cheia" onClick={enterFullscreen} type="button"><Maximize2 aria-hidden="true" size={18} /><span>Alternar tela cheia</span></button><button title={recording ? "Parar gravação" : "Gravar sessão"} onClick={() => onRecord(recordingAudioMode)} type="button"><Radio aria-hidden="true" size={18} /><span>{recording ? "Parar gravação" : "Gravar sessão"}</span></button><button title={canControlKeyboard ? "Solicitar administrador" : controlUnavailable} disabled={!controlReady || !session.permissions.includes("keyboard:control")} onClick={onRequestAdmin} type="button"><ShieldCheck aria-hidden="true" size={18} /><span>Solicitar administrador</span></button></div></>}
             {activeTool === "connection" && <div className="viewer-connection-inspector">
               <div className="pipeline-flow"><span>Captura <b>{metrics.captureFps || "-"}</b></span><i>›</i><span>Encoder <b>{metrics.encodedFps || "-"}</b></span><i>›</i><span>Rede <b>{metrics.receivedFps || metrics.sentFps || "-"}</b></span><i>›</i><span>Decoder <b>{metrics.decodedFps || "-"}</b></span><i>›</i><span>Render <b>{metrics.renderFps || "-"}</b></span></div>
@@ -4240,7 +4444,7 @@ function RemoteSessionPanel({
           {error && <p className="viewer-session-error" data-kind={sessionFeedbackKind(error)} role={sessionFeedbackKind(error) === "error" ? "alert" : "status"}>{error}</p>}
         </div>
       </div>
-      <footer className="remote-footer"><span><ShieldCheck aria-hidden="true" size={14} /> Conexão segura com criptografia de ponta a ponta</span><span><i /> Conectado · {metrics.route === "relay" ? "Relay" : "P2P"}</span></footer>
+      <footer className="remote-footer"><span><ShieldCheck aria-hidden="true" size={14} /> Conexão segura com criptografia de ponta a ponta</span>{showConnectionMetrics && <span><i /> Conectado · {metrics.route === "relay" ? "Relay" : metrics.route === "unknown" ? "Verificando rota" : "P2P"}</span>}</footer>
     </section>
   );
 }
@@ -4483,6 +4687,7 @@ function FileTransferPanel({
 }
 
 function Settings({
+  identity,
   appVersion,
   captureSources,
   currentUser,
@@ -4494,6 +4699,7 @@ function Settings({
   settings,
   updateSettings,
 }: {
+  identity: LocalIdentity;
   appVersion: string;
   captureSources: CaptureSource[];
   currentUser: LocalUser | null;
@@ -4557,11 +4763,12 @@ function Settings({
       <div className="settings-tabs" role="tablist" aria-label="Categorias das configurações" aria-orientation="vertical" onKeyDown={navigateUiTabs}>
         <button aria-controls="settings-content" aria-selected={section === "general"} id="settings-tab-general" role="tab" tabIndex={section === "general" ? 0 : -1} className={section === "general" ? "active" : ""} onClick={() => setSection("general")} type="button"><Settings2 /><span>Geral<small>Sistema e aparência</small></span></button>
         <button aria-controls="settings-content" aria-selected={section === "access"} id="settings-tab-access" role="tab" tabIndex={section === "access" ? 0 : -1} className={section === "access" ? "active" : ""} onClick={() => setSection("access")} type="button"><LockKeyhole /><span>Acesso<small>Segurança e permissões</small></span></button>
-        <button aria-controls="settings-content" aria-selected={section === "connection"} id="settings-tab-connection" role="tab" tabIndex={section === "connection" ? 0 : -1} className={section === "connection" ? "active" : ""} onClick={() => setSection("connection")} type="button"><Activity /><span>Conexão<small>Qualidade e desempenho</small></span></button>
-        <button aria-controls="settings-content" aria-selected={section === "resolution"} id="settings-tab-resolution" role="tab" tabIndex={section === "resolution" ? 0 : -1} className={section === "resolution" ? "active" : ""} onClick={() => setSection("resolution")} type="button"><Monitor /><span>Resolução<small>Tela e adaptação</small></span></button>
+        <button aria-controls="settings-content" aria-selected={section === "connection"} id="settings-tab-connection" role="tab" tabIndex={section === "connection" ? 0 : -1} className={section === "connection" ? "active" : ""} onClick={() => setSection("connection")} type="button"><Activity /><span>Conexão e tela<small>Qualidade, resolução e desempenho</small></span></button>
         <button aria-controls="settings-content" aria-selected={section === "appearance"} id="settings-tab-appearance" role="tab" tabIndex={section === "appearance" ? 0 : -1} className={section === "appearance" ? "active" : ""} onClick={() => setSection("appearance")} type="button"><Palette /><span>Aparência<small>Tema e idioma</small></span></button>
+        <button aria-controls="settings-content" aria-selected={section === "license"} id="settings-tab-license" role="tab" tabIndex={section === "license" ? 0 : -1} className={section === "license" ? "active" : ""} onClick={() => setSection("license")} type="button"><ShieldCheck /><span>Conta e Licença<small>Plano e assinatura</small></span></button>
       </div>
       <div aria-labelledby={`settings-tab-${section}`} className="settings-page" id="settings-content" role="tabpanel" tabIndex={0}>
+        {section === "license" && <LicensePanel identity={identity} />}
         {section === "general" && <>
           <div className="settings-column">
             {currentUser?.provider !== "google" && <SettingsGroup icon={Settings2} title="Perfil" description="Atualize o nome exibido no Nodus Connect.">
@@ -4620,12 +4827,13 @@ function Settings({
                 updateDraft({ accessPasswordHash: hash });
                 setPasswordDraft("");
               }} disabled={!passwordDraft} type="button">Definir senha</button>
-              {draft.accessPasswordHash && <button className="secondary-button" onClick={() => updateDraft({ accessPasswordHash: "" })} type="button">Remover</button>}
+              {draft.accessPasswordHash && <button className="secondary-button themed-action" onClick={() => updateDraft({ accessPasswordHash: "" })} type="button">Remover</button>}
             </div>
             <small className="note">Quem informar esta senha corretamente entra na conexão sem um novo aceite.</small>
           </div>
         </>}
         {section === "connection" && <>
+          <SettingsGroup icon={Activity} title="Qualidade e desempenho" description="Preferências para suas conexões remotas.">
           <label className="select-row">Qualidade da tela
             <select value={draft.connectionQuality} onChange={(event) => updateDraft({ connectionQuality: event.target.value as LocalSettings["connectionQuality"] })}>
               <option value="auto">Automatica</option><option value="high">Alta</option><option value="balanced">Equilibrada</option><option value="economy">Economia de internet</option>
@@ -4636,11 +4844,12 @@ function Settings({
               <option value={30}>30 FPS</option><option value={60}>60 FPS</option><option value={120}>120 FPS</option>
             </select>
           </label>
-        </>}
-        {section === "resolution" && <SettingsGroup icon={Monitor} title="Resolução e tela" description="A resolução nativa do monitor é usada ao iniciar. Escolha outra opção apenas quando necessário.">
+          <Switch checked={draft.showConnectionMetrics} icon={Gauge} label="Mostrar indicadores na sessão" description="Exibir ping, FPS, rota e resolução na barra do acesso remoto." onChange={(value) => updateDraft({ showConnectionMetrics: value })} />
+          </SettingsGroup>
+          <SettingsGroup icon={Monitor} title="Resolução e tela" description="A resolução nativa do monitor é usada ao iniciar. Escolha outra opção apenas quando necessário.">
           <label className="select-row">Resolução do compartilhamento
             <select value={draft.preferredResolution} onChange={(event) => updateDraft({ preferredResolution: event.target.value as LocalSettings["preferredResolution"] })}>
-              {resolutionOptions(captureSources, draft.preferredResolution).map((resolution) => <option key={resolution} value={resolution}>{resolutionLabel(resolution)}</option>)}
+              {resolutionOptions(captureSources, draft.preferredResolution).map((resolution) => <option key={resolution} value={resolution}>{resolution === "native" ? "Nativa" : resolutionLabel(resolution)}</option>)}
             </select>
           </label>
           <label className="select-row">Tela compartilhada
@@ -4649,7 +4858,8 @@ function Settings({
               {captureSources.map((source) => <option key={source.id} value={source.id}>{source.name}</option>)}
             </select>
           </label>
-        </SettingsGroup>}
+          </SettingsGroup>
+        </>}
         {section === "appearance" && <section className="appearance-page">
           <div className="appearance-intro"><div><h3>Temas</h3><p>Escolha o ambiente visual do Nodus Connect.</p></div><span>{themeOptions.find((theme) => theme.id === draft.theme)?.label}</span></div>
           <div className="theme-grid" role="radiogroup" aria-label="Tema visual">
@@ -4732,6 +4942,7 @@ function captureCursorInfo(track: MediaStreamTrack | null | undefined) {
 
 function videoPoint(surface: HTMLElement, event: MouseEvent) {
   const surfaceRect = surface.getBoundingClientRect();
+  if (surface.dataset.viewScale === "native" && (event.clientX < surfaceRect.left + surface.clientLeft || event.clientY < surfaceRect.top + surface.clientTop || event.clientX >= surfaceRect.left + surface.clientLeft + surface.clientWidth || event.clientY >= surfaceRect.top + surface.clientTop + surface.clientHeight)) return null;
   const video = surface.querySelector("video");
   const rect = video?.getBoundingClientRect() ?? surfaceRect;
   const point = mapVideoPointer(
@@ -4739,7 +4950,12 @@ function videoPoint(surface: HTMLElement, event: MouseEvent) {
     { width: video?.videoWidth ?? 0, height: video?.videoHeight ?? 0 },
     { x: event.clientX - rect.left, y: event.clientY - rect.top },
   );
-  return point ? { ...point, left: point.left + rect.left - surfaceRect.left, top: point.top + rect.top - surfaceRect.top } : null;
+  return point ? { ...point, left: point.left + rect.left - surfaceRect.left - surface.clientLeft + surface.scrollLeft, top: point.top + rect.top - surfaceRect.top - surface.clientTop + surface.scrollTop } : null;
+}
+
+function nativeVideoSize(width: number, height: number, pixelRatio: number) {
+  const ratio = Number.isFinite(pixelRatio) && pixelRatio > 0 ? pixelRatio : 1;
+  return { width: width > 0 ? `${width / ratio}px` : "100%", height: height > 0 ? `${height / ratio}px` : "100%" };
 }
 
 function bottleneckLabel(value: PipelineBottleneck): string {
@@ -4787,8 +5003,13 @@ function preferDesktopCodecs(transceiver: RTCRtpTransceiver, direction: "send" |
 }
 
 function configureLowLatencyReceiver(receiver: RTCRtpReceiver) {
-  const configurable = receiver as RTCRtpReceiver & { jitterBufferTarget?: number | null };
-  if ("jitterBufferTarget" in configurable) configurable.jitterBufferTarget = 20;
+  const configurable = receiver as RTCRtpReceiver & { jitterBufferTarget?: number | null; playoutDelayHint?: number | null };
+  try {
+    if ("jitterBufferTarget" in configurable) configurable.jitterBufferTarget = 20;
+  } catch { /* Unsupported latency hints must not interrupt video reception. */ }
+  try {
+    if ("playoutDelayHint" in configurable) configurable.playoutDelayHint = 0.02;
+  } catch { /* Older Chromium builds may reject this hint independently. */ }
 }
 
 function smoothQualitySample(previous: QualitySample | undefined, sample: QualitySample): QualitySample {
@@ -4814,22 +5035,23 @@ function smoothQualitySample(previous: QualitySample | undefined, sample: Qualit
   };
 }
 
-function encodePointerMessage(x: number, y: number): ArrayBuffer {
-  const buffer = new ArrayBuffer(9);
+function encodePointerMessage(x: number, y: number, probeId?: number): ArrayBuffer {
+  const buffer = new ArrayBuffer(probeId === undefined ? 9 : 13);
   const view = new DataView(buffer);
   view.setUint8(0, 1);
   view.setFloat32(1, x, true);
   view.setFloat32(5, y, true);
+  if (probeId !== undefined) view.setUint32(9, probeId, true);
   return buffer;
 }
 
 function decodePointerMessage(buffer: ArrayBuffer): Extract<RemoteInputMessage, { type: "mouseMove" }> | null {
-  if (buffer.byteLength !== 9) return null;
+  if (buffer.byteLength !== 9 && buffer.byteLength !== 13) return null;
   const view = new DataView(buffer);
   if (view.getUint8(0) !== 1) return null;
   const x = view.getFloat32(1, true);
   const y = view.getFloat32(5, true);
-  return Number.isFinite(x) && Number.isFinite(y) ? { type: "mouseMove", x, y } : null;
+  return Number.isFinite(x) && Number.isFinite(y) ? { type: "mouseMove", x, y, ...(buffer.byteLength === 13 ? { probeId: view.getUint32(9, true) } : {}) } : null;
 }
 
 function allowedPermissions(request: SessionRequestRecord, settings: LocalSettings): SessionPermission[] {
@@ -4884,7 +5106,7 @@ function resultLabel(value: AccessLogEntry["result"]): string {
 
 function toRemoteKeyInput(event: KeyboardEvent): RemoteKeyInput | null {
   const keyCode = virtualKeyFromCode(event.code) || event.keyCode || event.which;
-  if (keyCode <= 0 || keyCode >= 256) return null;
+  if (!Number.isInteger(keyCode) || keyCode <= 0 || keyCode >= 256) return null;
   return { keyCode, code: event.code || event.key, location: event.location, repeat: event.repeat };
 }
 

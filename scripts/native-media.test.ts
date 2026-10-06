@@ -5,10 +5,13 @@ import { createContext, runInContext, runInNewContext } from "node:vm";
 import ts from "typescript";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { captureBackendPlan, requireLegacyCaptureAllowed } from "../apps/desktop/src/core/remote-cursor";
+import { DESKTOP_VIDEO_POLICY } from "../apps/desktop/src/core/adaptive-quality";
 
 const source = ts.createSourceFile("main.cjs", readFileSync("apps/desktop/electron/main.cjs", "utf8"), ts.ScriptTarget.Latest, true, ts.ScriptKind.JS);
 const declaration = source.statements.find((node) => ts.isFunctionDeclaration(node) && node.name?.text === "startNativeMedia")!;
 const policyDeclaration = source.statements.find((node) => ts.isFunctionDeclaration(node) && node.name?.text === "getCaptureBackendPolicy")!;
+const stopEntryDeclaration = source.statements.find((node) => ts.isFunctionDeclaration(node) && node.name?.text === "stopNativeMediaEntry")!;
+const stopOwnerDeclaration = source.statements.find((node) => ts.isFunctionDeclaration(node) && node.name?.text === "stopNativeMediaForOwner")!;
 beforeEach(() => vi.useFakeTimers());
 afterEach(() => vi.useRealTimers());
 
@@ -123,6 +126,19 @@ test("stdin failure is reported rather than left as an unhandled process error",
   await expect(pending).rejects.toThrow("STDIN_ERROR broken pipe");
 });
 
+test("native processes owned by a terminated renderer are stopped immediately", () => {
+  const first = { owner: 1, child: { nodusStopped: false, kill: vi.fn() } };
+  const second = { owner: 2, child: { nodusStopped: false, kill: vi.fn() } };
+  const nativeMedia = new Map([["first", first], ["second", second]]);
+  const stopOwner = runInNewContext(`${stopEntryDeclaration.getText(source)}\n${stopOwnerDeclaration.getText(source)}; stopNativeMediaForOwner`, { nativeMedia, setTimeout });
+  stopOwner(1, true);
+  expect(nativeMedia.has("first")).toBe(false);
+  expect(nativeMedia.has("second")).toBe(true);
+  expect(first.child.nodusStopped).toBe(true);
+  expect(first.child.kill).toHaveBeenCalledOnce();
+  expect(second.child.kill).not.toHaveBeenCalled();
+});
+
 function hostFixture(native: boolean, fallback: boolean, ready = false, startupEvent?: "connected" | "error" | "exit") {
   const source = ts.createSourceFile("App.tsx", readFileSync("apps/desktop/src/App.tsx", "utf8"), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
   const functions: string[] = [];
@@ -153,7 +169,7 @@ function hostFixture(native: boolean, fallback: boolean, ready = false, startupE
     logMediaDiagnostic: vi.fn(), fallbackHostNativeMedia: fallbackNative, sendReliableSignal: async () => {},
     settings: { preferredResolution: "1920x1080", maxFps: 60, allowRemoteControl: true },
     identity: { deviceName: "host", nodusId: "123456789" },
-    performanceDiagnosticRef: { current: null }, iceWarmupRef: { current: null },
+    performanceDiagnosticRef: { current: null }, iceWarmupRef: { current: null }, DESKTOP_VIDEO_POLICY,
     createPeer: () => { cleanup(); peers.current.set("session", peer); return peer; },
     ensureSessionIceServers: async () => [],
     startHostNativeMedia: nativeStart, acquireHostCapture: acquire,
@@ -163,7 +179,7 @@ function hostFixture(native: boolean, fallback: boolean, ready = false, startupE
     upsertRuntime: (value: any) => { runtime.value = value; },
     updateRuntime: (_id: string, patch: any) => { runtime.value = { ...runtime.value, ...patch }; },
     setSessionResolutions: vi.fn(), tuneVideoSender: async () => {},
-    logDiagnostic: vi.fn(), emptyMetrics: () => ({}), startSignalPolling: vi.fn(),
+    logDiagnostic: vi.fn(), emptyMetrics: () => ({}), startSignalListening: vi.fn(),
     cleanupSession: cleanup, removeRuntime: () => { runtime.value = undefined; }, sendSignal: async () => {},
     window: { setTimeout, clearTimeout, nodusDesktop: {
       onNativeMediaSignal: (listener: typeof signal) => { signal = listener; return unsubscribe; },

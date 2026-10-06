@@ -11,6 +11,12 @@ contextBridge.exposeInMainWorld("nodusDesktop", {
   saveIdentity(identity) {
     return ipcRenderer.invoke("nodus:save-identity", identity);
   },
+  getLicenseCredentials() {
+    return ipcRenderer.invoke("nodus:get-license-credentials");
+  },
+  saveLicenseCredentials(credentials) {
+    return ipcRenderer.invoke("nodus:save-license-credentials", credentials);
+  },
   getServerInfo() {
     return ipcRenderer.invoke("nodus:get-server-info");
   },
@@ -91,6 +97,9 @@ contextBridge.exposeInMainWorld("nodusDesktop", {
   applyRemoteInput(input) {
     ipcRenderer.send("nodus:apply-remote-input", input);
   },
+  measureRemoteInput(input) {
+    return ipcRenderer.invoke("nodus:measure-remote-input", input);
+  },
   getCaptureSources() {
     return ipcRenderer.invoke("nodus:get-capture-sources");
   },
@@ -144,5 +153,10 @@ contextBridge.exposeInMainWorld("nodusDesktop", {
     const listener = () => callback();
     ipcRenderer.on("nodus:host-mouse-activity", listener);
     return () => ipcRenderer.removeListener("nodus:host-mouse-activity", listener);
+  },
+  onOpenWorkspace(callback) {
+    const listener = () => callback();
+    ipcRenderer.on("nodus:open-workspace", listener);
+    return () => ipcRenderer.removeListener("nodus:open-workspace", listener);
   },
 });

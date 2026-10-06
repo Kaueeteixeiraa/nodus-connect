@@ -12,8 +12,9 @@ describe("host cursor visibility policy", () => {
   it.each(["new", "connecting", "disconnected", "failed", "closed"])("keeps/restores the host cursor when peer state is %s", (state) => {
     expect(shouldHideHostCursor("host", state, ["mouse:control"], true, "")).toBe(false);
   });
-  it("restores on error and enables hiding again only after recovery", () => {
-    expect(shouldHideHostCursor("host", "connected", ["mouse:control"], true, "Reconectando...")).toBe(false);
+  it("connected sessions keep ownership when a status message is displayed", () => {
+    expect(shouldHideHostCursor("host", "connected", ["mouse:control"], true, "Texto copiado enviado.")).toBe(true);
+    expect(shouldHideHostCursor("host", "disconnected", ["mouse:control"], true, "Reconectando...")).toBe(false);
     expect(shouldHideHostCursor("host", "connected", ["mouse:control"], true, "")).toBe(true);
   });
 });

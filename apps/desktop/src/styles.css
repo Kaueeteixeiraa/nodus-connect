@@ -307,7 +307,7 @@
 .device-menu-actions button:hover { background: rgba(30, 117, 175, .22); color: #fff; }
 .device-menu-actions .device-menu-delete { border-bottom: 0; color: #ffb5bd; }
 .device-menu-actions .device-menu-delete:hover { background: #3a202b; }
-.device-menu-actions form { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 6px; padding: 7px; border-bottom: 1px solid rgba(125, 181, 223, .16); }
+.device-menu-actions form { display: grid; grid-template-columns: minmax(0, 1fr); gap: 6px; padding: 7px; border-bottom: 1px solid rgba(125, 181, 223, .16); }
 .device-menu-actions input { min-width: 0; padding: 7px 8px; border: 1px solid rgba(79, 174, 234, .46); border-radius: 4px; background: #0a1a29; color: #e8f6ff; font: inherit; font-size: .72rem; }
 .device-menu-actions form button { padding: 7px 8px; border: 1px solid rgba(79, 174, 234, .54); border-radius: 4px; color: #6bd0ff; }
 
@@ -1975,17 +1975,36 @@ button[type="submit"]:hover,
   background: rgba(4, 9, 17, 0.48);
 }
 
-/* Account entry keeps authentication focused while preserving every supported sign-in path. */
 .access-gate {
   padding: 22px;
+  background: url("./assets/nodus-future-grid.png") center / cover no-repeat, var(--bg);
 }
 
 .access-card {
-  width: min(460px, 100%);
-  gap: 0;
-  padding: 32px;
-  border-radius: 16px;
+  width: min(360px, 100%);
+  gap: 12px;
+  padding: 24px;
+  border-radius: 8px;
   background: rgba(4, 16, 31, 0.94);
+}
+
+:root[data-theme] .access-gate .access-card.access-entry { width:min(380px,100%); padding:16px; gap:12px; border:0; background:transparent; box-shadow:none; backdrop-filter:none; }
+.access-brand { display:grid; justify-items:center; gap:16px; padding-bottom:24px; text-align:center; }
+.access-brand img { width:176px; height:176px; object-fit:contain; filter:var(--nodus-logo-filter, none); }
+.access-card .access-brand h1 { margin:0; color:var(--text); font-size:30px; line-height:1.2; letter-spacing:0; }
+.access-brand h1 span { display:block; margin-top:3px; color:var(--theme-accent, var(--blue-light)); font-size:18px; font-weight:500; }
+@media (max-height:520px) {
+  .access-brand { gap:8px; padding-bottom:12px; }
+  .access-brand img { width:96px; height:96px; }
+  .access-card .access-brand h1 { font-size:24px; }
+}
+
+.access-card .google-signin-logo {
+  width: 22px;
+  height: 22px;
+  flex-shrink: 0;
+  object-fit: cover;
+  border-radius: 50%;
 }
 
 .account-heading h1 {
@@ -3611,6 +3630,16 @@ button[type="submit"]:hover,
 }
 
 .settings-column { display: grid; align-content: start; gap: 12px; min-width: 0; }
+.license-panel { grid-column: 1 / -1; min-width: 0; display: grid; align-content: start; gap: 16px; }
+.license-panel header { display: flex; align-items: center; gap: 10px; }
+.license-panel h2 { margin: 0; font-size: 20px; }
+.license-panel dl { display: grid; grid-template-columns: minmax(100px, 180px) minmax(0, 1fr); gap: 12px; margin: 0; }
+.license-panel dt { color: var(--text-muted); }
+.license-panel dd { margin: 0; overflow-wrap: anywhere; }
+.license-panel progress { display: block; width: 100%; max-width: 420px; height: 8px; margin: 10px 0; accent-color: var(--theme-accent, var(--blue)); }
+.license-panel label { display: grid; gap: 8px; max-width: 480px; }
+.license-panel input { width: 100%; min-width: 0; padding: 12px; border: 1px solid var(--theme-line, var(--line)); border-radius: 6px; color: var(--text); background: var(--theme-control, var(--surface)); }
+.license-panel button { justify-self: start; max-width: 100%; white-space: normal; }
 
 .workspace-search {
   width: min(260px, 24vw);
@@ -5200,11 +5229,11 @@ button[type="submit"]:hover,
   background-size: cover !important;
 }
 
-:root[data-theme="japan"] .apex-app:not(.remote-mode) { background: linear-gradient(rgba(255, 241, 222, .72), rgba(244, 224, 204, .82)), url("./assets/theme-feudal-japan.png") center / cover no-repeat; }
-:root[data-theme="sakura-night"] .apex-app:not(.remote-mode) { background: linear-gradient(rgba(8, 10, 30, .72), rgba(10, 7, 28, .88)), url("./assets/theme-sakura-night.png") center / cover no-repeat; }
-:root[data-theme="neo-tokyo"] .apex-app:not(.remote-mode) { background: linear-gradient(rgba(5, 5, 25, .78), rgba(5, 5, 25, .88)), url("./assets/theme-neo-tokyo.png") center / cover no-repeat; }
-:root[data-theme="cosmos"] .apex-app:not(.remote-mode) { background: linear-gradient(rgba(6, 4, 24, .76), rgba(6, 4, 24, .9)), url("./assets/theme-cosmos.png") center / cover no-repeat; }
-:root[data-theme="arctic"] .apex-app:not(.remote-mode) { background: linear-gradient(rgba(239, 251, 255, .72), rgba(224, 246, 252, .86)), url("./assets/theme-arctic.png") center / cover no-repeat; }
+:root[data-theme="japan"] :is(.apex-app:not(.remote-mode), .access-gate) { background: linear-gradient(rgba(255, 241, 222, .72), rgba(244, 224, 204, .82)), url("./assets/theme-feudal-japan.png") center / cover no-repeat; }
+:root[data-theme="sakura-night"] :is(.apex-app:not(.remote-mode), .access-gate) { background: linear-gradient(rgba(8, 10, 30, .72), rgba(10, 7, 28, .88)), url("./assets/theme-sakura-night.png") center / cover no-repeat; }
+:root[data-theme="neo-tokyo"] :is(.apex-app:not(.remote-mode), .access-gate) { background: linear-gradient(rgba(5, 5, 25, .78), rgba(5, 5, 25, .88)), url("./assets/theme-neo-tokyo.png") center / cover no-repeat; }
+:root[data-theme="cosmos"] :is(.apex-app:not(.remote-mode), .access-gate) { background: linear-gradient(rgba(6, 4, 24, .76), rgba(6, 4, 24, .9)), url("./assets/theme-cosmos.png") center / cover no-repeat; }
+:root[data-theme="arctic"] :is(.apex-app:not(.remote-mode), .access-gate) { background: linear-gradient(rgba(239, 251, 255, .72), rgba(224, 246, 252, .86)), url("./assets/theme-arctic.png") center / cover no-repeat; }
 
 :root[data-theme="japan"] .workspace-header { background: linear-gradient(90deg, rgba(255, 245, 232, .94), rgba(255, 241, 224, .72), rgba(255, 245, 232, .94)), url("./assets/theme-feudal-japan.png") center / cover no-repeat; }
 :root[data-theme="sakura-night"] .workspace-header { background: linear-gradient(90deg, rgba(9, 10, 31, .92), rgba(12, 10, 34, .66), rgba(9, 10, 31, .92)), url("./assets/theme-sakura-night.png") center / cover no-repeat; }
@@ -5484,7 +5513,7 @@ button[type="submit"]:hover,
   padding: 0 8px;
   font-size: .7rem;
 }
-:root[data-theme] .apex-app :is(.recent-device-row > .recent-device-connect, .connection-overview .connect-box > button, .device-access:not(:disabled), .settings-panel .themed-action) {
+:root[data-theme] :is(.apex-app, .access-gate, .device-menu-actions) :is(.recent-device-row > .recent-device-connect, .connection-overview .connect-box > button, .device-access:not(:disabled), .themed-action) {
   --connect-accent: var(--theme-accent, var(--blue));
   min-width: 0;
   gap: 6px;
@@ -5497,18 +5526,20 @@ button[type="submit"]:hover,
   white-space: nowrap;
   cursor: pointer;
 }
-:root[data-theme] .apex-app :is(.recent-device-row > .recent-device-connect, .connection-overview .connect-box > button, .device-access:not(:disabled), .settings-panel .themed-action) svg { flex-shrink: 0; }
-:root[data-theme] .apex-app :is(.recent-device-row > .recent-device-connect, .connection-overview .connect-box > button, .device-access:not(:disabled), .settings-panel .themed-action):not(:disabled):hover {
+:root[data-theme] :is(.apex-app, .access-gate, .device-menu-actions) :is(.recent-device-row > .recent-device-connect, .connection-overview .connect-box > button, .device-access:not(:disabled), .themed-action) svg { flex-shrink: 0; }
+:root[data-theme] :is(.apex-app, .access-gate, .device-menu-actions) :is(.recent-device-row > .recent-device-connect, .connection-overview .connect-box > button, .device-access:not(:disabled), .themed-action):not(:disabled):hover {
   border-color: var(--connect-accent) !important;
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, .2), 0 4px 12px color-mix(in srgb, var(--connect-accent) 24%, transparent) !important;
 }
-:root[data-theme] .apex-app :is(.recent-device-row > .recent-device-connect, .connection-overview .connect-box > button, .device-access:not(:disabled), .settings-panel .themed-action):focus-visible {
+:root[data-theme] :is(.apex-app, .access-gate, .device-menu-actions) :is(.recent-device-row > .recent-device-connect, .connection-overview .connect-box > button, .device-access:not(:disabled), .themed-action):focus-visible {
   outline: 2px solid var(--connect-accent);
   outline-offset: 3px;
 }
-:root[data-theme] .apex-app :is(.recent-device-row > .recent-device-connect, .connection-overview .connect-box > button, .device-access:not(:disabled), .settings-panel .themed-action):not(:disabled):active { box-shadow: inset 0 2px 4px rgba(0, 0, 0, .22) !important; }
-.settings-panel .themed-action { display: inline-flex; align-items: center; justify-content: center; min-height: 40px; padding: 8px 12px; font-family: inherit; font-size: .75rem; }
-:root[data-theme] .apex-app .settings-panel .themed-action:disabled {
+:root[data-theme] :is(.apex-app, .access-gate, .device-menu-actions) :is(.recent-device-row > .recent-device-connect, .connection-overview .connect-box > button, .device-access:not(:disabled), .themed-action):not(:disabled):active { box-shadow: inset 0 2px 4px rgba(0, 0, 0, .22) !important; }
+:is(.apex-app, .access-gate, .device-menu-actions) .themed-action { display: inline-flex; align-items: center; justify-content: center; min-height: 40px; padding: 8px 12px; font-family: inherit; font-size: .75rem; }
+.access-card > .themed-action { width:100%; min-height:44px; white-space:normal !important; }
+.access-card > .themed-action:hover { transform:none; }
+:root[data-theme] :is(.apex-app, .device-menu-actions) .themed-action:disabled {
   border-color: var(--theme-line, var(--line)) !important;
   background: var(--theme-control, var(--surface-light)) !important;
   color: var(--text-soft) !important;
@@ -6084,6 +6115,8 @@ button[type="submit"]:hover,
 .remote-local-cursor svg { display:block; fill:#fff; stroke:#111; stroke-width:1.5; stroke-linejoin:round; }
 .viewer-session-v2 .remote-viewer-surface:fullscreen { border:0; border-radius:0; background:#000; }
 .viewer-session-v2 .remote-viewer-surface video { width:100%; height:100%; object-fit:contain; background:#000; }
+.viewer-session-v2 .viewer-stage .remote-viewer-surface[data-view-scale="native"] { display:block; overflow:auto; scrollbar-width:thin; }
+.viewer-session-v2 .remote-viewer-surface[data-view-scale="native"] video { display:block; width:var(--remote-native-width, 100%); height:var(--remote-native-height, 100%); max-width:none; max-height:none; margin:0 auto; }
 .viewer-tool-popover { position:fixed; z-index:12; overflow:auto; padding:14px; border:1px solid rgba(50,164,237,.55); border-radius:0 0 8px 8px; background:#03101d; box-shadow:0 8px 20px rgba(0,0,0,.3); scrollbar-width:thin; }
 .viewer-tool-title { display:flex; align-items:center; justify-content:space-between; gap:12px; padding-bottom:10px; border-bottom:1px solid rgba(50,151,219,.2); }
 .viewer-tool-title strong { color:#f0f9ff; font-size:13px; }

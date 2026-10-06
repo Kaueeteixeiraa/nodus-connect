@@ -206,6 +206,9 @@ const additions: Record<string, [string, string, string]> = {
   "Lembrar de mim": ["Remember me", "Запомнить меня", "ログイン状態を保存"],
   "Esqueceu a senha?": ["Forgot password?", "Забыли пароль?", "パスワードをお忘れですか？"],
   "Continuar sem uma conta": ["Continue without an account", "Продолжить без учётной записи", "アカウントなしで続行"],
+  "Entrar sem conta": ["Continue without an account", "Войти без учётной записи", "アカウントなしで続行"],
+  "Entrar com o Google": ["Sign in with Google", "Войти через Google", "Google でログイン"],
+  "Acesso ao Nodus": ["Nodus sign-in", "Вход в Nodus", "Nodus へのログイン"],
   "Seus dados estão protegidos com criptografia de ponta a ponta.": ["Your data is protected with end-to-end encryption.", "Ваши данные защищены сквозным шифрованием.", "データはエンドツーエンド暗号化で保護されています。"],
   "Atividade recente": ["Recent activity", "Недавняя активность", "最近の履歴"],
   "Ver tudo": ["View all", "Показать всё", "すべて表示"],
@@ -388,6 +391,9 @@ Object.assign(additions, {
   "Liberar teclado do host": ["Release host keyboard", "Разблокировать клавиатуру хоста", "ホストのキーボードを解除"],
   "Bloqueio de entrada não disponível neste computador.": ["Input blocking is unavailable on this computer.", "Блокировка ввода недоступна на этом компьютере.", "このコンピューターでは入力ブロックを利用できません。"],
   "FPS solicitado": ["Requested FPS", "Запрошенная частота кадров", "要求した FPS"],
+  "Visualização": ["View", "Отображение", "表示"],
+  "Ajustar à janela": ["Fit to window", "По размеру окна", "ウィンドウに合わせる"],
+  "Original (1:1)": ["Original (1:1)", "Исходный размер (1:1)", "元のサイズ (1:1)"],
   "Vídeo aplicado": ["Applied video", "Применённое видео", "適用された映像"],
   "FPS recebidos": ["Received FPS", "Полученные кадры/с", "受信 FPS"],
   "FPS apresentados": ["Presented FPS", "Отображённые кадры/с", "表示 FPS"],
@@ -419,6 +425,13 @@ Object.assign(additions, {
   "Exporte preferências seguras ou restaure um arquivo .nodus.": ["Export safe preferences or restore a .nodus file.", "Экспортируйте безопасные настройки или восстановите файл .nodus.", "安全な設定をエクスポートするか、.nodus ファイルを復元します。"],
   "Exportar configurações": ["Export settings", "Экспортировать настройки", "設定をエクスポート"],
   "Importar configurações": ["Import settings", "Импортировать настройки", "設定をインポート"],
+  "Conexão e tela": ["Connection and display", "Подключение и экран", "接続と画面"],
+  "Nativa": ["Native", "Исходное", "標準"],
+  "Qualidade, resolução e desempenho": ["Quality, resolution and performance", "Качество, разрешение и производительность", "画質、解像度、パフォーマンス"],
+  "Preferências para suas conexões remotas.": ["Preferences for your remote connections.", "Настройки удалённых подключений.", "リモート接続の設定。"],
+  "Mostrar indicadores na sessão": ["Show session indicators", "Показывать показатели сеанса", "セッション情報を表示"],
+  "Exibir ping, FPS, rota e resolução na barra do acesso remoto.": ["Show ping, FPS, route and resolution in the remote access bar.", "Показывать пинг, FPS, маршрут и разрешение на панели удалённого доступа.", "リモート操作バーに ping、FPS、接続経路、解像度を表示。"],
+  "O período de teste foi concluído. Solicite mais acessos ou adquira uma licença. Você pode continuar recebendo acesso remoto.": ["Your trial has ended. Request more connections or purchase a license. You can still receive remote access.", "Пробный период завершён. Запросите больше подключений или приобретите лицензию. Вы можете продолжать принимать удалённый доступ.", "試用期間が終了しました。接続回数の追加を申請するか、ライセンスを購入してください。リモート接続の受信は引き続き可能です。"],
 });
 for (const [source, values] of Object.entries(additions)) languages.forEach((language, index) => { dictionaries[language][source] = values[index]; });
 const aliases: Record<string, string> = { "Aguardando conexao": "Aguardando conexão", "Canal Nodus pronto": "CANAL NODUS PRONTO", "Conexao segura disponivel": "Conexão segura disponível", "Resolucao preferida": "Resolução preferida", "Transferencia de arquivos": "Transferência de arquivos", "Os computadores acessados aparecerao aqui para conexoes mais rapidas.": "Os computadores acessados aparecerão aqui para conexões mais rápidas." };
@@ -439,7 +452,7 @@ const templateMatchers = Object.entries(templates).flatMap(([source, values]) =>
 }));
 const textSources = new WeakMap<Text, { source: string; last: string }>();
 const attributeSources = new WeakMap<Element, Map<string, { source: string; last: string }>>();
-let observer: MutationObserver | undefined;
+const observers = new WeakMap<Document, MutationObserver>();
 
 function baseText(value: string): string {
   return aliases[value] ?? (sources.has(value) ? value : reverse.get(value) ?? value);
@@ -483,7 +496,7 @@ function translateTree(root: Node, language: UiLanguage): void {
   };
   if (root.nodeType === Node.TEXT_NODE) applyText(root as Text);
   if (root.nodeType === Node.ELEMENT_NODE) applyAttributes(root as Element);
-  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT | NodeFilter.SHOW_ELEMENT);
+  const walker = (root.ownerDocument ?? document).createTreeWalker(root, NodeFilter.SHOW_TEXT | NodeFilter.SHOW_ELEMENT);
   let node = walker.nextNode();
   while (node) {
     if (node.nodeType === Node.TEXT_NODE) applyText(node as Text);
@@ -492,16 +505,18 @@ function translateTree(root: Node, language: UiLanguage): void {
   }
 }
 
-export function applyLanguage(language: UiLanguage): void {
-  document.documentElement.lang = language;
-  observer?.disconnect();
-  if (!document.body) return;
-  translateTree(document.body, language);
-  observer = new MutationObserver((records) => records.forEach((record) => {
+export function applyLanguage(language: UiLanguage, target = document): () => void {
+  target.documentElement.lang = language;
+  observers.get(target)?.disconnect();
+  if (!target.body) return () => undefined;
+  translateTree(target.body, language);
+  const observer = new MutationObserver((records) => records.forEach((record) => {
     if (record.type === "attributes" || record.type === "characterData") translateTree(record.target, language);
     else record.addedNodes.forEach((node) => translateTree(node, language));
   }));
-  observer.observe(document.body, { subtree: true, childList: true, characterData: true, attributes: true, attributeFilter: ["placeholder", "title", "aria-label", "data-tooltip"] });
+  observer.observe(target.body, { subtree: true, childList: true, characterData: true, attributes: true, attributeFilter: ["placeholder", "title", "aria-label", "data-tooltip"] });
+  observers.set(target, observer);
+  return () => observer.disconnect();
 }
 
 export function currentLocale(): UiLanguage {

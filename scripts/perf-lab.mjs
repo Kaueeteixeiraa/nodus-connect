@@ -36,16 +36,20 @@ async function evaluateCdp([port, expression]) {
 
 async function printReport(reportArgs) {
   const path = reportArgs.find((value) => !value.startsWith("--"));
-  if (!path) throw new Error("Uso: node scripts/perf-lab.mjs report <performance.log> [--duration=60] [--session=id] [--peer=outro-performance.log]");
+  if (!path) throw new Error("Uso: node scripts/perf-lab.mjs report <performance.log> [--duration=60] [--session=id] [--peer=outro-performance.log] [--end=data-ISO]");
   const duration = Number(option(reportArgs, "duration") ?? 60);
   if (!Number.isFinite(duration) || duration <= 0) throw new Error("--duration deve ser um numero positivo de segundos.");
   const requestedSession = option(reportArgs, "session");
   const peerPath = option(reportArgs, "peer");
-  const primaryRecords = parseRecords(await readFile(path, "utf8"));
+  const endOption = option(reportArgs, "end");
+  const end = endOption === undefined ? Infinity : Date.parse(endOption);
+  if (!Number.isFinite(end) && end !== Infinity) throw new Error("--end deve ser uma data ISO valida.");
+  const beforeEnd = (item) => Date.parse(item.at) <= end;
+  const primaryRecords = parseRecords(await readFile(path, "utf8")).filter(beforeEnd);
   const samples = primaryRecords.filter((item) => !item.event && item.sessionId);
   if (!samples.length) throw new Error("O log nao possui amostras de desempenho.");
   const sessionId = requestedSession ?? samples.at(-1).sessionId;
-  const records = peerPath ? [...primaryRecords, ...parseRecords(await readFile(peerPath, "utf8"))] : primaryRecords;
+  const records = peerPath ? [...primaryRecords, ...parseRecords(await readFile(peerPath, "utf8")).filter(beforeEnd)] : primaryRecords;
   const sessionSamples = records.filter((item) => !item.event && item.sessionId === sessionId && Number.isFinite(Date.parse(item.at)));
   if (!sessionSamples.length) throw new Error(`Sessao ${sessionId} nao encontrada nos logs.`);
   const latestByRole = Object.fromEntries([...new Set(sessionSamples.map((item) => item.role))].map((role) => [role, Math.max(...sessionSamples.filter((item) => item.role === role).map((item) => Date.parse(item.at)))]));
@@ -109,6 +113,9 @@ async function printReport(reportArgs) {
     ? track.width > 0 && track.height > 0 && track.frameRate === expectedBenchmark.fps
     : track.width === Number(expectedBenchmark.resolution?.split("x")[0]) && track.height === Number(expectedBenchmark.resolution?.split("x")[1]) && track.frameRate === expectedBenchmark.fps;
   const adaptiveChanges = maximum(host, "profileChangeCount") ?? 0;
+  const inputWindows = viewer.map((sample) => sample.inputDiagnostic).filter(Boolean);
+  const inputAcks = [...new Map(inputWindows.filter((sample) => sample.latest).map((sample) => [sample.latest.id, sample.latest])).values()];
+  const confirmedInput = inputAcks.filter((sample) => sample.ok && sample.positionConfirmed === true);
   const report = {
     sessionId,
     diagnostic: {
@@ -124,6 +131,29 @@ async function printReport(reportArgs) {
     windowSeconds: Math.round(Math.min(...Object.entries(latestByRole).map(([role, latest]) => (latest - Math.min(...windowSamples.filter((item) => item.role === role).map((item) => Date.parse(item.at)))) / 1000))),
     samples: windowSamples.length,
     roles: [...new Set(windowSamples.map((item) => item.role))],
+    input: {
+      enabled: inputWindows.length > 0, hostSupported: inputWindows.some((sample) => sample.hostSupported === true),
+      samples: inputAcks.length, windowsPositionConfirmedSamples: confirmedInput.length,
+      failedSamples: inputAcks.filter((sample) => !sample.ok).length,
+      mouseEventsPerSecond: round(average(inputWindows, "mouseEventsPerSecond")),
+      sendsPerSecond: round(average(inputWindows, "sendsPerSecond")),
+      coalesced: maximum(inputWindows, "coalesced"), bufferDrops: maximum(inputWindows, "bufferDrops"),
+      hostRateDrops: maximum(host.map((sample) => sample.inputDiagnostic).filter(Boolean), "rateDrops"),
+      bufferedAmountPeak: maximum(inputWindows, "bufferedAmount"), probeTimeouts: maximum(inputWindows, "probeTimeouts"),
+      eventToSendMsAverage: round(average(inputAcks, "eventToSendMs")),
+      nativeAckRttMsAverage: round(average(confirmedInput, "commandAckRttMs")),
+      nativeAckRttMsP95: round(percentile(confirmedInput, "commandAckRttMs", 0.95)),
+      nativeAckRttMsP99: round(percentile(confirmedInput, "commandAckRttMs", 0.99)),
+      nativeAckRttMsMax: round(maximum(confirmedInput, "commandAckRttMs")),
+      nativeAckOver500MsSamples: confirmedInput.filter((sample) => sample.commandAckRttMs >= 500).length,
+      unconfirmedPositionSamples: inputAcks.filter((sample) => sample.ok && sample.positionConfirmed === false).length,
+      hostProcessingMsAverage: round(average(confirmedInput, "hostProcessingMs")),
+      ipcRoundTripMsAverage: round(average(confirmedInput, "ipcRoundTripMs")),
+      mainToWindowsAckMsAverage: round(average(confirmedInput, "mainToWindowsAckMs")),
+      transportAckRoundTripMsAverage: round(average(confirmedInput, "transportAckRoundTripMs")),
+      oneWayTransportMs: null, commandLatencyMs: null, visualFeedbackLatencyMs: null,
+      measurement: "native-input-barrier-ack-rtt-not-one-way",
+    },
     fps: { ...Object.fromEntries(["captureFps", "encodedFps", "sentFps", "receivedFps", "decodedFps"].map((key) => [key, round(average(["captureFps", "encodedFps", "sentFps"].includes(key) ? sender : viewer, key))])), renderFps: presentedFps ?? callbackFps, renderCallbacksFps: callbackFps },
     renderFps1PercentLow: activeRender.length >= 20 && activeRender.every((item) => item.renderMeasurement === "presentedFrames") ? round(percentile(activeRender, "renderFps", 0.01)) : null,
     network: {
@@ -133,7 +163,7 @@ async function printReport(reportArgs) {
       rttMsP95: round(percentile(receiver, "latencyMs", 0.95)),
       controlRttMsAverage: round(average(viewer, "controlLatencyMs")),
       jitterMs: round(average(receiver, "jitterMs")),
-      packetLossPct: round(average(receiver, "packetLossPct")),
+      packetLossPct: round(average(receiver.filter((item) => item.packetLossPctValid !== false), "packetLossPct")),
       jitterBufferMs: round(average(validPlayout, "jitterBufferMs")),
       rtpJitterMs: round(average(receiver, "jitterMs")),
       availableKbps: round(average(host, "availableKbps")),
@@ -262,9 +292,9 @@ async function printReport(reportArgs) {
 
 function parseRecords(contents) {
   return contents.split(/\r?\n/).flatMap((line) => {
-    const payload = line.match(/^\[[^\]]+\]\s+(\{.*\})$/)?.[1];
-    if (!payload) return [];
-    try { return [JSON.parse(payload)]; } catch { return []; }
+    const match = line.match(/^\[([^\]]+)\]\s+(\{.*\})$/);
+    if (!match) return [];
+    try { const record = JSON.parse(match[2]); return [{ ...record, at: record.at ?? match[1] }]; } catch { return []; }
   });
 }
 

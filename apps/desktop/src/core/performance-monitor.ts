@@ -2,6 +2,79 @@ export type PipelineBottleneck = "CAPTURE" | "ENCODER" | "NETWORK" | "DECODER" |
 export type EncoderKind = "hardware" | "software" | "unknown";
 export type EncoderVendor = "intel" | "nvidia" | "amd" | "media-foundation" | "apple" | "unknown";
 
+export function receiverPacketLoss(feedback: { receivedAt: number; packetLossPct?: number; packetLossPctValid?: boolean } | undefined, now: number): number | null {
+  if (!feedback || !Number.isFinite(feedback.receivedAt) || now < feedback.receivedAt || now - feedback.receivedAt >= 3000
+    || feedback.packetLossPctValid === false || typeof feedback.packetLossPct !== "number"
+    || !Number.isFinite(feedback.packetLossPct) || feedback.packetLossPct < 0 || feedback.packetLossPct > 100) return null;
+  return feedback.packetLossPct;
+}
+
+export type InputDiagnosticAck = {
+  ok: boolean; error?: string; hostProcessingMs: number; ipcRoundTripMs: number;
+  positionConfirmed?: boolean; mainToWindowsAckMs?: number; windowsPosition?: { x: number; y: number };
+};
+
+export class InputLatencyDiagnostic {
+  hostSupported = false;
+  events = 0;
+  coalesced = 0;
+  sent = 0;
+  bufferDrops = 0;
+  received = 0;
+  rateDrops = 0;
+  timeouts = 0;
+  serializationMs = 0;
+  eventToSendMs: number | null = null;
+  latest: (InputDiagnosticAck & { id: number; eventToSendMs: number | null; commandAckRttMs: number; transportAckRoundTripMs: number | null }) | null = null;
+  private sequence = 0;
+  private lastProbeAt = -Infinity;
+  private pending = new Map<number, { sentAt: number; eventToSendMs: number | null }>();
+  private windowAt: number;
+  private lastCounts = { events: 0, sent: 0, received: 0 };
+
+  constructor(now: number) { this.windowAt = now; }
+
+  probe(now: number): number | undefined {
+    this.expire(now);
+    if (!this.hostSupported || now - this.lastProbeAt < 1000 || this.pending.size >= 4) return undefined;
+    this.lastProbeAt = now;
+    this.sequence = this.sequence % 0xffffffff + 1;
+    this.pending.set(this.sequence, { sentAt: now, eventToSendMs: this.eventToSendMs });
+    return this.sequence;
+  }
+
+  acknowledge(id: number, now: number, result: InputDiagnosticAck) {
+    const pending = this.pending.get(id);
+    if (!pending || !Number.isFinite(result.hostProcessingMs) || result.hostProcessingMs < 0
+      || !Number.isFinite(result.ipcRoundTripMs) || result.ipcRoundTripMs < 0) return;
+    this.pending.delete(id);
+    const commandAckRttMs = Math.max(0, now - pending.sentAt);
+    this.latest = { ...result, id, eventToSendMs: pending.eventToSendMs, commandAckRttMs,
+      transportAckRoundTripMs: result.ok ? Math.max(0, commandAckRttMs - result.hostProcessingMs) : null };
+  }
+
+  cancel(id: number) { this.pending.delete(id); }
+
+  snapshot(now: number, bufferedAmount: number) {
+    this.expire(now);
+    const elapsed = Math.max(1, now - this.windowAt);
+    const rates = { mouseEventsPerSecond: (this.events - this.lastCounts.events) * 1000 / elapsed,
+      sendsPerSecond: (this.sent - this.lastCounts.sent) * 1000 / elapsed,
+      receivesPerSecond: (this.received - this.lastCounts.received) * 1000 / elapsed };
+    this.windowAt = now;
+    this.lastCounts = { events: this.events, sent: this.sent, received: this.received };
+    return { ...rates, events: this.events, sent: this.sent, received: this.received, coalesced: this.coalesced,
+      bufferDrops: this.bufferDrops, rateDrops: this.rateDrops, bufferedAmount, eventToSendMs: this.eventToSendMs,
+      serializationMs: this.serializationMs, hostSupported: this.hostSupported, pendingProbes: this.pending.size,
+      probeTimeouts: this.timeouts, latest: this.latest, oneWayTransportMs: null, commandLatencyMs: null,
+      visualFeedbackLatencyMs: null, measurement: "native-input-barrier-ack-rtt-not-one-way" };
+  }
+
+  private expire(now: number) {
+    for (const [id, pending] of this.pending) if (now - pending.sentAt >= 5000) { this.pending.delete(id); this.timeouts++; }
+  }
+}
+
 export type PipelineSample = {
   role: "host" | "viewer";
   targetFps: number;

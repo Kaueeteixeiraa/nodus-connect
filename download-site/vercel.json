@@ -2,6 +2,14 @@
   "cleanUrls": true,
   "rewrites": [
     {
+      "source": "/licença",
+      "destination": "/licenca"
+    },
+    {
+      "source": "/licen%C3%A7a",
+      "destination": "/licenca"
+    },
+    {
       "source": "/baixar",
       "destination": "/"
     }

@@ -1,5 +1,12 @@
+packages:
+  - services/licensing
+
 allowBuilds:
   '@firebase/util': true
   electron-winstaller: true
   esbuild: true
   protobufjs: true
+overrides:
+  'google-gax>uuid': 11.1.1
+  'teeny-request>uuid': 11.1.1
+  '@grpc/grpc-js': 1.13.6

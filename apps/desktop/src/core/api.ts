@@ -1,4 +1,6 @@
 import { normalizeNodusId } from "../../../../packages/common/src/nodusId";
+import { relayLicenseHeaders, licenseEnded } from "./licensing";
+import { LicenseError, LICENSE_MESSAGES } from "../../../../packages/licensing/src/index";
 import {
   cloudAcceptSessionRequest,
   cloudCreateSessionRequest,
@@ -178,7 +180,12 @@ export async function heartbeat(identity: LocalIdentity | string): Promise<Coord
   const nodusId = typeof identity === "string" ? identity : identity.nodusId;
   const normalized = normalizeNodusId(nodusId);
   if (!normalized) throw new Error("Nodus ID invalido");
-  return request(`/v1/presence/${normalized}/heartbeat`, { method: "POST" });
+  try {
+    return await request(`/v1/presence/${normalized}/heartbeat`, { method: "POST" });
+  } catch (error) {
+    if (typeof identity !== "string" && error instanceof Error && error.message === formatApiError("DEVICE_NOT_FOUND")) return registerPresence(identity);
+    throw error;
+  }
 }
 
 export async function unregisterPresence(identity: LocalIdentity | string): Promise<CoordinationDevice> {
@@ -203,6 +210,7 @@ export async function lookupDevice(nodusId: string): Promise<CoordinationDevice 
 }
 
 export async function createSessionRequest(input: {
+  sessionId?: string;
   requesterNodusId: string;
   requesterName: string;
   targetNodusId: string;
@@ -239,8 +247,9 @@ export async function acceptSessionRequest(id: string, targetName: string, grant
 }
 
 export async function denySessionRequest(id: string): Promise<SessionRequestRecord> {
-  if (firebaseConfigured()) return cloudDenySessionRequest(id);
-  return requestJson(`/v1/session-requests/${id}/deny`, { method: "POST" });
+  const result = firebaseConfigured() ? await cloudDenySessionRequest(id) : await requestJson<SessionRequestRecord>(`/v1/session-requests/${id}/deny`, { method: "POST" });
+  if (result.sessionId) licenseEnded(result.sessionId);
+  return result;
 }
 
 export async function sendSignal(
@@ -272,13 +281,18 @@ async function requestJson<T>(path: string, init: RequestInit = {}): Promise<T> 
     ...init,
     headers: {
       "content-type": "application/json",
+      ...await relayLicenseHeaders(),
       ...(getCoordinationAuthToken() ? { authorization: `Bearer ${getCoordinationAuthToken()}` } : {}),
       ...init.headers,
     },
   });
 
   const data = await response.json().catch(() => null);
-  if (!response.ok) throw new Error(formatApiError((data as { error?: string } | null)?.error, response.status));
+  if (!response.ok) {
+    const error = (data as { error?: string } | null)?.error;
+    if (error && Object.hasOwn(LICENSE_MESSAGES, error)) throw new LicenseError(error as keyof typeof LICENSE_MESSAGES);
+    throw new Error(formatApiError(error, response.status));
+  }
   return data as T;
 }
 

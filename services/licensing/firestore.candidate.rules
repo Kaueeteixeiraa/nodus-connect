@@ -1,0 +1,152 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() {
+      return request.auth != null;
+    }
+    function licensingEnabled() {
+      return exists(/databases/$(database)/documents/license_policy/current)
+        && get(/databases/$(database)/documents/license_policy/current).data.enforced == true;
+    }
+    function initiatorAllowed(nodusId, uid) {
+      return get(/databases/$(database)/documents/devices/$(nodusId)).data.ownerUid == uid
+        && (!exists(/databases/$(database)/documents/license_access_blocks/$(nodusId))
+          || get(/databases/$(database)/documents/license_access_blocks/$(nodusId)).data.blocked != true);
+    }
+    function readyGrant(sessionId) {
+      let grant = get(/databases/$(database)/documents/license_session_grants/$(sessionId)).data;
+      return grant.status == 'RESERVED' && grant.expiresAt > request.time.toMillis();
+    }
+    function activeGrant(sessionId) {
+      let grant = get(/databases/$(database)/documents/license_session_grants/$(sessionId)).data;
+      return grant.status == 'ESTABLISHED' || (grant.status == 'RESERVED' && grant.expiresAt > request.time.toMillis());
+    }
+    function licensedRequest(requestId) {
+      let data = request.resource.data;
+      let grant = get(/databases/$(database)/documents/license_session_grants/$(requestId)).data;
+      return data.sessionId == requestId && readyGrant(requestId)
+        && grant.requesterUid == request.auth.uid && data.requesterUid == grant.requesterUid
+        && data.targetUid == grant.targetUid && data.requesterNodusId == grant.requesterNodusId
+        && data.targetNodusId == grant.targetNodusId
+        && !exists(/databases/$(database)/documents/license_transport_admissions/$(requestId))
+        && !exists(/databases/$(database)/documents/sessions/$(requestId));
+    }
+    function licensedSession(sessionId) {
+      let data = request.resource.data;
+      let grant = get(/databases/$(database)/documents/license_session_grants/$(sessionId)).data;
+      let pending = get(/databases/$(database)/documents/sessionRequests/$(sessionId)).data;
+      return readyGrant(sessionId) && request.auth.uid == grant.targetUid
+        && pending.sessionId == sessionId && pending.status == 'pending'
+        && pending.requesterUid == grant.requesterUid && pending.targetUid == grant.targetUid
+        && data.sessionId == sessionId && data.requesterNodusId == grant.requesterNodusId
+        && data.targetNodusId == grant.targetNodusId && data.participantUids.size() == 2
+        && grant.requesterUid in data.participantUids && grant.targetUid in data.participantUids;
+    }
+
+    match /users/{userId}/{document=**} {
+      allow read, write: if signedIn() && request.auth.uid == userId;
+    }
+
+    match /devices/{nodusId} {
+      allow read: if signedIn();
+      allow create: if signedIn()
+        && request.resource.data.nodusId == nodusId
+        && request.resource.data.ownerUid == request.auth.uid
+        && ((!('deviceId' in request.resource.data) && !('deviceFingerprint' in request.resource.data))
+          || (get(/databases/$(database)/documents/deviceClaims/$(nodusId)).data.ownerUid == request.auth.uid
+            && request.resource.data.deviceId is string
+            && request.resource.data.deviceFingerprint is string));
+      allow update: if signedIn()
+        && request.resource.data.nodusId == nodusId
+        && request.resource.data.ownerUid == request.auth.uid
+        && ((resource.data.ownerUid == request.auth.uid
+            && !('deviceId' in resource.data)
+            && !('deviceFingerprint' in resource.data))
+          || (get(/databases/$(database)/documents/deviceClaims/$(nodusId)).data.ownerUid == request.auth.uid
+            && request.resource.data.deviceId is string
+            && request.resource.data.deviceFingerprint is string
+            && (!('deviceId' in resource.data) || request.resource.data.deviceId == resource.data.deviceId)
+            && (!('deviceFingerprint' in resource.data) || request.resource.data.deviceFingerprint == resource.data.deviceFingerprint)));
+    }
+
+    match /deviceClaims/{nodusId} {
+      allow read: if signedIn() && resource.data.ownerUid == request.auth.uid;
+      allow create: if signedIn()
+        && request.resource.data.nodusId == nodusId
+        && request.resource.data.ownerUid == request.auth.uid
+        && request.resource.data.deviceClaim is string
+        && (!exists(/databases/$(database)/documents/devices/$(nodusId))
+          || !('deviceId' in get(/databases/$(database)/documents/devices/$(nodusId)).data)
+          || !('deviceFingerprint' in get(/databases/$(database)/documents/devices/$(nodusId)).data)
+          || (request.resource.data.deviceId == get(/databases/$(database)/documents/devices/$(nodusId)).data.deviceId
+            && request.resource.data.deviceFingerprint == get(/databases/$(database)/documents/devices/$(nodusId)).data.deviceFingerprint));
+      allow update: if signedIn()
+        && request.resource.data.nodusId == nodusId
+        && request.resource.data.ownerUid == request.auth.uid
+        && request.resource.data.deviceClaim == resource.data.deviceClaim
+        && request.resource.data.deviceId == resource.data.deviceId
+        && request.resource.data.deviceFingerprint == resource.data.deviceFingerprint;
+    }
+
+    match /sessionRequests/{requestId} {
+      allow create: if signedIn()
+        && request.resource.data.requesterUid == request.auth.uid
+        && initiatorAllowed(request.resource.data.requesterNodusId, request.auth.uid)
+        && request.resource.data.targetUid ==
+          get(/databases/$(database)/documents/devices/$(request.resource.data.targetNodusId)).data.ownerUid
+        && request.resource.data.status == 'pending'
+        && (!licensingEnabled() || licensedRequest(requestId));
+      allow read: if signedIn() && resource.data.requesterUid == request.auth.uid;
+      allow read: if signedIn() && resource.data.targetUid == request.auth.uid;
+      allow update: if signedIn()
+        && resource.data.targetUid == request.auth.uid
+        && request.resource.data.requesterUid == resource.data.requesterUid
+        && request.resource.data.targetUid == resource.data.targetUid
+        && request.resource.data.requesterNodusId == resource.data.requesterNodusId
+        && request.resource.data.targetNodusId == resource.data.targetNodusId
+        && request.resource.data.status in ['accepted', 'denied']
+        && (request.resource.data.status == 'denied' || initiatorAllowed(resource.data.requesterNodusId, resource.data.requesterUid))
+        && (!licensingEnabled() || (resource.data.status == 'pending'
+          && request.resource.data.sessionId == resource.data.sessionId));
+    }
+
+    match /sessions/{sessionId} {
+      allow read: if signedIn()
+        && request.auth.uid in resource.data.participantUids;
+      allow create: if signedIn()
+        && request.auth.uid in request.resource.data.participantUids
+        && initiatorAllowed(request.resource.data.requesterNodusId,
+          get(/databases/$(database)/documents/devices/$(request.resource.data.requesterNodusId)).data.ownerUid)
+        && (!licensingEnabled() || licensedSession(sessionId));
+      allow update: if signedIn()
+        && request.auth.uid in resource.data.participantUids
+        && request.resource.data.participantUids == resource.data.participantUids
+        && (!licensingEnabled() || (activeGrant(sessionId)
+          && request.resource.data.sessionId == resource.data.sessionId
+          && request.resource.data.requesterNodusId == resource.data.requesterNodusId
+          && request.resource.data.targetNodusId == resource.data.targetNodusId));
+
+      match /signals/{to}/items/{signalId} {
+        allow read: if signedIn()
+          && request.auth.uid in get(/databases/$(database)/documents/sessions/$(sessionId)).data.participantUids
+          && (!licensingEnabled() || activeGrant(sessionId));
+        allow create: if signedIn()
+          && request.auth.uid in get(/databases/$(database)/documents/sessions/$(sessionId)).data.participantUids
+          && (!licensingEnabled() || (activeGrant(sessionId)
+            && request.resource.data.sessionId == sessionId && request.resource.data.to == to
+            && ((request.auth.uid == get(/databases/$(database)/documents/license_session_grants/$(sessionId)).data.requesterUid
+              && request.resource.data.from == get(/databases/$(database)/documents/license_session_grants/$(sessionId)).data.requesterNodusId
+              && to == get(/databases/$(database)/documents/license_session_grants/$(sessionId)).data.targetNodusId)
+            || (request.auth.uid == get(/databases/$(database)/documents/license_session_grants/$(sessionId)).data.targetUid
+              && request.resource.data.from == get(/databases/$(database)/documents/license_session_grants/$(sessionId)).data.targetNodusId
+              && to == get(/databases/$(database)/documents/license_session_grants/$(sessionId)).data.requesterNodusId))));
+        allow update, delete: if !licensingEnabled() && signedIn()
+          && request.auth.uid in get(/databases/$(database)/documents/sessions/$(sessionId)).data.participantUids;
+      }
+    }
+    match /license_access_blocks/{nodusId} {
+      allow read: if signedIn() && get(/databases/$(database)/documents/devices/$(nodusId)).data.ownerUid == request.auth.uid;
+    }
+  }
+}

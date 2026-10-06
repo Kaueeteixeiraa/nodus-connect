@@ -1,0 +1,12 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "version": 2,
+  "builds": [{ "src": "api/license.ts", "use": "@vercel/node" }],
+  "routes": [
+    { "src": "/health", "dest": "/api/license.ts" },
+    { "src": "/license/(.*)", "dest": "/api/license.ts" },
+    { "src": "/admin/(.*)", "dest": "/api/license.ts" },
+    { "src": "/webhooks/(.*)", "dest": "/api/license.ts" }
+  ],
+  "regions": ["gru1"]
+}

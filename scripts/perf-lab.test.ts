@@ -17,6 +17,30 @@ function report(role: "host" | "viewer", samples: Record<string, unknown>[]) {
 }
 
 describe("performance report", () => {
+  it("uses an explicit cutoff on both peers and excludes unknown packet loss", () => {
+    const host = report("host", [{ captureFps: 60 }, { captureFps: 40 }, { captureFps: 1 }]);
+    const viewer = report("viewer", [{ decodedFps: 60, packetLossPct: 1 }, { decodedFps: 40, packetLossPct: 0, packetLossPctValid: false }, { decodedFps: 1, packetLossPct: 100 }]);
+    const result = JSON.parse(execFileSync(process.execPath, [resolve("scripts/perf-lab.mjs"), "report", host, `--peer=${viewer}`, "--end=2026-09-23T12:00:01.000Z"], { encoding: "utf8" }));
+    expect(result.samples).toBe(4);
+    expect(result.fps).toMatchObject({ captureFps: 50, decodedFps: 50 });
+    expect(result.network.packetLossPct).toBe(1);
+  });
+
+  it("deduplicates native ACK samples and leaves one-way and visual input latency unmeasured", () => {
+    const first = { id: 1, ok: true, positionConfirmed: true, eventToSendMs: 5, commandAckRttMs: 20,
+      hostProcessingMs: 4, ipcRoundTripMs: 3, mainToWindowsAckMs: 2, transportAckRoundTripMs: 16 };
+    const viewer = report("viewer", [
+      { inputDiagnostic: { hostSupported: true, latest: first, mouseEventsPerSecond: 1000, sendsPerSecond: 60, bufferedAmount: 9, coalesced: 940 } },
+      { inputDiagnostic: { hostSupported: true, latest: first, mouseEventsPerSecond: 1000, sendsPerSecond: 60, bufferedAmount: 18, coalesced: 940 } },
+      { inputDiagnostic: { hostSupported: true, latest: { ...first, id: 2, commandAckRttMs: 40 }, coalesced: 1000 } },
+    ]);
+    const result = JSON.parse(execFileSync(process.execPath, [resolve("scripts/perf-lab.mjs"), "report", viewer], { encoding: "utf8" }));
+    expect(result.input).toMatchObject({ enabled: true, samples: 2, windowsPositionConfirmedSamples: 2,
+      nativeAckRttMsAverage: 30, nativeAckRttMsP95: 40, nativeAckRttMsP99: 40, nativeAckRttMsMax: 40, nativeAckOver500MsSamples: 0,
+      commandLatencyMs: null, oneWayTransportMs: null, visualFeedbackLatencyMs: null,
+      mouseEventsPerSecond: 1000, sendsPerSecond: 60, bufferedAmountPeak: 18 });
+  });
+
   it("joins both peers without inventing unavailable counters", () => {
     const host = report("host", [
       { captureFps: 60, encodedFps: 58, sentFps: 58, encoder: "OpenH264", codec: "H264", codecProfile: "profile-level-id=42e01f", encoderFallbackReason: "Chromium escolheu software", gpu: { adapter: "Intel GPU", videoEncode: "enabled", hardwareH264Available: true }, encodeMs: 7, counters: { captured: 100, encoded: 98, sent: 98 } },

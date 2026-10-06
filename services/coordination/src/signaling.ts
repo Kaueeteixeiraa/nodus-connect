@@ -40,16 +40,18 @@ export class SignalingRegistry {
 
   constructor(private readonly pendingTtlMs = 5 * 60_000) {}
 
-  createRequest(input: { requesterNodusId: string; requesterName: string; targetNodusId: string; requestedPermissions?: SessionPermission[]; passwordHash?: string; preferredResolution?: RemoteResolution; preferredFps?: RemoteFrameRate }): SessionRequest {
+  createRequest(input: { sessionId?: string; requesterNodusId: string; requesterName: string; targetNodusId: string; requestedPermissions?: SessionPermission[]; passwordHash?: string; preferredResolution?: RemoteResolution; preferredFps?: RemoteFrameRate }): SessionRequest {
     const requesterNodusId = normalizeNodusId(input.requesterNodusId);
     const targetNodusId = normalizeNodusId(input.targetNodusId);
     if (!requesterNodusId || !targetNodusId) throw new Error("INVALID_NODUS_ID");
     if (requesterNodusId === targetNodusId) throw new Error("INVALID_TARGET");
     if (!input.requesterName.trim()) throw new Error("INVALID_DEVICE_NAME");
+    if (input.sessionId && (!/^[0-9a-f-]{36}$/.test(input.sessionId) || [...this.requests.values()].some(item => item.sessionId === input.sessionId))) throw new Error("INVALID_SESSION_ID");
 
     const now = new Date().toISOString();
     const request: SessionRequest = {
       id: randomUUID(),
+      ...(input.sessionId ? { sessionId: input.sessionId } : {}),
       requesterNodusId,
       requesterName: input.requesterName.trim(),
       targetNodusId,
@@ -77,6 +79,12 @@ export class SignalingRegistry {
     const request = this.requests.get(id);
     if (!request) throw new Error("REQUEST_NOT_FOUND");
     return request;
+  }
+
+  sessionPeer(sessionId: string, self: string): string {
+    const request = [...this.requests.values()].find(item => item.sessionId === sessionId && item.status === "accepted");
+    if (!request || ![request.requesterNodusId, request.targetNodusId].includes(self)) throw new Error("REQUEST_NOT_FOUND");
+    return self === request.requesterNodusId ? request.targetNodusId : request.requesterNodusId;
   }
 
   acceptRequest(id: string, targetName: string, grantedPermissions: SessionPermission[] = ["screen:view"]): SessionRequest {

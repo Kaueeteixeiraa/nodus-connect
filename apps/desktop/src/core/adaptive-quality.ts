@@ -1,5 +1,7 @@
 export type AdaptiveStage = 0 | 1 | 2 | 3 | 4;
 
+export const DESKTOP_VIDEO_POLICY = { contentHint: "text", degradationPreference: "maintain-resolution" } as const;
+
 export type QualitySample = {
   rttMs: number;
   jitterMs: number;

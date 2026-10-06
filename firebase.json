@@ -1,6 +1,7 @@
 {
   "firestore": {
-    "rules": "firestore.rules"
+    "rules": "services/licensing/firestore.candidate.rules",
+    "indexes": "services/licensing/firestore.indexes.json"
   },
   "hosting": {
     "public": "apps/desktop/public",

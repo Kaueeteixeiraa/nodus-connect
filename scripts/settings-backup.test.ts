@@ -11,6 +11,17 @@ vi.stubGlobal("localStorage", {
 beforeEach(() => values.clear());
 
 describe("settings backup", () => {
+  it("keeps session indicators enabled for old settings and persists the toggle in backups", () => {
+    values.set("nodus.settings.v1", JSON.stringify({ theme: "dark" }));
+    expect(loadSettings().showConnectionMetrics).toBe(true);
+    saveSettings({ ...loadSettings(), showConnectionMetrics: false });
+    expect(loadSettings().showConnectionMetrics).toBe(false);
+    const backup = exportSettingsBackup();
+    saveSettings({ ...loadSettings(), showConnectionMetrics: true });
+    expect(importSettingsBackup(backup).settings.showConnectionMetrics).toBe(false);
+    values.set("nodus.settings.v1", JSON.stringify({ showConnectionMetrics: "false" }));
+    expect(loadSettings().showConnectionMetrics).toBe(true);
+  });
   it("exports preferences without identity, passwords or connection credentials", () => {
     saveSettings({ ...loadSettings(), accessPasswordHash: "secret-hash", coordinationUrl: "https://private", iceServersJson: "[{\"credential\":\"secret\"}]" });
     values.set("nodus.recents.v1", JSON.stringify([{ nodusId: "123456789", deviceName: "PC", lastConnectionAt: new Date().toISOString(), status: "online", favorite: true, macAddress: "AA:BB:CC:DD:EE:FF" }]));

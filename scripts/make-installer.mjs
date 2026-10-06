@@ -1,4 +1,6 @@
-import { copyFileSync, existsSync, readFileSync, readdirSync, rmSync } from "node:fs";
+import { copyFileSync, existsSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -10,6 +12,21 @@ const makensis = find(cache, "makensis.exe");
 const version = JSON.parse(readFileSync(join(root, "package.json"), "utf8")).version;
 const productVersion = `${version.split("-")[0]}.0`;
 const setup = join(root, "outputs", "installer", "Nodus-Connect-Setup.exe");
+const require = createRequire(import.meta.url);
+const builderRequire = createRequire(require.resolve("electron-builder"));
+const asar = createRequire(builderRequire.resolve("app-builder-lib"))("@electron/asar");
+const archive = join(root, "outputs", "installer", "win-unpacked", "resources", "app.asar");
+const packaged = JSON.parse(asar.extractFile(archive, "package.json").toString());
+if (packaged.version !== version) throw new Error("Versao empacotada desatualizada. Refaca o empacotamento antes de gerar o setup.");
+const hash = (data) => createHash("sha256").update(data).digest("hex");
+const mainPath = join("apps", "desktop", "electron", "main.cjs");
+if (hash(asar.extractFile(archive, mainPath)) !== hash(readFileSync(join(root, mainPath)))) throw new Error("Electron empacotado desatualizado.");
+const nativeHashes = {};
+for (const name of ["nodus-service.exe", "nodus-wgc-media.exe", "nodus-capture-status.exe"]) {
+  const data = readFileSync(join(root, "outputs", "installer", "win-unpacked", "resources", "native", name));
+  if (hash(data) !== hash(readFileSync(join(root, "native", "bin", name)))) throw new Error(`Binario nativo desatualizado: ${name}`);
+  nativeHashes[name] = hash(data);
+}
 
 if (!makensis) throw new Error("makensis.exe nao encontrado no cache do electron-builder.");
 rmSync(setup, { force: true });
@@ -18,6 +35,10 @@ if (result.status === 0) {
   const versionedSetup = join(root, "outputs", "installer", `Nodus-Connect-Setup-${version}.exe`);
   rmSync(versionedSetup, { force: true });
   copyFileSync(setup, versionedSetup);
+  const setupSha256 = hash(readFileSync(versionedSetup));
+  const git = (...args) => spawnSync("git", args, { cwd: root, encoding: "utf8", windowsHide: true }).stdout?.trim() || "";
+  writeFileSync(`${versionedSetup}.sha256`, `${setupSha256}  Nodus-Connect-Setup-${version}.exe\n`);
+  writeFileSync(join(root, "outputs", "installer", `Nodus-Connect-Setup-${version}.json`), JSON.stringify({ version, builtAt: new Date().toISOString(), gitHead: git("rev-parse", "HEAD"), dirty: Boolean(git("status", "--porcelain")), setupSha256, appAsarSha256: hash(readFileSync(archive)), lockfileSha256: hash(readFileSync(join(root, "pnpm-lock.yaml"))), nativeHashes, realTwoPcValidation: "PENDING" }, null, 2));
 }
 process.exit(result.status ?? 1);
 

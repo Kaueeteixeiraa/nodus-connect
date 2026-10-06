@@ -6,10 +6,12 @@ interface Window {
     setTrayIdentity(identity: { nodusId: string; deviceName: string; status: string }): void;
     getIdentity(legacyIdentity?: unknown): Promise<unknown>;
     saveIdentity(identity: unknown): Promise<unknown>;
+    getLicenseCredentials(): Promise<{ deviceId: string; deviceToken: string } | null>;
+    saveLicenseCredentials(credentials: { deviceId: string; deviceToken: string }): Promise<boolean>;
     getServerInfo(): Promise<{ port: number; urls: string[] }>;
     getAppInfo(): Promise<{ version: string; googleClientConfigured?: boolean }>;
     setThemeIcon(theme: string, dataUrl: string): Promise<boolean>;
-    getPerformanceDiagnostic(): Promise<{ label: string; preset?: string | null; source?: "cli" | "env" | "json"; videoOnly: boolean; resolution?: string; fps?: number; bitrate?: number; maxFramerate?: number; scaleResolutionDownBy?: number; lockAdaptive: boolean; nativeResolution?: boolean; contentHint?: "detail" | "motion"; degradationPreference?: "maintain-resolution" | "maintain-framerate" } | null>;
+    getPerformanceDiagnostic(): Promise<{ label: string; preset?: string | null; source?: "cli" | "env" | "json"; videoOnly: boolean; inputLatency?: boolean; inputOnly?: boolean; resolution?: string; fps?: number; bitrate?: number; maxFramerate?: number; scaleResolutionDownBy?: number; lockAdaptive: boolean; nativeResolution?: boolean; contentHint?: "detail" | "motion"; degradationPreference?: "maintain-resolution" | "maintain-framerate" } | null>;
     getNativeCaptureStatus(): Promise<{ available: boolean; supported: boolean; requestedBackend?: "chromium" | "wgc"; allowLegacyFallback?: boolean; nativeMediaExperimental?: boolean; nativeMediaAvailable?: boolean; cursorSuppressionSupported?: boolean; backend?: string; d3d11Hardware?: boolean; hardwareH264?: boolean; hardwareH264Encoders?: number; adapter?: string }>;
     startNativeMedia(options: { sessionId: string; monitor: number; fps: number; bitrateKbps: number; width: number; height: number; shareAudio: boolean; iceServers: RTCIceServer[] }): Promise<{ backend: "wgc"; cursorCapture: false; encoderImplementation?: string; hardwareEncode?: boolean }>;
     signalNativeMedia(signal: { sessionId: string; type: "answer" | "candidate" | "bitrate"; sdp?: string; candidate?: string; sdpMLineIndex?: number; bitrateKbps?: number }): Promise<boolean>;
@@ -32,6 +34,7 @@ interface Window {
     sendSecureAttention(): Promise<{ ok: boolean; error?: string }>;
     setStartupOptions(options: { startWithWindows: boolean; startMinimized: boolean; minimizeToTray: boolean }): Promise<void>;
     applyRemoteInput(input: unknown): void;
+    measureRemoteInput(input: unknown): Promise<{ ok: boolean; error?: string; positionConfirmed?: boolean; mainToWindowsAckMs?: number; windowsPosition?: { x: number; y: number } }>;
     getCaptureSources(): Promise<Array<{ id: string; name: string; displayId: string; width: number; height: number }>>;
     setCaptureOptions(options: { sourceId: string; displayId?: string; shareAudio: boolean }): Promise<void>;
     readClipboard(): Promise<string>;
@@ -57,5 +60,6 @@ interface Window {
     ): () => void;
     onRemoteKeyInput?(callback: (type: "keyDown" | "keyUp", input: { keyCode: number; code: string; location: number; repeat: boolean }) => void): () => void;
     onHostMouseActivity?(callback: () => void): () => void;
+    onOpenWorkspace?(callback: () => void): () => void;
   };
 }

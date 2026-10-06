@@ -61,6 +61,7 @@ export interface LocalSettings {
   lightweightMode: boolean;
   threeDimensionalStandby: boolean;
   showNodusId: boolean;
+  showConnectionMetrics: boolean;
   notifyIncomingRequests: boolean;
   playRequestSound: boolean;
   allowRemoteControl: boolean;
@@ -144,6 +145,7 @@ export function loadSettings(): LocalSettings {
     lightweightMode: false,
     threeDimensionalStandby: false,
     showNodusId: true,
+    showConnectionMetrics: true,
     notifyIncomingRequests: true,
     playRequestSound: true,
     allowRemoteControl: true,
@@ -166,6 +168,7 @@ export function loadSettings(): LocalSettings {
   return {
     ...defaults,
     ...stored,
+    showConnectionMetrics: typeof stored.showConnectionMetrics === "boolean" ? stored.showConnectionMetrics : true,
     threeDimensionalStandby: false,
     theme: ["japan", "sakura-night", "neo-tokyo", "cosmos", "arctic"].includes(stored.theme ?? "")
       ? stored.theme as LocalSettings["theme"]
@@ -192,7 +195,7 @@ export function saveSettings(settings: LocalSettings): void {
 
 const backupBooleanKeys = [
   "startWithWindows", "startMinimized", "minimizeToTray", "confirmBeforeDisconnect", "lightweightMode",
-  "showNodusId", "notifyIncomingRequests", "playRequestSound", "allowRemoteControl", "allowFileTransfer",
+  "showNodusId", "showConnectionMetrics", "notifyIncomingRequests", "playRequestSound", "allowRemoteControl", "allowFileTransfer",
   "allowClipboard", "shareAudio",
 ] as const;
 

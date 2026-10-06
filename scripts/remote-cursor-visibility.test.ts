@@ -151,13 +151,21 @@ test("ending one host session keeps hiding only while another controlled host is
   const source = ts.transpile(functionSource("apps/desktop/src/App.tsx", "syncHostCursorVisibility"), { target: ts.ScriptTarget.ES2022 });
   const sync = runInNewContext(`${source}; syncHostCursorVisibility`, {
     shouldHideHostCursor, sessionsRef: { current: sessions }, peersRef: { current: peers },
-    settings: { allowRemoteControl: true }, window: { nodusDesktop: { setHostCursorActive: setActive } },
+    nativeHostSessionsRef: { current: new Set<string>() }, settings: { allowRemoteControl: true }, window: { nodusDesktop: { setHostCursorActive: setActive } },
   });
   sync("a");
   expect(setActive).toHaveBeenLastCalledWith(true);
   peers.get("b")!.connectionState = "failed";
   sync("a");
   expect(setActive).toHaveBeenLastCalledWith(false);
+});
+
+test("WGC keeps the physical cursor visible to the host because it is excluded from video", () => {
+  const setActive = vi.fn(async () => {}), sessionId = "wgc";
+  const source = ts.transpile(functionSource("apps/desktop/src/App.tsx", "syncHostCursorVisibility"), { target: ts.ScriptTarget.ES2022 });
+  const sync = runInNewContext(`${source}; syncHostCursorVisibility`, { shouldHideHostCursor, sessionsRef: { current: [{ session: { sessionId, role: "host", permissions: ["mouse:control"] }, error: "" }] }, peersRef: { current: new Map([[sessionId, { connectionState: "connected" }]]) }, nativeHostSessionsRef: { current: new Set([sessionId]) }, settings: { allowRemoteControl: true }, window: { nodusDesktop: { setHostCursorActive: setActive } } });
+  sync();
+  expect(setActive).toHaveBeenCalledWith(false);
 });
 
 test("Chromium acquisition requests native resolution and never less than 30 FPS", () => {
@@ -167,12 +175,25 @@ test("Chromium acquisition requests native resolution and never less than 30 FPS
   expect(source).toContain("resolutionForSource");
 });
 
-test("mouse injection and packet coordinates remain exactly unchanged", () => {
+test("mouse injection and packet coordinates remain unchanged outside bounded movement scheduling", () => {
   const inputSource = functionSource("apps/desktop/electron/main.cjs", "applyRemoteInput").replace(/\r\n/g, "\n");
   expect(inputSource).toContain('helper.stdin.write(helper.nodusBinaryInput ? encodeRemoteInput(message) : `${JSON.stringify(message)}\\n`);\n    hostCursorVisibility?.remoteMouseActivity(message);');
-  expect(hash(inputSource.replace("    hostCursorVisibility?.remoteMouseActivity(message);\n", ""))).toBe("04aa1af9f01261fd9e9f3a2b67dbca98a25c6fae6bdfec79120a9a79808fc03a");
+  const baseline = inputSource
+    .replace(/    if \(message.type === "mouseMove" && helper.stdin.writableLength > 64\) \{[\s\S]*?      return \{ ok: true \};\n    \}/, '    if (message.type === "mouseMove" && helper.stdin.writableLength > 64) return { ok: true };')
+    .replace("    clearTimeout(helper.nodusMoveTimer);\n    helper.nodusMoveTimer = null;\n    helper.nodusPendingMove = null;\n", "")
+    .replace("    hostCursorVisibility?.remoteMouseActivity(message);\n", "");
+  expect(hash(baseline)).toBe("04aa1af9f01261fd9e9f3a2b67dbca98a25c6fae6bdfec79120a9a79808fc03a");
   expect(functionHash("apps/desktop/electron/main.cjs", "encodeRemoteInput")).toBe("264100b5230a7b7313711e3d093c4a2c2fa12d89579db71999dd543b476a7200");
-  expect(hash(readFileSync("native/service/main.cpp", "utf8").replace(/\r\n/g, "\n").match(/int runInputHelper\(\) \{[\s\S]*?\n\}/)![0])).toBe("c51e02a9fd58cf0227b7d34faeff4130e2254d1c30aa98fda1a1ae450a75b0ab");
+  const nativeInput = readFileSync("native/service/main.cpp", "utf8").replace(/\r\n/g, "\n").match(/int runInputHelper\(\) \{[\s\S]*?\n\}/)![0];
+  // Exclude the read-only barrier and EOF cleanup bookkeeping, not the live injection paths.
+  const baselineInput = nativeInput
+    .replace(/    if \(packet.type == 7\) \{[\s\S]*?      continue;\n    \}\n/, "")
+    .replace("  bool extendedKeys[256]{};\n  bool pressedButtons[3]{};\n", "")
+    .replace("      if (packet.button < 3) pressedButtons[packet.button] = packet.type == 2;\n", "")
+    .replace("      extendedKeys[packet.keyCode] = (packet.button & 1) != 0;\n", "")
+    .replace("KEYEVENTF_KEYUP | (extendedKeys[key] ? KEYEVENTF_EXTENDEDKEY : 0)", "KEYEVENTF_KEYUP")
+    .replace("  for (std::uint8_t button = 0; button < 3; ++button) {\n    if (pressedButtons[button]) sendMouseButton(button, false);\n  }\n", "");
+  expect(hash(baselineInput)).toBe("c51e02a9fd58cf0227b7d34faeff4130e2254d1c30aa98fda1a1ae450a75b0ab");
 });
 
 test("WGC lifecycle preserves the native streaming pipeline and 30-120 FPS bounds", () => {
@@ -182,6 +203,45 @@ test("WGC lifecycle preserves the native streaming pipeline and 30-120 FPS bound
 
 const native = path.resolve("native/bin/nodus-service.exe");
 const nativeTest = test.skipIf(process.platform !== "win32" || !existsSync(native));
+
+test("host-only pointer fails closed on unsupported capture exclusion and never activates a window", () => {
+  const source = readFileSync("native/service/main.cpp", "utf8");
+  const overlay = source.match(/class HostOnlyPointer \{[\s\S]*?\n\};/)![0];
+  expect(overlay).toContain("version.dwBuildNumber < 19041");
+  expect(overlay).toContain("affinity != WDA_EXCLUDEFROMCAPTURE");
+  expect(overlay).toContain("WS_EX_NOACTIVATE");
+  expect(overlay).toContain("SWP_NOACTIVATE");
+  expect(overlay).toContain("if (window) DestroyWindow(window)");
+  expect(source).toMatch(/bool restore\(\) \{\s*pointer.hide\(\)/);
+  expect(source).toContain("if (hidden && !dryRun) pointer.update()");
+  expect(source).toContain("localActivity && cursor.isRemoteOwner()");
+  expect(source).toMatch(/bool yieldToHost\(\) \{\s*remoteOwner = false;\s*if \(!dryRun && pointer.prepare\(\)\) \{ pointer.update\(\); return true; \}/);
+});
+
+nativeTest("host-only pointer verifies Windows capture exclusion without changing the system cursor", async () => {
+  const child = spawn(native, ["--cursor-overlay-probe"], { windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
+  let output = "";
+  child.stdout.on("data", (data) => { output += data; });
+  const [code] = await once(child, "close");
+  expect(code, output).toBe(0);
+  expect(output).toContain("capture exclusion affinity=17");
+  expect(output).not.toContain("Hiding local host cursor");
+}, 5000);
+
+nativeTest("native input barrier reads the Windows cursor without changing it", async () => {
+  const child = spawn(native, ["--input-helper"], { windowsHide: true, stdio: ["pipe", "pipe", "ignore"] });
+  const packet = Buffer.alloc(16);
+  packet.writeUInt8(7, 0); packet.writeInt32LE(42, 12);
+  const output = await new Promise<string>((resolve, reject) => {
+    let text = "";
+    const timer = setTimeout(() => { child.kill(); reject(new Error("Native barrier timeout")); }, 3000);
+    child.stdout.on("data", (data) => { text += data.toString(); });
+    child.once("error", (error) => { clearTimeout(timer); reject(error); });
+    child.once("close", () => { clearTimeout(timer); resolve(text.trim()); });
+    child.stdin.end(packet);
+  });
+  expect(output).toMatch(/^P 42 1 -?\d+ -?\d+$/);
+});
 
 async function nativeFixture(hide = true) {
   // Real watchdog/process lifecycle, but no changes to the user's actual cursor.
