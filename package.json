@@ -1,6 +1,6 @@
 {
   "name": "nodus-connect",
-  "version": "1.1.7",
+  "version": "1.1.11",
   "description": "Acesso remoto seguro, rapido e gratuito.",
   "author": "Nodus Connect",
   "private": true,
@@ -24,7 +24,8 @@
     "desktop:build": "pnpm icons && pnpm native:capture && pnpm native:media && pnpm native:media:runtime && pnpm build && electron-builder --win --x64",
     "installer:build": "pnpm icons && pnpm native:capture && pnpm native:media && pnpm native:media:runtime && pnpm native:service && pnpm build && electron-builder --win --x64 --dir --config installer-builder.json && node scripts/make-installer.mjs",
     "perf:local": "pnpm build && pnpm exec electron scripts/local-performance-lab.cjs",
-    "build": "tsc --noEmit && vite build --config apps/desktop/vite.config.ts",
+    "build": "node scripts/build-quick-support.mjs --prepare && tsc --noEmit && vite build --config apps/desktop/vite.config.ts",
+    "quick-support:build": "node scripts/build-quick-support.mjs && pnpm build && electron-builder --win portable --x64 --config quick-support-builder.cjs",
     "build:admin": "tsc --noEmit && vite build --config apps/admin/vite.config.ts",
     "build:licensing": "npm --prefix services/licensing run build",
     "test": "vitest run",
@@ -83,7 +84,8 @@
       {
         "from": "work/gstreamer-runtime-package",
         "to": "native/gstreamer"
-      }
+      },
+      { "from": "build/quick-support-trust.json", "to": "quick-support-trust.json" }
     ],
     "win": {
       "artifactName": "Nodus-Connect-Setup-${version}.${ext}",

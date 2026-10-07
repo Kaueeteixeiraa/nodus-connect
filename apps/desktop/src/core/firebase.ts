@@ -36,6 +36,7 @@ let dbInstance: Firestore | null = null;
 let accountAppInstance: FirebaseApp | null = null;
 let accountAuthInstance: Auth | null = null;
 let accountDbInstance: Firestore | null = null;
+let deviceUidPromise: Promise<string | null> | null = null;
 
 export function firebaseConfigured(): boolean {
   return Boolean(config.apiKey && config.authDomain && config.projectId && config.appId);
@@ -308,12 +309,13 @@ export async function cloudDenySessionRequest(id: string): Promise<SessionReques
 }
 
 export async function cloudSendSignal(sessionId: string, signal: Omit<SignalMessage, "seq" | "sessionId" | "createdAt">): Promise<SignalMessage> {
+  const from = normalizeNodusId(signal.from), to = normalizeNodusId(signal.to);
+  if (!from || !to) throw new Error("Nodus ID invalido");
   await ensureDeviceUid();
-  const to = normalizeNodusId(signal.to);
-  if (!to) throw new Error("Nodus ID invalido");
   const { addDoc, collection, store } = await fire();
   const message: SignalMessage = {
     ...signal,
+    from,
     to,
     sessionId,
     seq: Date.now() * 1000 + Math.floor(Math.random() * 1000),
@@ -443,6 +445,7 @@ function cloudDevice(identity: LocalIdentity, status: CoordinationDevice["status
     deviceId: identity.deviceId,
     deviceFingerprint: identity.deviceFingerprint,
     ownerUid: ownerUid ?? undefined,
+    ...(identity.supportProfileId ? { supportProfileId: identity.supportProfileId } : {}),
     deviceName: identity.deviceName,
     status,
     updatedAt: new Date().toISOString(),
@@ -452,11 +455,16 @@ function cloudDevice(identity: LocalIdentity, status: CoordinationDevice["status
 
 async function ensureDeviceUid(): Promise<string | null> {
   if (!firebaseConfigured()) return null;
-  const authApi = (await modules()).auth;
-  const authInstance = await deviceAuth();
-  const user = authInstance.currentUser ?? (await authApi.signInAnonymously(authInstance)).user;
-  await user.getIdToken();
-  return user.uid;
+  // Presence and listeners must never create different anonymous users at startup.
+  const pending = deviceUidPromise ??= (async () => {
+    const authApi = (await modules()).auth;
+    const authInstance = await deviceAuth();
+    await authInstance.authStateReady();
+    const user = authInstance.currentUser ?? (await authApi.signInAnonymously(authInstance)).user;
+    await user.getIdToken();
+    return user.uid;
+  })();
+  try { return await pending; } finally { if (deviceUidPromise === pending) deviceUidPromise = null; }
 }
 
 export async function getDeviceAuthToken(): Promise<string> {

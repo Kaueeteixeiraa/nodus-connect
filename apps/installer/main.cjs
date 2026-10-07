@@ -20,6 +20,11 @@ if (installedApp) {
 } else {
   app.setName("Nodus Connect Setup");
   app.whenReady().then(() => {
+    const updateFile = process.argv.find((arg) => arg.startsWith("--auto-update="));
+    if (updateFile) {
+      applyAutomaticUpdate(updateFile.slice("--auto-update=".length)).then((ok) => app.exit(ok ? 0 : 1));
+      return;
+    }
     if (process.argv.includes("--silent-install")) {
       installNodus((message, progress) => console.log(`${progress}% ${message}`)).then((result) => {
         console.log(JSON.stringify(result));
@@ -113,13 +118,37 @@ if (installedApp) {
   });
 
   ipcMain.handle("minimize", () => win?.minimize());
-  ipcMain.handle("open-app", () => {
-    launchInstalledApp();
+  ipcMain.handle("open-app", async () => {
+    await launchInstalledApp();
     return true;
   });
   ipcMain.handle("set-desktop-shortcut", (_event, enabled) => setDesktopShortcut(Boolean(enabled)));
 
   ipcMain.handle("close", () => app.quit());
+}
+
+async function applyAutomaticUpdate(file) {
+  let options;
+  let result;
+  try {
+    if (!path.isAbsolute(file) || fs.statSync(file).size > 4096) throw new Error("INVALID_UPDATE_OPTIONS");
+    options = JSON.parse(fs.readFileSync(file, "utf8"));
+    if (typeof options.installDir !== "string" || !path.isAbsolute(options.installDir) || typeof options.startWithWindows !== "boolean") throw new Error("INVALID_UPDATE_OPTIONS");
+    const target = realPath(options.installDir);
+    assertSafeInstallDir(target);
+    if (!fs.existsSync(path.join(target, "Nodus Connect.exe"))) throw new Error("APP_EXE_NOT_FOUND");
+    installDir = target;
+    result = await installNodus((message, progress) => log(`Atualizacao ${progress}% ${message}`), {
+      installDir, startWithWindows: options.startWithWindows, desktopShortcut: fs.existsSync(desktopShortcutPath()),
+    });
+    await launchInstalledApp();
+    if (!result.ok) throw new Error(result.error);
+    return true;
+  } catch (error) {
+    log(error?.stack || String(error));
+    dialog.showErrorBox("Nodus Connect", result?.error || "Não foi possível concluir a atualização. Abra o Nodus ou execute o setup novamente.");
+    return false;
+  }
 }
 
 async function installNodus(send, rawOptions = {}) {
@@ -453,8 +482,11 @@ function desktopShortcutPath() {
 function launchInstalledApp() {
   const exe = path.join(installDir, "Nodus Connect.exe");
   if (!fs.existsSync(exe)) throw new Error("APP_EXE_NOT_FOUND");
-  const child = spawn(exe, [], { cwd: installDir, detached: true, stdio: "ignore", windowsHide: false });
-  child.unref();
+  return new Promise((resolve, reject) => {
+    const child = spawn(exe, [], { cwd: installDir, detached: true, stdio: "ignore", windowsHide: false });
+    child.once("error", reject);
+    child.once("spawn", () => { child.unref(); resolve(); });
+  });
 }
 
 function ps(value) {

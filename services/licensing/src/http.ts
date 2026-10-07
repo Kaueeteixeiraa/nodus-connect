@@ -3,6 +3,7 @@ import { LicenseError, type LicenseAccessRequest, type LicenseSession } from "..
 import { LicenseEngine, requireAdmin, text, validId, type Actor, type DeviceCredentials } from "./engine.js";
 import type { LicenseStore } from "./store.js";
 import type { PaymentProvider } from "./payments.js";
+import type { SupportDraft } from "../../../packages/common/src/quick-support.js";
 
 type Body = Record<string, unknown>;
 export interface HttpDependencies { engine: LicenseEngine; store: LicenseStore; authenticate(token: string): Promise<Actor>; admin(actor: Actor, path: string, body: Body): Promise<unknown>; origins: string[]; providers?: ReadonlyMap<string, PaymentProvider>; notifyAccessRequest?(request: LicenseAccessRequest): Promise<boolean>; }
@@ -59,6 +60,8 @@ export function createLicenseHandler(deps: HttpDependencies) {
       if (request.method !== "POST") return send(404, { code: "INVALID_INPUT" });
       if (path === "/license/enroll") return send(200, await deps.engine.enroll(actor, { deviceId: validId(input.deviceId), nodusId: text(input.nodusId, 9), deviceName: text(input.deviceName), deviceClaim: text(input.deviceClaim, 128) }));
       if (path === "/license/check") return send(200, await deps.engine.info(actor, credentials(input)));
+      if (path === "/license/support/profiles") return send(200, await deps.engine.createSupportProfile(actor, credentials(input), input.profile as SupportDraft));
+      if (path === "/license/support/admit") return send(200, await deps.engine.supportAdmission(actor, { profileId: validId(input.profileId), sessionId: validId(input.sessionId), targetNodusId: text(input.targetNodusId, 9), requesterNodusId: text(input.requesterNodusId, 9) }));
       if (path === "/license/activate") return send(200, await deps.engine.activate(actor, credentials(input), text(input.key, 128)));
       if (path === "/license/access-requests") {
         const result = await deps.engine.requestAccesses(actor, credentials(input));
@@ -73,7 +76,7 @@ export function createLicenseHandler(deps: HttpDependencies) {
         }
         return send(200, { requestId: result.request.id, duplicate: result.duplicate, notificationStatus });
       }
-      if (path === "/license/sessions/reserve") return send(200, await deps.engine.reserve(actor, credentials(input), { sessionId: validId(input.sessionId), targetNodusId: text(input.targetNodusId, 9), offline: input.offline === true }));
+      if (path === "/license/sessions/reserve") return send(200, await deps.engine.reserve(actor, credentials(input), { sessionId: validId(input.sessionId), targetNodusId: text(input.targetNodusId, 9), offline: input.offline === true, supportProfileId: input.supportProfileId ? validId(input.supportProfileId) : undefined, supportPassword: typeof input.supportPassword === "string" ? input.supportPassword : undefined }));
       const lifecycle = path.match(/^\/license\/sessions\/(establish|heartbeat|end)$/);
       if (lifecycle) return send(200, await deps.engine.lifecycle(actor, validId(input.sessionId), lifecycle[1] as "establish" | "heartbeat" | "end"));
       if (path === "/license/transport/identity") {

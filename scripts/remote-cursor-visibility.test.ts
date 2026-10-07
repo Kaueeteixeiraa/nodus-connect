@@ -180,7 +180,7 @@ test("mouse injection and packet coordinates remain unchanged outside bounded mo
   expect(inputSource).toContain('helper.stdin.write(helper.nodusBinaryInput ? encodeRemoteInput(message) : `${JSON.stringify(message)}\\n`);\n    hostCursorVisibility?.remoteMouseActivity(message);');
   const baseline = inputSource
     .replace(/    if \(message.type === "mouseMove" && helper.stdin.writableLength > 64\) \{[\s\S]*?      return \{ ok: true \};\n    \}/, '    if (message.type === "mouseMove" && helper.stdin.writableLength > 64) return { ok: true };')
-    .replace("    clearTimeout(helper.nodusMoveTimer);\n    helper.nodusMoveTimer = null;\n    helper.nodusPendingMove = null;\n", "")
+    .replace('    if (message.type.startsWith("mouse")) {\n      clearTimeout(helper.nodusMoveTimer);\n      helper.nodusMoveTimer = null;\n      helper.nodusPendingMove = null;\n    }\n', "")
     .replace("    hostCursorVisibility?.remoteMouseActivity(message);\n", "");
   expect(hash(baseline)).toBe("04aa1af9f01261fd9e9f3a2b67dbca98a25c6fae6bdfec79120a9a79808fc03a");
   expect(functionHash("apps/desktop/electron/main.cjs", "encodeRemoteInput")).toBe("264100b5230a7b7313711e3d093c4a2c2fa12d89579db71999dd543b476a7200");

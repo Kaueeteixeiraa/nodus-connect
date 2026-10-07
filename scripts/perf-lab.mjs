@@ -138,6 +138,8 @@ async function printReport(reportArgs) {
       mouseEventsPerSecond: round(average(inputWindows, "mouseEventsPerSecond")),
       sendsPerSecond: round(average(inputWindows, "sendsPerSecond")),
       coalesced: maximum(inputWindows, "coalesced"), bufferDrops: maximum(inputWindows, "bufferDrops"),
+      bufferDeferrals: maximum(inputWindows, "bufferDeferrals"),
+      hostStaleDrops: maximum(host.map((sample) => sample.inputDiagnostic).filter(Boolean), "staleDrops"),
       hostRateDrops: maximum(host.map((sample) => sample.inputDiagnostic).filter(Boolean), "rateDrops"),
       bufferedAmountPeak: maximum(inputWindows, "bufferedAmount"), probeTimeouts: maximum(inputWindows, "probeTimeouts"),
       eventToSendMsAverage: round(average(inputAcks, "eventToSendMs")),
@@ -180,6 +182,7 @@ async function printReport(reportArgs) {
       qualityLimitation: mode(host.map((item) => item.limitation).filter(Boolean)) ?? "unknown",
       decoder: mode(viewer.map((item) => item.decoder).filter(Boolean)) ?? "unknown",
       decoderKind: classifyDecoder(mode(viewer.map((item) => item.decoder).filter(Boolean)) ?? ""),
+      rtpReliability: { host: host.at(-1)?.rtpReliability ?? null, viewer: viewer.at(-1)?.rtpReliability ?? null },
       encodeMs: round(average(sender.filter((item) => item.encodedFps > 0), "encodeMs")),
       encodeMsP95: round(percentile(sender.filter((item) => item.encodedFps > 0), "encodeMs", 0.95)),
       decodeMs: round(average(viewer.filter((item) => item.decodedFps > 0), "decodeMs")),
@@ -209,6 +212,9 @@ async function printReport(reportArgs) {
       devicePixelRatio: renderDisplay?.devicePixelRatio ?? null,
       fullscreen: renderDisplay?.fullscreen ?? null,
       rendererCpuPercent: renderDisplay?.rendererCpuPercent ?? null,
+      frameTiming: Object.fromEntries(["frameAgeMs", "receiveToPresentMs", "frameProcessingMs", "presentationCallbackDelayMs"]
+        .map(key => [key, round(averageNested(viewer.filter(item => item.renderSampleAgeMs >= 0 && item.renderSampleAgeMs < 3000), "frameTiming", key))])),
+      frameTimingMeasurement: "browser-estimated-capture-to-presentation-not-input-latency",
     },
     imageQuality: {
       resolutionPipeline,
@@ -272,6 +278,8 @@ async function printReport(reportArgs) {
       lastReason: profileEvents.at(-1)?.reason ?? lastAdaptation?.adaptationReason ?? "unknown",
       controlBufferedBytesPeak: maximum(windowSamples, "controlBufferedBytes"),
       fileBufferedBytesPeak: maximum(windowSamples, "fileBufferedBytes"),
+      channelBuffersPeak: Object.fromEntries(["control", "pointer", "clipboard", "telemetry"].map(key => [key, maximum(windowSamples.map(item => item.channelBuffers ?? {}), key)])),
+      pendingPointerPositionsPeak: maximum(windowSamples, "pendingPointerPositions"),
     },
     gpu: {
       host: gpuSummary(host),

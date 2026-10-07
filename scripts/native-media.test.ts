@@ -159,7 +159,7 @@ function hostFixture(native: boolean, fallback: boolean, ready = false, startupE
   const runtime: { value?: any } = {};
   const cleanup = vi.fn(() => { peers.current.clear(); policies.current.clear(); });
   const context = createContext({
-    Error, performance, captureBackendPlan, requireLegacyCaptureAllowed,
+    Error, performance, captureBackendPlan, requireLegacyCaptureAllowed, supportProfile: null,
     captureCleanupRef: ref(), peersRef: peers, nativeFallbackAllowedRef: policies,
     requestedResolutionsRef: ref(), requestedFpsRef: ref(),
     requestedQualitiesRef: ref(), appliedVideoRef: ref(),

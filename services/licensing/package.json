@@ -8,7 +8,7 @@
     "node": ">=22"
   },
   "scripts": {
-    "build": "esbuild src/server.ts --bundle --platform=node --format=esm --packages=external --outfile=dist/server.js",
+    "build": "esbuild src/server.ts --bundle --platform=node --format=esm --packages=external --banner:js=\"import { createRequire } from 'node:module'; const require = createRequire(import.meta.url);\" --outfile=dist/server.js",
     "start": "node dist/server.js",
     "bootstrap": "tsx src/bootstrap.ts"
   },

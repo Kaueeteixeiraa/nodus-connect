@@ -15,6 +15,7 @@ download-site/download/
 download-part*/Nodus-Connect-Setup-*.bin
 nodus-connect-download.zip
 build/nodus-payload.zip
+build/quick-support-trust.json
 build/*.ico
 main.obj
 *.tmp

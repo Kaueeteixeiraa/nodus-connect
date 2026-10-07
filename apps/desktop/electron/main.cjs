@@ -1,4 +1,4 @@
-const { app, BrowserWindow, Menu, Tray, clipboard, desktopCapturer, ipcMain, nativeImage, powerSaveBlocker, safeStorage, screen, session, shell } = require("electron");
+const { app, BrowserWindow, Menu, Tray, clipboard, desktopCapturer, dialog, ipcMain, nativeImage, powerSaveBlocker, safeStorage, screen, session, shell } = require("electron");
 const { spawn, spawnSync } = require("node:child_process");
 const crypto = require("node:crypto");
 const dgram = require("node:dgram");
@@ -11,17 +11,29 @@ const { createDeviceIdentityStore } = require("./device-identity.cjs");
 const { createLogWriter } = require("./log-writer.cjs");
 const { RemoteCursorVisibility } = require("./remote-cursor-visibility.cjs");
 const { RemoteWindowsKeys } = require("./remote-windows-keys.cjs");
+const supportPackages = require("./quick-support.cjs");
+const supportTrustPath = app.isPackaged ? path.join(process.resourcesPath, "quick-support-trust.json") : path.join(__dirname, "../../../build/quick-support-trust.json");
+let supportKey = "";
+try { supportKey = JSON.parse(fs.readFileSync(supportTrustPath, "utf8")).publicKey; } catch {}
+const portableSupport = app.isPackaged && Boolean(process.env.PORTABLE_EXECUTABLE_FILE);
+let supportProfile = null, supportBootError = "";
+if (portableSupport) {
+  try { supportProfile = supportPackages.readProfile(process.env.PORTABLE_EXECUTABLE_FILE, supportKey); }
+  catch { supportBootError = "O pacote de suporte esta ausente, adulterado ou foi assinado por uma chave desconhecida. Solicite um novo arquivo a empresa."; }
+}
 
 let mainWindow;
 let tray;
 let themedIcon;
 let isQuitting = false;
+let updateInProgress = false;
+let activeSessionCount = 0;
 let trayIdentity = { nodusId: "", deviceName: "Nodus Connect", status: "Online" };
 let remoteControlActive = false;
 let remoteKeyboardCaptureActive = false;
 let remoteKeyboardCaptureWebContentsId = 0;
 let lastSecureAttentionAt = 0;
-let minimizeToTray = true;
+let minimizeToTray = !portableSupport;
 let inputHelper;
 let inputProbeSequence = 0;
 const inputProbes = new Map();
@@ -37,7 +49,7 @@ const logWriter = createLogWriter(() => path.join(app.getPath("userData"), "logs
 
 const isDev = process.env.NODUS_DESKTOP_DEV === "1";
 const devUrl = process.env.NODUS_DESKTOP_URL || "http://127.0.0.1:5173";
-const embeddedServerEnabled = process.env.NODUS_EMBEDDED_SERVER === "1";
+const embeddedServerEnabled = !portableSupport && process.env.NODUS_EMBEDDED_SERVER === "1";
 const nativeCaptureProbe = app.isPackaged
   ? path.join(process.resourcesPath, "native", "nodus-capture-status.exe")
   : path.join(__dirname, "..", "..", "..", "native", "bin", "nodus-capture-status.exe");
@@ -64,7 +76,7 @@ const gstreamerRoot = app.isPackaged
   : path.join(__dirname, "..", "..", "..", "work", "gstreamer-runtime-package");
 const firebaseApiKey = process.env.NODUS_FIREBASE_API_KEY || "AIzaSyAN-UMMvnJlNFZ-hiiRvJHuCFzPPVmdR-c";
 const firebaseAuthUrl = process.env.NODUS_FIREBASE_AUTH_URL || "https://nodus-connect-kau-2026.web.app/google-login.html";
-const startMinimized = process.argv.includes("--minimized");
+const startMinimized = !portableSupport && process.argv.includes("--minimized");
 const userDataDir = process.env.NODUS_USER_DATA_DIR;
 const extendedKeyboardCodes = new Set(["AltRight", "ArrowDown", "ArrowLeft", "ArrowRight", "ArrowUp", "ContextMenu", "ControlRight", "Delete", "End", "Home", "Insert", "MetaLeft", "MetaRight", "NumpadDivide", "NumpadEnter", "PageDown", "PageUp", "PrintScreen"]);
 const diagnosticPresets = {
@@ -80,6 +92,7 @@ app.setName("Nodus Connect");
 app.setAppUserModelId("com.nodus.connect.desktop");
 app.on("gpu-info-update", () => { gpuInfoReady = true; });
 if (userDataDir) app.setPath("userData", userDataDir);
+if (supportProfile) app.setPath("userData", path.join(app.getPath("appData"), "Nodus Connect", "QuickSupport", supportProfile.id));
 app.commandLine.appendSwitch("enable-zero-copy");
 app.commandLine.appendSwitch("enable-gpu-rasterization");
 app.commandLine.appendSwitch("disable-background-timer-throttling");
@@ -103,7 +116,7 @@ app.on("second-instance", (_event, commandLine) => {
     appendLog(JSON.stringify(event), "performance.log");
   }
   showMainWindow();
-  if (!preset && mainWindow && !mainWindow.isDestroyed() && !mainWindow.webContents.isDestroyed()) mainWindow.webContents.send("nodus:open-workspace");
+  if (!portableSupport && !preset && mainWindow && !mainWindow.isDestroyed() && !mainWindow.webContents.isDestroyed()) mainWindow.webContents.send("nodus:open-workspace");
 });
 
 function attachRemoteKeyboardForwarding(window) {
@@ -132,6 +145,7 @@ function attachRemoteKeyboardForwarding(window) {
 
 app.whenReady().then(() => {
   if (!gotLock) return;
+  if (supportBootError) { dialog.showErrorBox("Nodus QuickSupport", supportBootError); app.quit(); return; }
   logDiagnosticPresetActivation(performanceDiagnostic);
   session.defaultSession.setPermissionRequestHandler((_webContents, permission, callback) => {
     callback(permission === "media" || permission === "display-capture");
@@ -145,7 +159,7 @@ app.whenReady().then(() => {
     }).catch(() => callback({}));
   });
   createMainWindow();
-  createTray();
+  if (!portableSupport) createTray();
   createMenu();
   setupIpc();
   if (embeddedServerEnabled) startEmbeddedCoordination();
@@ -167,11 +181,11 @@ app.on("window-all-closed", () => {
 function createMainWindow() {
   const { width: workWidth, height: workHeight } = screen.getPrimaryDisplay().workAreaSize;
   mainWindow = new BrowserWindow({
-    width: Math.min(1180, workWidth),
-    height: Math.min(760, workHeight),
-    minWidth: Math.min(820, workWidth),
+    width: Math.min(portableSupport ? 520 : 1180, workWidth),
+    height: Math.min(portableSupport ? 680 : 760, workHeight),
+    minWidth: Math.min(portableSupport ? 360 : 820, workWidth),
     minHeight: Math.min(560, workHeight),
-    title: "Nodus Connect",
+    title: supportProfile?.name || "Nodus Connect",
     backgroundColor: "#050811",
     icon: createIcon(),
     autoHideMenuBar: true,
@@ -416,6 +430,12 @@ require("electron").ipcMain.on("nodus:tray-identity", (_event, identity) => {
 });
 
 function setupIpc() {
+  ipcMain.handle("nodus:get-support-profile", () => supportProfile);
+  ipcMain.handle("nodus:quit", (event) => { if (isMainAppSender(event)) quitApp(); });
+  ipcMain.handle("nodus:generate-support-package", (event, input) => {
+    if (portableSupport || !isMainAppSender(event)) throw new Error("UNAUTHORIZED");
+    return generateSupportPackage(input);
+  });
   ipcMain.handle("nodus:get-identity", (_event, legacyIdentity) => identityStore().loadOrCreate(legacyIdentity));
   ipcMain.handle("nodus:save-identity", (_event, identity) => identityStore().updateMutable(identity));
   ipcMain.handle("nodus:get-license-credentials", (event) => licenseCredentials(event));
@@ -501,22 +521,18 @@ function setupIpc() {
     targetWindow.setFullScreen(next);
     return next;
   });
-  ipcMain.handle("nodus:check-for-updates", async () => {
-    try {
-      const response = await fetch("https://api.github.com/repos/Kaueeteixeiraa/nodus-connect/releases/latest", { headers: { Accept: "application/vnd.github+json", "User-Agent": "Nodus-Connect" }, signal: AbortSignal.timeout(8000) });
-      if (!response.ok) throw new Error("UPDATE_CHECK_FAILED");
-      const release = await response.json();
-      return { ok: true, version: String(release.tag_name || "").replace(/^v/i, ""), url: String(release.html_url || "") };
-    } catch {
-      return { ok: false, error: "Não foi possível buscar atualizações agora." };
-    }
+  ipcMain.on("nodus:active-session-count", (event, count) => {
+    if (isMainAppSender(event) && Number.isSafeInteger(count) && count >= 0 && count <= 1000) activeSessionCount = count;
   });
+  ipcMain.handle("nodus:check-for-updates", (event) => isMainAppSender(event)
+    ? checkAndInstallUpdate(event.sender) : { ok: false, error: "UNAUTHORIZED" });
   ipcMain.handle("nodus:restart-computer", (event) => {
     if (!isMainAppSender(event) || !remoteControlActive) return { ok: false, error: "UNAUTHORIZED" };
     const result = spawnSync("shutdown.exe", ["/r", "/t", "15", "/c", "Reinicialização autorizada pelo Nodus Connect"], { windowsHide: true });
     return result.status === 0 ? { ok: true } : { ok: false, error: "O Windows recusou a reinicialização." };
   });
   ipcMain.handle("nodus:set-startup-options", (_event, options) => {
+    if (portableSupport) { minimizeToTray = false; return; }
     minimizeToTray = options?.minimizeToTray !== false;
     app.setLoginItemSettings({
       openAtLogin: Boolean(options?.startWithWindows),
@@ -559,7 +575,118 @@ function setupIpc() {
   ipcMain.handle("nodus:write-performance", (_event, message) => appendLog(String(message || "").slice(0, 16_000), "performance.log"));
   ipcMain.handle("nodus:get-gpu-diagnostics", () => getGpuDiagnostics());
   ipcMain.handle("nodus:get-render-display-info", (event, viewport) => getRenderDisplayInfo(event.sender, viewport));
-  ipcMain.handle("nodus:google-login", (_event, options) => googleLogin(options));
+  ipcMain.handle("nodus:google-login", (_event, options) => { if (portableSupport) throw new Error("UNAUTHORIZED"); return googleLogin(options); });
+}
+
+function updateRelease(release, currentVersion) {
+  const version = String(release.tag_name || "").replace(/^v/i, "");
+  const validVersion = value => /^\d{1,5}\.\d{1,5}\.\d{1,5}$/.test(value);
+  if (release.draft || release.prerelease || !validVersion(version) || !validVersion(currentVersion)) throw new Error("INVALID_UPDATE");
+  const next = version.split(".").map(Number), current = currentVersion.split(".").map(Number);
+  const differing = next.findIndex((part, index) => part !== current[index]);
+  if (differing < 0 || next[differing] < current[differing]) return { version, available: false };
+  const name = `Nodus-Connect-Setup-${version}.exe`;
+  const url = `https://github.com/Kaueeteixeiraa/nodus-connect/releases/download/v${version}/${name}`;
+  const asset = release.assets?.find(item => item.name === name);
+  if (!asset || asset.browser_download_url !== url || !/^sha256:[a-f0-9]{64}$/.test(asset.digest)
+    || !Number.isSafeInteger(asset.size) || asset.size <= 0 || asset.size > 350 * 1024 * 1024) throw new Error("INVALID_UPDATE");
+  return { version, available: true, url, sha256: asset.digest.slice(7), size: asset.size };
+}
+
+async function checkAndInstallUpdate(sender) {
+  if (updateInProgress) return { ok: false, error: "Atualização em andamento." };
+  if (portableSupport || !app.isPackaged || process.platform !== "win32") return { ok: false, error: "Atualização automática disponível apenas no Nodus instalado." };
+  updateInProgress = true;
+  let installing = false;
+  const progress = (phase, percent = 0) => { if (!sender.isDestroyed()) sender.send("nodus:update-progress", { phase, percent }); };
+  try {
+    progress("checking");
+    const response = await fetch("https://api.github.com/repos/Kaueeteixeiraa/nodus-connect/releases/latest", { headers: { Accept: "application/vnd.github+json", "User-Agent": "Nodus-Connect", "X-GitHub-Api-Version": "2022-11-28" }, signal: AbortSignal.timeout(8000) });
+    if (!response.ok) throw new Error("UPDATE_CHECK_FAILED");
+    const update = updateRelease(await response.json(), app.getVersion());
+    if (!update.available) return { ok: true, version: app.getVersion(), available: false };
+    if (activeSessionCount) return { ok: false, error: "Encerre as sessões remotas antes de atualizar." };
+    const installDir = path.dirname(process.execPath);
+    if (path.basename(installDir).toLowerCase() !== "nodus connect") throw new Error("INVALID_INSTALL_TARGET");
+    const cache = path.join(app.getPath("userData"), "updates");
+    fs.mkdirSync(cache, { recursive: true });
+    const setup = path.join(cache, `${update.sha256}.exe`);
+    if (!fs.existsSync(setup) || await hashFile(setup) !== update.sha256) {
+      await downloadVerifiedFile(update.url, setup, update.sha256, update.size, percent => progress("downloading", percent));
+    }
+    if (activeSessionCount) return { ok: false, error: "Encerre as sessões remotas antes de atualizar." };
+    const optionsFile = path.join(cache, `${crypto.randomUUID()}.json`);
+    fs.writeFileSync(optionsFile, JSON.stringify({ installDir, startWithWindows: app.getLoginItemSettings().openAtLogin }), { flag: "wx" });
+    try { await launchUpdate(setup, optionsFile); }
+    catch (error) { fs.rmSync(optionsFile, { force: true }); throw error; }
+    installing = true;
+    progress("installing", 100);
+    appendLog(`update-install version=${update.version}`);
+    setTimeout(quitApp, 250);
+    return { ok: true, version: update.version, available: true, installing: true };
+  } catch (error) {
+    appendLog(`update-failed reason=${String(error?.message || "UNKNOWN").slice(0, 200)}`);
+    return { ok: false, error: "Não foi possível atualizar. Tente novamente." };
+  } finally { if (!installing) updateInProgress = false; }
+}
+
+function launchUpdate(setup, optionsFile) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(setup, [`/UPDATE=${optionsFile}`], { detached: true, stdio: "ignore", windowsHide: true });
+    child.once("error", reject);
+    child.once("spawn", () => { child.unref(); resolve(); });
+  });
+}
+
+async function hashFile(file) {
+  const hash = crypto.createHash("sha256");
+  for await (const chunk of fs.createReadStream(file)) hash.update(chunk);
+  return hash.digest("hex");
+}
+
+async function downloadVerifiedFile(url, destination, sha256, expectedSize, onProgress = () => {}) {
+  const temporary = `${destination}.${crypto.randomUUID()}.tmp`;
+  const controller = new AbortController(), timer = setTimeout(() => controller.abort(), 600_000);
+  try {
+    const response = await fetch(url, { signal: controller.signal });
+    if (!response.ok || !response.body) throw new Error("DOWNLOAD_FAILED");
+    let size = 0, previous = -1;
+    const { Readable, Transform } = require("node:stream");
+    const bounded = new Transform({ transform(chunk, _encoding, callback) {
+      size += chunk.length;
+      if (size > (expectedSize ?? 350 * 1024 * 1024)) return callback(new Error("DOWNLOAD_TOO_LARGE"));
+      const percent = expectedSize ? Math.floor(size * 100 / expectedSize) : 0;
+      if (percent !== previous) { previous = percent; onProgress(percent); }
+      callback(null, chunk);
+    } });
+    await require("node:stream/promises").pipeline(Readable.fromWeb(response.body), bounded, fs.createWriteStream(temporary, { flags: "wx" }));
+    if ((expectedSize && size !== expectedSize) || await hashFile(temporary) !== sha256) throw new Error("DOWNLOAD_INTEGRITY_FAILED");
+    fs.renameSync(temporary, destination);
+  } finally { clearTimeout(timer); fs.rmSync(temporary, { force: true }); }
+}
+
+async function generateSupportPackage(input) {
+  const profile = supportPackages.verifyProfile(input?.token, supportKey);
+  const version = app.getVersion();
+  let source = path.join(__dirname, "../../../outputs/quick-support", `Nodus-QuickSupport-${version}.exe`);
+  if (app.isPackaged || !fs.existsSync(source)) {
+    if (!profile.template || profile.template.version !== version) throw new Error("O template portatil desta versao ainda nao foi publicado.");
+    source = path.join(app.getPath("userData"), "support-cache", `${profile.template.sha256}.exe`);
+    fs.mkdirSync(path.dirname(source), { recursive: true });
+    if (!fs.existsSync(source) || await hashFile(source) !== profile.template.sha256) {
+      const url = `https://github.com/Kaueeteixeiraa/nodus-connect/releases/download/v${version}/Nodus-QuickSupport-${version}.exe`;
+      await downloadVerifiedFile(url, source, profile.template.sha256);
+    }
+  }
+  const result = await dialog.showSaveDialog(mainWindow, { title: "Salvar suporte portatil", defaultPath: `${profile.name.replace(/[^a-zA-Z0-9_-]/g, "-")}.exe`, filters: [{ name: "Aplicativo Windows", extensions: ["exe"] }] });
+  if (result.canceled || !result.filePath) return { canceled: true };
+  const temporary = `${result.filePath}.${crypto.randomUUID()}.tmp`;
+  try {
+    supportPackages.appendProfile(source, temporary, input.token, supportKey);
+    supportPackages.readProfile(temporary, supportKey);
+    fs.renameSync(temporary, result.filePath);
+    return { path: result.filePath };
+  } finally { fs.rmSync(temporary, { force: true }); }
 }
 
 function startNativeMedia(sender, input) {
@@ -790,6 +917,7 @@ function getServiceStatus() {
 }
 
 function runServiceCommand(command) {
+  if (portableSupport) return { ok: false, error: "Servico permanente indisponivel no suporte portatil." };
   if (!app.isPackaged || !fs.existsSync(nativeService)) return { ok: false, error: "Servico nativo indisponivel nesta versao." };
   const appPath = process.execPath;
   const quote = (value) => `'${String(value).replace(/'/g, "''")}'`;
@@ -800,6 +928,7 @@ function runServiceCommand(command) {
 }
 
 function runServiceControl(command) {
+  if (portableSupport) return { ok: false, error: "Servico permanente indisponivel no suporte portatil." };
   const quote = (value) => `'${String(value).replace(/'/g, "''")}'`;
   const script = `$p = Start-Process -FilePath ${quote("sc.exe")} -ArgumentList @(${quote(command)}, ${quote("NodusConnectService")}) -Verb RunAs -Wait -PassThru; exit $p.ExitCode`;
   const result = spawnSync("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script], { encoding: "utf8", windowsHide: true });
@@ -935,9 +1064,11 @@ function applyRemoteInput(input) {
       if (!helper.nodusMoveTimer) helper.nodusMoveTimer = setTimeout(() => flushLatestMouseMove(helper), 4);
       return { ok: true };
     }
-    clearTimeout(helper.nodusMoveTimer);
-    helper.nodusMoveTimer = null;
-    helper.nodusPendingMove = null;
+    if (message.type.startsWith("mouse")) {
+      clearTimeout(helper.nodusMoveTimer);
+      helper.nodusMoveTimer = null;
+      helper.nodusPendingMove = null;
+    }
     helper.stdin.write(helper.nodusBinaryInput ? encodeRemoteInput(message) : `${JSON.stringify(message)}\n`);
     hostCursorVisibility?.remoteMouseActivity(message);
     return { ok: true };

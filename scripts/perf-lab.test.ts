@@ -30,7 +30,7 @@ describe("performance report", () => {
     const first = { id: 1, ok: true, positionConfirmed: true, eventToSendMs: 5, commandAckRttMs: 20,
       hostProcessingMs: 4, ipcRoundTripMs: 3, mainToWindowsAckMs: 2, transportAckRoundTripMs: 16 };
     const viewer = report("viewer", [
-      { inputDiagnostic: { hostSupported: true, latest: first, mouseEventsPerSecond: 1000, sendsPerSecond: 60, bufferedAmount: 9, coalesced: 940 } },
+      { inputDiagnostic: { hostSupported: true, latest: first, mouseEventsPerSecond: 1000, sendsPerSecond: 60, bufferedAmount: 9, coalesced: 940, bufferDeferrals: 4 } },
       { inputDiagnostic: { hostSupported: true, latest: first, mouseEventsPerSecond: 1000, sendsPerSecond: 60, bufferedAmount: 18, coalesced: 940 } },
       { inputDiagnostic: { hostSupported: true, latest: { ...first, id: 2, commandAckRttMs: 40 }, coalesced: 1000 } },
     ]);
@@ -38,7 +38,7 @@ describe("performance report", () => {
     expect(result.input).toMatchObject({ enabled: true, samples: 2, windowsPositionConfirmedSamples: 2,
       nativeAckRttMsAverage: 30, nativeAckRttMsP95: 40, nativeAckRttMsP99: 40, nativeAckRttMsMax: 40, nativeAckOver500MsSamples: 0,
       commandLatencyMs: null, oneWayTransportMs: null, visualFeedbackLatencyMs: null,
-      mouseEventsPerSecond: 1000, sendsPerSecond: 60, bufferedAmountPeak: 18 });
+      mouseEventsPerSecond: 1000, sendsPerSecond: 60, bufferedAmountPeak: 18, bufferDeferrals: 4, hostStaleDrops: null });
   });
 
   it("joins both peers without inventing unavailable counters", () => {
@@ -88,6 +88,22 @@ describe("performance report", () => {
     expect(result.network.transport).toBe("unknown");
     expect(result.media.counters.rendered).toBeNull();
     expect(result.gpu.host.hardwareH264Available).toBeNull();
+    expect(result.rendering.frameTiming).toEqual({ frameAgeMs: null, receiveToPresentMs: null, frameProcessingMs: null, presentationCallbackDelayMs: null });
+    expect(result.media.rtpReliability).toEqual({ host: null, viewer: null });
+    expect(result.adaptation.channelBuffersPeak).toEqual({ control: null, pointer: null, clipboard: null, telemetry: null });
+  });
+
+  it("reports channel pressure and fresh presentation estimates without treating them as input latency", () => {
+    const viewer = report("viewer", [
+      { renderSampleAgeMs: 0, frameTiming: { frameAgeMs: 80, receiveToPresentMs: 10, frameProcessingMs: 4, presentationCallbackDelayMs: 2 },
+        channelBuffers: { control: 8, pointer: 17, clipboard: 65536, telemetry: 40 }, pendingPointerPositions: 1,
+        rtpReliability: { nackCount: 2, pliCount: 1, measurement: "cumulative-rtp-counters" } },
+      { renderSampleAgeMs: 3000, frameTiming: { frameAgeMs: 900, receiveToPresentMs: 500 } },
+    ]);
+    const result = JSON.parse(execFileSync(process.execPath, [resolve("scripts/perf-lab.mjs"), "report", viewer], { encoding: "utf8" }));
+    expect(result.rendering.frameTiming).toEqual({ frameAgeMs: 80, receiveToPresentMs: 10, frameProcessingMs: 4, presentationCallbackDelayMs: 2 });
+    expect(result.input.visualFeedbackLatencyMs).toBeNull();
+    expect(result.adaptation).toMatchObject({ channelBuffersPeak: { control: 8, pointer: 17, clipboard: 65536, telemetry: 40 }, pendingPointerPositionsPeak: 1 });
   });
 
   it("keeps both roles when computer clocks differ", () => {

@@ -3,6 +3,7 @@ import { normalizeNodusId } from "../../../packages/common/src/nodusId.js";
 export type DeviceStatus = "online" | "offline" | "connecting" | "in_session" | "error";
 
 export interface PresenceRecord {
+  supportProfileId?: string;
   nodusId: string;
   deviceName: string;
   status: DeviceStatus;
@@ -11,6 +12,7 @@ export interface PresenceRecord {
 }
 
 export interface PresenceInput {
+  supportProfileId?: string;
   nodusId: string;
   deviceName: string;
   status?: DeviceStatus;
@@ -29,6 +31,7 @@ export class PresenceRegistry {
 
     const record: PresenceRecord = {
       nodusId,
+      ...(input.supportProfileId && /^[A-Za-z0-9_-]{1,128}$/.test(input.supportProfileId) ? { supportProfileId: input.supportProfileId } : {}),
       deviceName: input.deviceName.trim(),
       status: input.status ?? "online",
       updatedAt: new Date().toISOString(),

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { classifyDecoderImplementation, classifyEncoderImplementation, contentMotion, counterDelta, cumulativeMeanMs, diagnosePipeline, encoderFallbackReason, InputLatencyDiagnostic, receiverPacketLoss, rtpJitterMs, smoothPipelineSample, type PipelineSample } from "./performance-monitor";
+import { classifyDecoderImplementation, classifyEncoderImplementation, contentMotion, counterDelta, cumulativeMeanMs, diagnosePipeline, encoderFallbackReason, InputLatencyDiagnostic, receiverPacketLoss, rtpJitterMs, smoothPipelineSample, videoFrameTiming, type PipelineSample } from "./performance-monitor";
 import { assessQuality } from "./adaptive-quality";
 
 describe("receiver packet loss", () => {
@@ -61,8 +61,28 @@ describe("input latency measurement", () => {
   it("records window rates and cumulative coalescing without React updates", () => {
     const diagnostic = new InputLatencyDiagnostic(0);
     diagnostic.events = 1000; diagnostic.sent = 60; diagnostic.received = 58; diagnostic.coalesced = 940;
-    expect(diagnostic.snapshot(1000, 18)).toMatchObject({ mouseEventsPerSecond: 1000, sendsPerSecond: 60, receivesPerSecond: 58, coalesced: 940 });
+    diagnostic.bufferDeferrals = 5; diagnostic.staleDrops = 3;
+    expect(diagnostic.snapshot(1000, 18)).toMatchObject({ mouseEventsPerSecond: 1000, sendsPerSecond: 60, receivesPerSecond: 58, coalesced: 940, bufferDeferrals: 5, staleDrops: 3 });
     expect(diagnostic.snapshot(2000, 0).mouseEventsPerSecond).toBe(0);
+  });
+});
+
+describe("browser video frame timing", () => {
+  it("keeps browser estimates separate from input latency", () => {
+    expect(videoFrameTiming({ captureTime: 10, receiveTime: 80, presentationTime: 100, processingDuration: .007 }, 103)).toEqual({
+      frameAgeMs: 90, receiveToPresentMs: 20, frameProcessingMs: 7, presentationCallbackDelayMs: 3,
+      measurement: "browser-estimated-capture-to-presentation-not-input-latency",
+    });
+  });
+
+  it("does not invent capture or presentation timestamps", () => {
+    expect(videoFrameTiming({}, 100)).toMatchObject({ frameAgeMs: null, receiveToPresentMs: null, frameProcessingMs: null, presentationCallbackDelayMs: null });
+  });
+
+  it.each([NaN, Infinity, -1, 101])("rejects invalid or future capture timestamps: %s", captureTime => {
+    expect(videoFrameTiming({ captureTime, receiveTime: captureTime, presentationTime: 100, processingDuration: -1 }, 99)).toMatchObject({
+      frameAgeMs: null, receiveToPresentMs: null, frameProcessingMs: null, presentationCallbackDelayMs: null,
+    });
   });
 });
 

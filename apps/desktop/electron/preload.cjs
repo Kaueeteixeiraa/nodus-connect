@@ -8,6 +8,9 @@ contextBridge.exposeInMainWorld("nodusDesktop", {
   getIdentity(legacyIdentity) {
     return ipcRenderer.invoke("nodus:get-identity", legacyIdentity);
   },
+  getSupportProfile() { return ipcRenderer.invoke("nodus:get-support-profile"); },
+  generateSupportPackage(input) { return ipcRenderer.invoke("nodus:generate-support-package", input); },
+  quit() { return ipcRenderer.invoke("nodus:quit"); },
   saveIdentity(identity) {
     return ipcRenderer.invoke("nodus:save-identity", identity);
   },
@@ -84,6 +87,14 @@ contextBridge.exposeInMainWorld("nodusDesktop", {
   },
   checkForUpdates() {
     return ipcRenderer.invoke("nodus:check-for-updates");
+  },
+  setActiveSessionCount(count) {
+    ipcRenderer.send("nodus:active-session-count", count);
+  },
+  onUpdateProgress(callback) {
+    const listener = (_event, progress) => callback(progress);
+    ipcRenderer.on("nodus:update-progress", listener);
+    return () => ipcRenderer.removeListener("nodus:update-progress", listener);
   },
   restartComputer() {
     return ipcRenderer.invoke("nodus:restart-computer");

@@ -10,6 +10,7 @@ export interface LocalIdentity {
   deviceName: string;
   deviceNameConfirmed: boolean;
   createdAt: string;
+  supportProfileId?: string;
 }
 
 export async function loadOfficialIdentity(): Promise<LocalIdentity> {

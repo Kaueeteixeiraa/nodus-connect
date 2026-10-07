@@ -24,7 +24,10 @@ describe("adaptive quality", () => {
   });
 
   it("responds to sender queues and receiver buffering", () => {
-    expect(recommendedStage({ ...good, packetSendDelayMs: 110 })).toBe(2);
+    expect(assessQuality({ ...good, packetSendDelayMs: 50 })).toMatchObject({ stage: 2, source: "network" });
+    expect(recommendedStage({ ...good, packetSendDelayMs: 110 })).toBe(3);
+    expect(recommendedStage({ ...good, packetSendDelayMs: 110, availableKbps: 1000 })).toBe(4);
+    expect(recommendedStage({ ...good, packetSendDelayMs: 110, availableKbps: 6000 })).toBe(3);
     expect(recommendedStage({ ...good, jitterBufferMs: 130 })).toBe(1);
     expect(recommendedStage({ ...good, freezes: 1, jitterBufferMs: 130 })).toBe(2);
     expect(recommendedStage({ ...good, renderFps: 30 })).toBe(1);
@@ -37,13 +40,13 @@ describe("adaptive quality", () => {
 
   it("steps down after persistent pressure and recovers slowly with cooldown", () => {
     let state: AdaptiveState = { stage: 0, badSamples: 0, stableSamples: 0, changedAt: 0, changeCount: 0 };
-    for (let index = 0; index < 3; index++) state = advanceStage(state, 4, 6000 + index * 500);
+    state = advanceStage(state, 4, 1000);
     expect(state.stage).toBe(0);
-    state = advanceStage(state, 4, 7500);
+    state = advanceStage(state, 4, 1500);
     expect(state.stage).toBe(1);
-    for (let index = 0; index < 9; index++) state = advanceStage(state, 4, 8000 + index * 500);
+    state = advanceStage(state, 4, 2000);
     expect(state.stage).toBe(1);
-    state = advanceStage(state, 4, 12500);
+    state = advanceStage(state, 4, 2500);
     expect(state.stage).toBe(2);
     for (let index = 0; index < 19; index++) state = advanceStage(state, 0, 13000 + index * 500);
     expect(state.stage).toBe(2);
@@ -57,10 +60,11 @@ describe("adaptive quality", () => {
     expect(state.changeCount).toBe(0);
   });
 
-  it("moves bitrate gradually even near the minimum", () => {
-    expect(nextBitrate(14_000_000, 500_000)).toBe(600_000);
-    expect(nextBitrate(300_000, 5_000_000)).toBe(4_000_000);
-    expect(nextBitrate(14_000_000, 650_000)).toBeLessThanOrEqual(780_000);
+  it("reduces bitrate faster than it recovers, including near the minimum", () => {
+    expect(nextBitrate(14_000_000, 500_000)).toBe(550_000);
+    expect(nextBitrate(300_000, 5_000_000)).toBe(2_500_000);
+    expect(nextBitrate(14_000_000, 650_000)).toBeLessThanOrEqual(715_000);
+    expect(nextBitrate(100_000, 400_000)).toBe(300_000);
   });
 
   it("budgets native video by resolution and reduces bitrate without changing FPS", () => {

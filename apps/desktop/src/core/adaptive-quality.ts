@@ -24,8 +24,8 @@ export const STAGE_LIMITS = [
   { height: 1080, fps: 120 },
   { height: 1080, fps: 90 },
   { height: 1080, fps: 60 },
-  { height: 1080, fps: 45 },
-  { height: 1080, fps: 30 },
+  { height: 900, fps: 45 },
+  { height: 720, fps: 30 },
 ] as const;
 
 export type QualityPressure = { stage: AdaptiveStage; reason: string; source: "network" | "local" | "none" };
@@ -36,12 +36,13 @@ export function assessQuality(sample: QualitySample): QualityPressure {
   if (lossPct >= 10) return { stage: 4, reason: `network loss=${lossPct.toFixed(1)}%`, source: "network" };
   if (lossPct >= 5) return { stage: 3, reason: `network loss=${lossPct.toFixed(1)}%`, source: "network" };
   if (lossPct >= 2) return { stage: 2, reason: `network loss=${lossPct.toFixed(1)}%`, source: "network" };
+  const queueStage = sample.activePicture && (sample.packetSendDelayMs ?? 0) >= 50 ? (sample.packetSendDelayMs ?? 0) >= 100 ? 3 : 2 : 0;
   if (sample.activePicture && (sample.limitation === "bandwidth" || (bandwidthBound && availableKbps < 8000))) {
     const stage = availableKbps <= 0 ? 1 : availableKbps < 1500 ? 4 : availableKbps < 2500 ? 3 : availableKbps < 4500 ? 2 : 1;
-    return { stage, reason: `bandwidth available=${availableKbps}kbps used=${sample.bitrateKbps}kbps`, source: "network" };
+    if (stage >= queueStage) return { stage, reason: `bandwidth available=${availableKbps}kbps used=${sample.bitrateKbps}kbps`, source: "network" };
   }
+  if (queueStage) return { stage: queueStage, reason: `sender queue=${sample.packetSendDelayMs}ms`, source: "network" };
   if (!sample.activePicture) return { stage: 0, reason: "low motion: capacity unknown", source: "none" };
-  if ((sample.packetSendDelayMs ?? 0) >= 100) return { stage: 2, reason: `sender queue=${sample.packetSendDelayMs}ms`, source: "local" };
   if (sample.limitation === "cpu" || (sample.encodeMs > 1000 / sample.targetFps * 1.3 && sample.encodedFps < sample.targetFps * 0.9)) {
     return { stage: 2, reason: `encoder time=${sample.encodeMs}ms limitation=${sample.limitation}`, source: "local" };
   }
@@ -60,9 +61,9 @@ export function recommendedStage(sample: QualitySample): AdaptiveStage {
 export type AdaptiveState = { stage: AdaptiveStage; badSamples: number; stableSamples: number; changedAt: number; changeCount: number };
 
 export function nextBitrate(desired: number, previous?: number): number {
-  const capped = previous ? Math.max(previous * 0.8, Math.min(previous * 1.2, desired)) : desired;
+  const capped = previous ? Math.max(previous * 0.5, Math.min(previous * 1.1, desired)) : desired;
   const rounded = Math.round(capped / 50_000) * 50_000;
-  return Math.max(300_000, Math.round(previous ? Math.max(previous * 0.8, Math.min(previous * 1.2, rounded)) : rounded));
+  return Math.max(300_000, Math.round(previous ? Math.max(previous * 0.5, Math.min(previous * 1.1, rounded)) : rounded));
 }
 
 export function nativeVideoBitrate(height: number, fps: number, stage: AdaptiveStage = 0): number {
@@ -74,9 +75,8 @@ export function nativeVideoBitrate(height: number, fps: number, stage: AdaptiveS
 export function advanceStage(current: AdaptiveState, recommended: AdaptiveStage, now: number, critical = false): AdaptiveState {
   const badSamples = recommended > current.stage ? current.badSamples + 1 : 0;
   const stableSamples = recommended < current.stage ? current.stableSamples + 1 : 0;
-  const cooldown = now - current.changedAt < 5_000;
-  const worsen = recommended > current.stage && (critical || badSamples >= 4) && (!cooldown || critical);
-  const improve = recommended < current.stage && stableSamples >= 20 && !cooldown;
+  const worsen = recommended > current.stage && (critical || badSamples >= 2) && (now - current.changedAt >= 1_000 || critical);
+  const improve = recommended < current.stage && stableSamples >= 20 && now - current.changedAt >= 5_000;
   if (worsen || improve) return { stage: (current.stage + (worsen ? 1 : -1)) as AdaptiveStage, badSamples: 0, stableSamples: 0, changedAt: now, changeCount: current.changeCount + 1 };
   return { ...current, badSamples, stableSamples };
 }

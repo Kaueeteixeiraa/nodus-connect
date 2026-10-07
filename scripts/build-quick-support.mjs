@@ -1,0 +1,10 @@
+import { createPublicKey } from "node:crypto";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { resolve } from "node:path";
+import { loadEnv } from "vite";
+const root = resolve(import.meta.dirname, "..");
+const publicKey = String(process.env.VITE_NODUS_LICENSE_PUBLIC_KEY || loadEnv("production", root, "VITE_NODUS_LICENSE_PUBLIC_KEY").VITE_NODUS_LICENSE_PUBLIC_KEY || "").replace(/\\n/g, "\n");
+if (publicKey && createPublicKey(publicKey).asymmetricKeyType !== "ed25519") throw new Error("INVALID_SUPPORT_KEY");
+if (!publicKey && !process.argv.includes("--prepare")) throw new Error("QUICKSUPPORT_REQUIRES_PINNED_PUBLIC_KEY");
+mkdirSync(resolve(root, "build"), { recursive: true });
+writeFileSync(resolve(root, "build/quick-support-trust.json"), JSON.stringify({ publicKey }));

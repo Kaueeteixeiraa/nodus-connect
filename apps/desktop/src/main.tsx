@@ -8,10 +8,11 @@ window.addEventListener("error", (event) => {
   document.body.dataset.bootError = event.message || "renderer-error";
 });
 
-loadOfficialIdentity().then((identity) => {
+Promise.all([loadOfficialIdentity(), window.nodusDesktop?.getSupportProfile?.() ?? Promise.resolve(null)]).then(([identity, supportProfile]) => {
+  if (supportProfile) identity = { ...identity, deviceName: identity.deviceNameConfirmed ? identity.deviceName : supportProfile.name, deviceNameConfirmed: true, supportProfileId: supportProfile.id };
   createRoot(document.getElementById("root")!).render(
     <StrictMode>
-      <App initialIdentity={identity} />
+      <App initialIdentity={identity} supportProfile={supportProfile} />
     </StrictMode>,
   );
 }).catch((error) => {

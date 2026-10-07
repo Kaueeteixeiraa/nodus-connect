@@ -1,5 +1,9 @@
 import { EventEmitter } from "node:events";
+import * as fs from "node:fs";
 import { readFileSync } from "node:fs";
+import * as crypto from "node:crypto";
+import * as path from "node:path";
+import * as os from "node:os";
 import { createRequire } from "node:module";
 import { createContext, runInContext, runInNewContext } from "node:vm";
 import ts from "typescript";
@@ -8,9 +12,10 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { Activity, ArrowRight, Gauge, Monitor, UserRound } from "lucide-react";
 import { afterEach, expect, test, vi } from "vitest";
 import { translateText } from "../apps/desktop/src/core/localization";
-import { DESKTOP_VIDEO_POLICY } from "../apps/desktop/src/core/adaptive-quality";
+import { advanceStage, assessQuality, DESKTOP_VIDEO_POLICY, nativeVideoBitrate, nextBitrate, STAGE_LIMITS } from "../apps/desktop/src/core/adaptive-quality";
 import { LicenseError, LICENSE_MESSAGES } from "../packages/licensing/src/index";
 import { mapVideoPointer } from "../apps/desktop/src/core/remote-cursor";
+import { normalizeNodusId } from "../packages/common/src/nodusId";
 
 const { RemoteWindowsKeys, keyboardInput } = createRequire(import.meta.url)("../apps/desktop/electron/remote-windows-keys.cjs");
 const managers: any[] = [];
@@ -348,6 +353,140 @@ function uiFunction(name: string, context = {}, file = "apps/desktop/src/App.tsx
   return runInNewContext(`${code};${name}`, context);
 }
 
+const updateMain = "apps/desktop/electron/main.cjs";
+function releaseFixture(version = "1.1.11") {
+  return { tag_name: `v${version}`, assets: [{ name: `Nodus-Connect-Setup-${version}.exe`,
+    browser_download_url: `https://github.com/Kaueeteixeiraa/nodus-connect/releases/download/v${version}/Nodus-Connect-Setup-${version}.exe`,
+    digest: `sha256:${"a".repeat(64)}`, size: 100 }] };
+}
+
+test("updater compares numeric versions and never installs a downgrade", () => {
+  const release = uiFunction("updateRelease", {}, updateMain);
+  expect(release(releaseFixture("1.1.10"), "1.1.9").available).toBe(true);
+  expect(release(releaseFixture("1.1.9"), "1.1.10").available).toBe(false);
+  expect(release(releaseFixture(), "1.1.11").available).toBe(false);
+  for (const changed of [{ prerelease: true }, { draft: true }, { tag_name: "v1.2.3-beta" }]) {
+    expect(() => release({ ...releaseFixture(), ...changed }, "1.1.10")).toThrow("INVALID_UPDATE");
+  }
+  for (const changed of [{ digest: null }, { digest: "invalid" }, { size: 0 }, { size: 400 * 1024 * 1024 }, { browser_download_url: "https://example.com/setup.exe" }]) {
+    const fixture = releaseFixture(); Object.assign(fixture.assets[0], changed);
+    expect(() => release(fixture, "1.1.10")).toThrow("INVALID_UPDATE");
+  }
+});
+
+test.each(["valid", "hash", "truncated", "oversize", "network"])("verified download handles %s without retaining partial installers", async (mode) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "nodus-update-test-"));
+  const destination = path.join(directory, "setup.exe"), payload = Buffer.from("official installer");
+  const digest = crypto.createHash("sha256").update(payload).digest("hex");
+  const context = { fs, crypto, require: createRequire(import.meta.url), AbortController, setTimeout, clearTimeout,
+    fetch: async () => mode === "network" ? Promise.reject(new Error("offline")) : new Response(payload),
+    hashFile: uiFunction("hashFile", { fs, crypto }, updateMain) };
+  const download = uiFunction("downloadVerifiedFile", context, updateMain), progress = vi.fn();
+  try {
+    const pending = download("https://github.com/test", destination, mode === "hash" ? "0".repeat(64) : digest,
+      payload.length + (mode === "truncated" ? 1 : mode === "oversize" ? -1 : 0), progress);
+    if (mode === "valid") { await pending; expect(fs.readFileSync(destination)).toEqual(payload); expect(progress).toHaveBeenCalledWith(100); }
+    else { await expect(pending).rejects.toThrow(); expect(fs.existsSync(destination)).toBe(false); }
+    expect(fs.readdirSync(directory).filter(name => name.endsWith(".tmp"))).toEqual([]);
+  } finally { fs.rmSync(directory, { recursive: true, force: true }); }
+});
+
+function updateFlowFixture() {
+  const context: any = { updateInProgress: false, activeSessionCount: 0, portableSupport: false,
+    app: { isPackaged: true, getVersion: () => "1.1.10", getPath: () => "C:\\cache", getLoginItemSettings: () => ({ openAtLogin: true }) },
+    process: { platform: "win32", execPath: "C:\\Programs\\Nodus Connect\\Nodus Connect.exe" }, path: path.win32, crypto, AbortSignal,
+    fs: { mkdirSync: vi.fn(), existsSync: () => false, writeFileSync: vi.fn(), rmSync: vi.fn() },
+    fetch: vi.fn(async () => ({ ok: true, json: async () => releaseFixture() })),
+    downloadVerifiedFile: vi.fn(async (_url, _file, _sha, _size, progress) => progress(50)),
+    updateRelease: uiFunction("updateRelease", {}, updateMain), launchUpdate: vi.fn(async () => {}),
+    appendLog: vi.fn(), setTimeout: vi.fn(), quitApp: vi.fn() };
+  const sender = { isDestroyed: () => false, send: vi.fn() };
+  return { context, sender, check: uiFunction("checkAndInstallUpdate", context, updateMain) };
+}
+
+test("automatic update checks sessions before and after download and preserves startup options", async () => {
+  const { check, context, sender } = updateFlowFixture();
+  context.activeSessionCount = 1;
+  expect((await check(sender)).ok).toBe(false); expect(context.downloadVerifiedFile).not.toHaveBeenCalled();
+  context.activeSessionCount = 0;
+  context.downloadVerifiedFile.mockImplementationOnce(async () => { context.activeSessionCount = 1; });
+  expect((await check(sender)).ok).toBe(false); expect(context.launchUpdate).not.toHaveBeenCalled();
+  context.activeSessionCount = 0;
+  expect(await check(sender)).toMatchObject({ ok: true, installing: true });
+  expect(JSON.parse(context.fs.writeFileSync.mock.calls[0][1])).toEqual({ installDir: "C:\\Programs\\Nodus Connect", startWithWindows: true });
+  expect(context.setTimeout).toHaveBeenCalledWith(context.quitApp, 250);
+  expect((await check(sender)).ok).toBe(false); expect(context.launchUpdate).toHaveBeenCalledTimes(1);
+});
+
+test.each(["download", "spawn", "current"])("updater keeps the app open after %s and allows retry", async (mode) => {
+  const { check, context, sender } = updateFlowFixture();
+  if (mode === "download") context.downloadVerifiedFile.mockRejectedValueOnce(new Error("offline"));
+  if (mode === "spawn") context.launchUpdate.mockRejectedValueOnce(new Error("denied"));
+  if (mode === "current") context.fetch.mockResolvedValueOnce({ ok: true, json: async () => releaseFixture("1.1.10") });
+  expect((await check(sender)).ok).toBe(mode === "current");
+  expect(context.setTimeout).not.toHaveBeenCalled(); expect(context.updateInProgress).toBe(false);
+});
+
+test.each([true, false])("automatic installer reopens installed or rolled-back application (success: %s)", async (ok) => {
+  const context: any = { path: path.win32, fs: { statSync: () => ({ size: 100 }), readFileSync: () => JSON.stringify({ installDir: "C:\\Programs\\Nodus Connect", startWithWindows: false }), existsSync: () => true },
+    realPath: (value) => value, assertSafeInstallDir: vi.fn(), installDir: "", desktopShortcutPath: () => "desktop.lnk",
+    installNodus: vi.fn(async () => ({ ok, error: ok ? undefined : "rollback" })), launchInstalledApp: vi.fn(async () => {}), log: vi.fn(), dialog: { showErrorBox: vi.fn() } };
+  const apply = uiFunction("applyAutomaticUpdate", context, "apps/installer/main.cjs");
+  expect(await apply("C:\\cache\\update.json")).toBe(ok);
+  expect(context.installNodus).toHaveBeenCalledWith(expect.any(Function), { installDir: "C:\\Programs\\Nodus Connect", startWithWindows: false, desktopShortcut: true });
+  expect(context.launchInstalledApp).toHaveBeenCalledTimes(1);
+  expect(context.dialog.showErrorBox).toHaveBeenCalledTimes(ok ? 0 : 1);
+});
+
+test("automatic installer rejects malformed options before modifying an installation", async () => {
+  const install = vi.fn();
+  const apply = uiFunction("applyAutomaticUpdate", { path: path.win32, fs: { statSync: () => ({ size: 4097 }) }, installNodus: install, log: vi.fn(), dialog: { showErrorBox: vi.fn() } }, "apps/installer/main.cjs");
+  expect(await apply("relative.json")).toBe(false); expect(await apply("C:\\cache\\update.json")).toBe(false);
+  expect(install).not.toHaveBeenCalled();
+});
+
+test.each([true, false])("real staging preserves user data and restores the old executable on failure (success: %s)", async (ok) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "nodus-install-test-"));
+  const source = path.join(root, "payload"), target = path.join(root, "Nodus Connect"), data = path.join(root, "user-data.json");
+  fs.mkdirSync(source); fs.mkdirSync(target);
+  fs.writeFileSync(path.join(source, "Nodus Connect Setup.exe"), "new-version");
+  fs.writeFileSync(path.join(target, "Nodus Connect.exe"), "old-version"); fs.writeFileSync(data, "identity-license-settings");
+  const context: any = { fs, path, os, productName: "Nodus Connect", installDir: target, installing: false, cancelRequested: false,
+    process: { execPath: path.join(source, "Nodus Connect Setup.exe") }, realPath: (value) => value,
+    getPayloadSize: () => 20, getFreeDiskBytes: () => 1000, stopNodusForUpdate: vi.fn(() => false), restartNodusService: vi.fn(),
+    removeDir: (value) => fs.rmSync(value, { recursive: true, force: true }), copyTree: async (from, to) => fs.cpSync(from, to, { recursive: true }),
+    createShortcuts: vi.fn(), writeUninstaller: vi.fn(), registerUninstaller: () => { if (!ok) throw new Error("registry failed"); }, log: vi.fn(), friendlyError: (error) => error.message };
+  for (const name of ["normalizeInstallDir", "assertSafeInstallDir", "assertSafeAuxiliaryDir", "isSameOrInside", "throwIfCancelled", "renameInstalledExe"]) {
+    context[name] = uiFunction(name, context, "apps/installer/main.cjs");
+  }
+  try {
+    const install = uiFunction("installNodus", context, "apps/installer/main.cjs");
+    expect((await install(vi.fn(), { installDir: target })).ok).toBe(ok);
+    expect(fs.readFileSync(path.join(target, "Nodus Connect.exe"), "utf8")).toBe(ok ? "new-version" : "old-version");
+    expect(fs.readFileSync(data, "utf8")).toBe("identity-license-settings");
+    expect(fs.existsSync(`${target}.installing`)).toBe(false); expect(fs.existsSync(`${target}.backup`)).toBe(false);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("update button preserves unsaved settings and stays busy while installation starts", async () => {
+  const invoke = vi.fn(async () => ({ ok: true, installing: true })), busy = vi.fn(), status = vi.fn();
+  const context = { checkingUpdates: false, dirty: true, setCheckingUpdates: busy, setUpdateStatus: status, window: { nodusDesktop: { checkForUpdates: invoke } } };
+  const check = uiFunction("checkForUpdates", context);
+  await check(); expect(invoke).not.toHaveBeenCalled();
+  context.dirty = false; await check(); expect(invoke).toHaveBeenCalledTimes(1); expect(busy.mock.calls).toEqual([[true]]);
+});
+
+test.each(["launchUpdate", "launchInstalledApp"])("%s waits for spawn and catches a missing or blocked executable", async (name) => {
+  for (const failed of [false, true]) {
+    const child = Object.assign(new EventEmitter(), { unref: vi.fn() });
+    const spawn = vi.fn(() => { queueMicrotask(() => child.emit(failed ? "error" : "spawn", failed ? new Error("blocked") : undefined)); return child; });
+    const launch = uiFunction(name, { spawn, path: path.win32, fs: { existsSync: () => true }, installDir: "C:\\Programs\\Nodus Connect" }, name === "launchUpdate" ? updateMain : "apps/installer/main.cjs");
+    const pending = launch("C:\\cache\\setup.exe", "C:\\cache\\update.json");
+    if (failed) { await expect(pending).rejects.toThrow("blocked"); expect(child.unref).not.toHaveBeenCalled(); }
+    else { await pending; expect(child.unref).toHaveBeenCalledOnce(); }
+  }
+});
+
 test.each([true, false])("host activity never leaves both viewer cursors hidden (overlay visible: %s)", (visible) => {
   const surface = { style: { cursor: "none" }, dataset: { localCursorOverlay: String(visible), physicalViewerCursorHidden: "true" } };
   const cursor = { style: { opacity: visible ? "1" : "0" } };
@@ -412,6 +551,20 @@ test("closing realtime during Firestore initialization leaves no listeners or la
   await Promise.resolve(); expect(onSnapshot).not.toHaveBeenCalled(); expect(onState).toHaveBeenCalledExactlyOnceWith("connecting");
 });
 
+test("cloud SDP and ICE use canonical participant IDs under enforced server authorization", async () => {
+  const addDoc = vi.fn(async (_path: unknown, message: any) => {
+    if (message.from !== "960632279" || message.to !== "823388407") throw Object.assign(new Error("denied"), { code: "permission-denied" });
+  });
+  const ensureDeviceUid = vi.fn(async () => "requester");
+  const send = uiFunction("cloudSendSignal", { exports: {}, normalizeNodusId, ensureDeviceUid, fire: async () => ({ addDoc, collection: (...args: unknown[]) => args, store: {} }), firestoreData: (data: unknown) => data }, "apps/desktop/src/core/firebase.ts");
+  for (const type of ["offer", "answer", "ice-candidate"])
+    await expect(send("session", { from: "960 632 279", to: "823 388 407", type, payload: {} })).resolves.toMatchObject({ from: "960632279", to: "823388407", type });
+  expect(addDoc).toHaveBeenCalledTimes(3);
+  addDoc.mockClear(); ensureDeviceUid.mockClear();
+  await expect(send("session", { from: "invalid", to: "823388407", type: "offer", payload: {} })).rejects.toThrow();
+  expect(addDoc).not.toHaveBeenCalled(); expect(ensureDeviceUid).not.toHaveBeenCalled();
+});
+
 function cloudListenerFixture() {
   vi.useFakeTimers();
   const listeners: { next: (snapshot: any) => void; error: (error: any) => void; stop: ReturnType<typeof vi.fn> }[] = [];
@@ -428,6 +581,18 @@ function cloudListenerFixture() {
   };
   return { context, listeners, getDocs, onSnapshot, snapshot };
 }
+
+test("permanent signal denials are surfaced once without four rejected writes", async () => {
+  const sendSignal = vi.fn(async () => { throw Object.assign(new Error("denied"), { code: "permission-denied" }); });
+  const delay = vi.fn(async () => {}), logDiagnostic = vi.fn();
+  const send = uiFunction("sendReliableSignal", { Error, sendSignal, delay, logDiagnostic });
+  await expect(send("session", { type: "offer" })).rejects.toMatchObject({ code: "permission-denied" });
+  expect(sendSignal).toHaveBeenCalledOnce(); expect(delay).not.toHaveBeenCalled();
+  expect(logDiagnostic).toHaveBeenCalledWith(expect.stringContaining("code=permission-denied"));
+  sendSignal.mockReset().mockRejectedValueOnce(Object.assign(new Error("offline"), { code: "unavailable" })).mockResolvedValueOnce({} as never);
+  await expect(send("session", { type: "offer" })).resolves.toEqual({});
+  expect(sendSignal).toHaveBeenCalledTimes(2); expect(delay).toHaveBeenCalledOnce();
+});
 
 test("cloud signals use one listener with no repeated reads during an idle hour", async () => {
   const f = cloudListenerFixture(), onSignal = vi.fn(async () => undefined);
@@ -581,7 +746,7 @@ test("opening Nodus again creates another workspace without duplicating the serv
   const source = ts.createSourceFile("main.cjs", readFileSync("apps/desktop/electron/main.cjs", "utf8"), ts.ScriptTarget.Latest, true, ts.ScriptKind.JS);
   const listener = source.statements.find(node => ts.isExpressionStatement(node) && node.getText(source).startsWith('app.on("second-instance"'))!;
   const send = vi.fn(), show = vi.fn(), on = vi.fn();
-  runInNewContext(listener.getText(source), { app: { on }, mainWindow: { isDestroyed: () => false, webContents: { isDestroyed: () => false, send } }, showMainWindow: show, getDiagnosticPresetArgument: () => null });
+  runInNewContext(listener.getText(source), { app: { on }, portableSupport: false, mainWindow: { isDestroyed: () => false, webContents: { isDestroyed: () => false, send } }, showMainWindow: show, getDiagnosticPresetArgument: () => null });
   on.mock.calls[0][1]({}, []);
   expect(show).toHaveBeenCalledOnce();
   expect(send).toHaveBeenCalledExactlyOnceWith("nodus:open-workspace");
@@ -619,6 +784,30 @@ test("new outgoing sessions reserve accounting even before enforcement is activa
   await expect(reserve({}, "987654321")).resolves.toBe("session");
   expect(request).toHaveBeenCalledWith("/license/sessions/reserve", expect.objectContaining({ sessionId: "session", targetNodusId: "987654321" }));
   expect(reserved.has("session")).toBe(true);
+});
+
+test("peer preparation preserves the license reservation and final cleanup ends it once", () => {
+  const source = readFileSync("apps/desktop/src/App.tsx", "utf8");
+  const reserved = new Set(["session"]), request = vi.fn(async () => ({}));
+  const licenseEnded = uiFunction("licenseEnded", { exports: {}, lifecycle: new Map(), reserved, licenseConfigured: () => true, request, clearTimeout }, "apps/desktop/src/core/licensing.ts");
+  const context: Record<string, any> = { licenseEnded, window: { clearTimeout, clearInterval }, syncHostCursorVisibility: vi.fn(), recordingSessionId: null };
+  for (const name of new Set(source.match(/\b\w+Ref\b/g))) context[name] = { current: new Map() };
+  context.sessionsRef.current = [];
+  context.processedSignalsRef.current = new Set();
+  context.pressedPointerButtonsRef.current = new Set();
+  for (const name of new Set([...source.matchAll(/\b(set[A-Z]\w+)\(/g)].map(match => match[1]))) context[name] = vi.fn();
+  const cleanup = uiFunction("cleanupSession", context);
+  const prepare = uiFunction("createPeer", { ...context, cleanupSession: cleanup, getEffectiveIceServers: () => [], iceServerUrls: () => [], iceServerInfo: vi.fn(),
+    logDiagnostic: vi.fn(), logIceEvent: vi.fn(), performance: { now: () => 0 }, startQualityMonitoring: vi.fn(),
+    RTCPeerConnection: class { getConfiguration() { return {}; } close() {} } });
+  prepare("session", "123456789", "987654321", "viewer");
+  expect(reserved.has("session")).toBe(true);
+  expect(request).not.toHaveBeenCalled();
+  cleanup("session", true);
+  expect(reserved.has("session")).toBe(false);
+  expect(request).toHaveBeenCalledExactlyOnceWith("/license/sessions/end", { sessionId: "session" });
+  cleanup("session", true);
+  expect(request).toHaveBeenCalledTimes(1);
 });
 
 test("both peers publish accounting before enforcement and a pending peer retries establishment", async () => {
@@ -681,6 +870,7 @@ test.each(["DEVICE_REVOKED", "SESSION_EXPIRED", "SERVER_UNAVAILABLE"])("licensin
     request: async (path: string) => { if (path === "/license/policy") return { enforced: true, heartbeatSeconds: 30 }; throw new LicenseError(code as any); } }, "apps/desktop/src/core/licensing.ts");
   await establish("session", rejected);
   expect(rejected).toHaveBeenCalledTimes(code === "SERVER_UNAVAILABLE" ? 0 : 1);
+  if (code !== "SERVER_UNAVAILABLE") expect(rejected).toHaveBeenCalledWith(code);
   expect(lifecycle.has("session")).toBe(code === "SERVER_UNAVAILABLE");
   vi.clearAllTimers();
 });
@@ -768,7 +958,8 @@ test("pointer sends immediately, coalesces movement and sends the latest positio
 
 test("legacy control fallback is bounded and never replaces an open pointer channel", () => {
   const control = { readyState: "open", bufferedAmount: 0, send: vi.fn() }, pointerChannelsRef = { current: new Map() };
-  const send = uiFunction("sendRemoteInputToSession", { pointerChannelsRef, controlChannelsRef: { current: new Map([["s", control]]) }, inputDiagnostic: () => undefined, encodePointerMessage: () => new Uint8Array(9) });
+  const send = uiFunction("sendRemoteInputToSession", { pointerChannelsRef, controlChannelsRef: { current: new Map([["s", control]]) },
+    bufferedPointersRef: { current: new Map() }, inputCapabilitiesRef: { current: new Set() }, inputDiagnostic: () => undefined, encodePointerMessage: () => new Uint8Array(9) });
   const input = { type: "mouseMove", x: 0.4, y: 0.5 };
   send("s", input); expect(control.send).toHaveBeenCalledExactlyOnceWith(JSON.stringify(input));
   control.bufferedAmount = 1000; send("s", input); expect(control.send).toHaveBeenCalledTimes(1);
@@ -776,10 +967,188 @@ test("legacy control fallback is bounded and never replaces an open pointer chan
   send("s", input); expect(pointer.send).toHaveBeenCalledOnce(); expect(control.send).toHaveBeenCalledTimes(1);
 });
 
+function pointerTransportFixture(upgraded = true) {
+  const control: any = { readyState: "open", bufferedAmount: 0, send: vi.fn() };
+  const pointer: any = { readyState: "open", bufferedAmount: 0, send: vi.fn() };
+  const context: any = { controlChannelsRef: { current: new Map([["s", control]]) }, pointerChannelsRef: { current: new Map() },
+    auxiliaryChannelsRef: { current: new Map() }, telemetryChannelsRef: { current: new Map() },
+    inputCapabilitiesRef: { current: new Set(upgraded ? ["s"] : []) }, pointerSequencesRef: { current: new Map() }, bufferedPointersRef: { current: new Map() },
+    inputDiagnostic: () => undefined, encodePointerMessage: uiFunction("encodePointerMessage"), sessionsRef: { current: [{ session: { sessionId: "s", role: "viewer" } }] },
+    performance, updateRuntime: vi.fn() };
+  context.auxiliaryChannel = uiFunction("auxiliaryChannel", context);
+  context.sendRemoteInputToSession = uiFunction("sendRemoteInputToSession", context);
+  context.flushBufferedPointer = uiFunction("flushBufferedPointer", context);
+  uiFunction("attachViewerPointer", context)("s", pointer);
+  return { context, control, pointer, send: context.sendRemoteInputToSession, decode: uiFunction("decodePointerMessage") };
+}
+
+test("blocked pointer retains exactly the final position and drains without another mouse event", () => {
+  const { context, pointer, send, decode } = pointerTransportFixture();
+  pointer.bufferedAmount = 1000;
+  for (let i = 0; i < 1000; i++) send("s", { type: "mouseMove", x: i / 1000, y: 0.5 });
+  expect(pointer.send).not.toHaveBeenCalled(); expect(context.bufferedPointersRef.current.size).toBe(1);
+  pointer.bufferedAmount = 0; pointer.onbufferedamountlow();
+  expect(pointer.send).toHaveBeenCalledOnce();
+  expect(decode(pointer.send.mock.calls[0][0])).toMatchObject({ x: expect.closeTo(0.999), y: 0.5, sequence: 1 });
+  expect(context.bufferedPointersRef.current.size).toBe(0);
+});
+
+test("click watermark cancels a blocked movement while keyboard and wheel remain reliable and ordered", () => {
+  const { pointer, control, send } = pointerTransportFixture();
+  send("s", { type: "mouseMove", x: 0.1, y: 0.1 });
+  pointer.bufferedAmount = 1000;
+  send("s", { type: "mouseMove", x: 0.2, y: 0.2 });
+  send("s", { type: "mouseDown", x: 0.3, y: 0.3, button: 0 });
+  send("s", { type: "keyDown", keyCode: 162 }); send("s", { type: "keyUp", keyCode: 162 });
+  send("s", { type: "wheel", delta: 120 }); send("s", { type: "mouseUp", x: 0.3, y: 0.3, button: 0 });
+  pointer.bufferedAmount = 0; pointer.onbufferedamountlow();
+  expect(pointer.send).toHaveBeenCalledOnce();
+  const messages = control.send.mock.calls.map(([data]: any[]) => JSON.parse(data));
+  expect(messages.map((m: any) => m.type)).toEqual(["mouseDown", "keyDown", "keyUp", "wheel", "mouseUp"]);
+  expect(messages[0].sequence).toBe(2); expect(messages[4].sequence).toBe(3);
+});
+
+test("legacy clients keep the nine-byte packet until the host advertises version two", () => {
+  const { pointer, send } = pointerTransportFixture(false);
+  send("s", { type: "mouseMove", x: 0.25, y: 0.75 });
+  expect(pointer.send.mock.calls[0][0].byteLength).toBe(9);
+  const encode = uiFunction("encodePointerMessage"), decode = uiFunction("decodePointerMessage");
+  expect(decode(encode(0.25, 0.75, 42, 6))).toEqual({ type: "mouseMove", x: 0.25, y: 0.75, probeId: 42, sequence: 6 });
+});
+
+test("sequence discards replay and reordering, handles wrap, and never discards a button", () => {
+  const pointerSequencesRef = { current: new Map() }, accept = uiFunction("acceptPointerSequence", { pointerSequencesRef });
+  expect(accept("s", 10)).toBe(true); expect(accept("s", 9)).toBe(false); expect(accept("s", 10)).toBe(false);
+  expect(accept("s", 8, false)).toBe(true); expect(pointerSequencesRef.current.get("s")).toBe(10);
+  expect(accept("s", 11)).toBe(true); expect(accept("s", NaN)).toBe(false); expect(accept("s", 0)).toBe(false);
+  pointerSequencesRef.current.set("s", 0xffffffff); expect(accept("s", 1)).toBe(true);
+});
+
+test("clipboard, telemetry and input use separate streams and legacy clipboard keeps its fallback", () => {
+  const { context, control, send } = pointerTransportFixture();
+  const clipboard: any = { readyState: "open", bufferedAmount: 900_000, send: vi.fn() };
+  const telemetry: any = { readyState: "open", bufferedAmount: 0, send: vi.fn() };
+  context.auxiliaryChannelsRef.current.set("s", clipboard); context.telemetryChannelsRef.current.set("s", telemetry);
+  send("s", { type: "clipboard", text: "a".repeat(100_000) }); send("s", { type: "keyDown", keyCode: 84 });
+  expect(clipboard.send).toHaveBeenCalledOnce(); expect(control.send).toHaveBeenCalledExactlyOnceWith(JSON.stringify({ type: "keyDown", keyCode: 84 }));
+  expect(context.auxiliaryChannel("s", true)).toBe(telemetry);
+  context.inputCapabilitiesRef.current.clear(); send("s", { type: "clipboard", text: "legacy" });
+  expect(control.send).toHaveBeenLastCalledWith(JSON.stringify({ type: "clipboard", text: "legacy" }));
+});
+
+test.each([true, false])("auxiliary clipboard preserves permission checks: allowed=%s", (allowed) => {
+  const apply = vi.fn(), clipboard = vi.fn(async () => {}), channel: any = { label: "auxiliary" };
+  const attach = uiFunction("attachHostControl", { auxiliaryChannelsRef: { current: new Map() }, hostInputRateRef: { current: new Map() },
+    sessionsRef: { current: [{ session: { sessionId: "s", permissions: allowed ? ["clipboard:sync"] : [] } }] },
+    settings: { allowClipboard: true, allowRemoteControl: true }, window: { nodusDesktop: { applyRemoteInput: apply, writeClipboard: clipboard } }, updateRuntime: vi.fn() });
+  attach("s", channel, true); channel.onmessage({ data: JSON.stringify({ type: "clipboard", text: "hello" }) });
+  channel.onmessage({ data: JSON.stringify({ type: "keyDown", keyCode: 84 }) });
+  expect(clipboard).toHaveBeenCalledTimes(allowed ? 1 : 0); expect(apply).not.toHaveBeenCalled();
+});
+
+test.each(["host", "viewer"])("%s telemetry rejects older feedback and cannot alter input readiness", role => {
+  const feedback: any = { current: new Map() }, updateRuntime = vi.fn(), apply = vi.fn();
+  const context: any = { telemetryChannelsRef: { current: new Map() }, hostInputRateRef: { current: new Map() },
+    sessionsRef: { current: [{ session: { sessionId: "s", permissions: ["keyboard:control"] } }] },
+    settings: { allowRemoteControl: true }, receiverFeedbackRef: feedback, senderFeedbackRef: feedback,
+    window: { nodusDesktop: { applyRemoteInput: apply } }, performance: { now: () => 1000 }, updateRuntime };
+  const channel: any = { label: "telemetry" };
+  uiFunction(role === "host" ? "attachHostControl" : "attachViewerControl", context)("s", channel, true);
+  const type = role === "host" ? "receiver-stats" : "sender-stats";
+  const send = (message: any) => channel.onmessage({ data: JSON.stringify(message) });
+  send({ type, sampleAt: 20, marker: "latest" }); send({ type, sampleAt: 10, marker: "old" });
+  send({ type, sampleAt: 20, marker: "duplicate" }); send({ type: "keyDown", keyCode: 84 });
+  expect(feedback.current.get("s").marker).toBe("latest");
+  channel.onopen(); channel.onclose(); expect(updateRuntime).not.toHaveBeenCalled(); expect(apply).not.toHaveBeenCalled();
+  feedback.current.clear(); send({ type, marker: "legacy" });
+  expect(feedback.current.get("s").marker).toBe("legacy");
+});
+
+test.each(["latest", "click", "closed", "permission"])("host burst is bounded and handles %s without replaying old positions", async (mode) => {
+  vi.useFakeTimers();
+  const apply = vi.fn(), pointerSequencesRef = { current: new Map() }, channel: any = { readyState: "open" };
+  let sequence = 0;
+  const context: any = { ArrayBuffer, pointerSequencesRef, pointerChannelsRef: { current: new Map() }, inputDiagnostic: () => undefined,
+    settings: { allowRemoteControl: true }, sessionsRef: { current: [{ session: { sessionId: "s", permissions: ["mouse:control"] } }] },
+    window: { setTimeout, clearTimeout, nodusDesktop: { applyRemoteInput: apply } }, performance: { now: () => Date.now() },
+    decodePointerMessage: () => ({ type: "mouseMove", x: sequence / 1000, y: 0.5, sequence }) };
+  context.acceptPointerSequence = uiFunction("acceptPointerSequence", context);
+  uiFunction("attachHostPointer", context)("s", channel);
+  for (sequence = 1; sequence <= 1000; sequence++) channel.onmessage({ data: new ArrayBuffer(17) });
+  expect(apply).toHaveBeenCalledOnce();
+  if (mode === "click") context.acceptPointerSequence("s", 1001, false);
+  if (mode === "closed") { channel.readyState = "closed"; channel.onclose(); }
+  if (mode === "permission") context.settings.allowRemoteControl = false;
+  await vi.advanceTimersByTimeAsync(5);
+  expect(apply).toHaveBeenCalledTimes(mode === "latest" ? 2 : 1);
+  if (mode === "latest") expect(apply).toHaveBeenLastCalledWith(expect.objectContaining({ x: 1, sequence: 1000 }));
+  expect(vi.getTimerCount()).toBe(0);
+});
+
+test("typing preserves the pending native mouse move and does not wait for its buffer", async () => {
+  vi.useFakeTimers();
+  const source = readFileSync("apps/desktop/electron/main.cjs", "utf8");
+  const helper: any = { stdin: { writable: true, writableLength: 80, write: vi.fn() } };
+  const context: any = { Date, setTimeout, clearTimeout, remoteControlActive: true, inputHelper: helper, ensureInputHelper: () => helper,
+    screen: { getAllDisplays: () => [], getPrimaryDisplay: () => ({ bounds: {} }) }, captureOptions: {}, normalizeRemoteInput: (input: any) => input,
+    hostCursorVisibility: { remoteMouseActivity: vi.fn() }, appendLog: vi.fn() };
+  context.flushLatestMouseMove = uiFunction("flushLatestMouseMove", context, "apps/desktop/electron/main.cjs");
+  const apply = uiFunction("applyRemoteInput", context, "apps/desktop/electron/main.cjs");
+  apply({ type: "mouseMove", x: 50, y: 20 }); apply({ type: "keyDown", keyCode: 84 }); apply({ type: "keyUp", keyCode: 84 });
+  expect(helper.nodusPendingMove.message.x).toBe(50); expect(helper.stdin.write).toHaveBeenCalledTimes(2);
+  helper.stdin.writableLength = 0; await vi.advanceTimersByTimeAsync(5);
+  expect(JSON.parse(helper.stdin.write.mock.calls[2][0])).toMatchObject({ type: "mouseMove", x: 50 });
+  expect(vi.getTimerCount()).toBe(0); expect(source).toContain('if (message.type.startsWith("mouse"))');
+});
+
+function adaptiveSenderFixture() {
+  let now = 1000;
+  const parameters: any = { encodings: [{ maxBitrate: 14_000_000 }] };
+  const sender = { track: { kind: "video", getSettings: () => ({ width: 1920, height: 1080 }) }, getParameters: () => parameters, setParameters: vi.fn(async () => {}) };
+  const context: any = { performance: { now: () => now }, settings: { connectionQuality: "auto", maxFps: 60, preferredResolution: "1920x1080" },
+    performanceDiagnosticRef: { current: null }, nativeHostSessionsRef: { current: new Set() }, nativeMediaStatsRef: { current: new Map() },
+    requestedQualitiesRef: { current: new Map() }, requestedFpsRef: { current: new Map() }, requestedResolutionsRef: { current: new Map() },
+    adaptiveStateRef: { current: new Map([["s", { stage: 0, badSamples: 0, stableSamples: 0, changedAt: 0, changeCount: 0, startedAt: -5000, reason: "initial", source: "none" }]]) },
+    smoothedQualityRef: { current: new Map() }, qualityTierRef: { current: new Map() },
+    appliedVideoRef: { current: new Map([["s", { fps: 60, width: 1920, height: 1080, bitrate: 14_000_000, at: 0 }]]) },
+    window: { nodusDesktop: { writePerformance: vi.fn(async () => {}) } }, logMediaDiagnostic: vi.fn(),
+    advanceStage, assessQuality, DESKTOP_VIDEO_POLICY, nativeVideoBitrate, nextBitrate, STAGE_LIMITS,
+    boundedFrameRate: uiFunction("boundedFrameRate"), resolutionForSource: uiFunction("resolutionForSource"), smoothQualitySample: uiFunction("smoothQualitySample") };
+  const apply = uiFunction("applyAdaptiveQuality", context), peer = { getSenders: () => [sender] };
+  const sample = { rttMs: 20, jitterMs: 2, lossPct: 0, availableKbps: 20_000, bitrateKbps: 14_000, captureFps: 60, encodedFps: 60, encodeMs: 5, targetFps: 60, activePicture: true, limitation: "none" };
+  return { context, parameters, sender, sample, apply: (value = sample) => apply("s", peer, "host", value), advance: (at: number) => { now = at; } };
+}
+
+test("actual sender relieves a 2Mbps queue before its 2s cooldown and only then lowers resolution", async () => {
+  const f = adaptiveSenderFixture(), bad = { ...f.sample, availableKbps: 2000, limitation: "bandwidth", packetSendDelayMs: 120 };
+  await f.apply(bad);
+  expect(f.parameters.encodings[0]).toMatchObject({ maxBitrate: 7_000_000, maxFramerate: 60, scaleResolutionDownBy: 1 });
+  f.advance(1500); await f.apply(bad);
+  expect(f.parameters.encodings[0]).toMatchObject({ maxBitrate: 3_500_000, maxFramerate: 60, scaleResolutionDownBy: 1 });
+  f.advance(2000); await f.apply(bad);
+  expect(f.parameters.encodings[0]).toMatchObject({ maxBitrate: 1_750_000, maxFramerate: 45, scaleResolutionDownBy: 1.2 });
+  expect(f.sender.setParameters).toHaveBeenCalledTimes(3);
+});
+
+test("a healthy 1080p60 sender is not forced to 720p or 30FPS by a high RTT alone", async () => {
+  const f = adaptiveSenderFixture(); f.advance(5000);
+  await f.apply({ ...f.sample, rttMs: 380 });
+  expect(f.parameters.encodings[0]).toMatchObject({ maxBitrate: 14_000_000, maxFramerate: 60, scaleResolutionDownBy: 1 });
+});
+
+test("receiver recovery retains the degraded network profile until its gradual step is confirmed", async () => {
+  const f = adaptiveSenderFixture();
+  f.context.adaptiveStateRef.current.set("s", { stage: 4, badSamples: 0, stableSamples: 19, changedAt: 0, changeCount: 4, startedAt: -5000, source: "network", reason: "loss" });
+  f.context.appliedVideoRef.current.set("s", { fps: 30, width: 1280, height: 720, bitrate: 1_000_000, at: 0 });
+  f.advance(11000); await f.apply();
+  expect(f.context.adaptiveStateRef.current.get("s")).toMatchObject({ stage: 3, source: "network" });
+  expect(f.parameters.encodings[0]).toMatchObject({ maxBitrate: 1_100_000, maxFramerate: 45, scaleResolutionDownBy: 1.2 });
+});
+
 test("input rate limiting never strands Ctrl or a held mouse button", () => {
   const apply = vi.fn(), channel: any = {}, updateRuntime = vi.fn();
   const attach = uiFunction("attachHostControl", { controlChannelsRef: { current: new Map() }, hostInputRateRef: { current: new Map([["s", { at: Date.now(), count: 500 }]]) },
-    sessionsRef: { current: [{ session: { sessionId: "s", permissions: ["keyboard:control", "mouse:control"] } }] }, settings: { allowRemoteControl: true }, window: { nodusDesktop: { applyRemoteInput: apply } }, updateRuntime });
+    sessionsRef: { current: [{ session: { sessionId: "s", permissions: ["keyboard:control", "mouse:control"] } }] }, settings: { allowRemoteControl: true }, window: { nodusDesktop: { applyRemoteInput: apply } }, updateRuntime, acceptPointerSequence: () => true });
   attach("s", channel);
   const send = (type: string) => channel.onmessage({ data: JSON.stringify({ type, keyCode: 162, code: "ControlLeft", button: 0, x: 0.5, y: 0.5 }) });
   send("keyDown"); expect(apply).not.toHaveBeenCalled();
@@ -1097,9 +1466,11 @@ test("secure attention acknowledgement means requested, not visually confirmed",
   expect(await result).toMatchObject({ ok: true });
 });
 
-test("adaptive quality preserves 1080p and never requests less than 30 FPS", async () => {
+test("adaptive quality keeps healthy stages at 1080p and all requested rates within 30-120 FPS", async () => {
   const quality = await import("../apps/desktop/src/core/adaptive-quality");
-  expect(quality.STAGE_LIMITS.every((limit) => limit.height === 1080 && limit.fps >= 30 && limit.fps <= 120)).toBe(true);
+  expect(quality.STAGE_LIMITS.slice(0, 3).every(limit => limit.height === 1080)).toBe(true);
+  expect(quality.STAGE_LIMITS.map(limit => limit.height)).toEqual([1080, 1080, 1080, 900, 720]);
+  expect(quality.STAGE_LIMITS.every(limit => limit.fps >= 30 && limit.fps <= 120)).toBe(true);
   expect(quality.nativeVideoBitrate(1080, 30, 4)).toBeGreaterThanOrEqual(6_000_000);
 });
 

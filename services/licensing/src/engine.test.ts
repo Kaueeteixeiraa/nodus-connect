@@ -12,6 +12,8 @@ import { RelayLicenseGate } from "../../coordination/src/license-gate";
 import { createRelayServer } from "../../coordination/src/relay";
 import { OfflineLeaseAnchor, verifyBrowserLease } from "../../../packages/licensing/src/offline";
 import { FIRESTORE_CLIENT_CONFIG } from "./firestore-store";
+import support from "../../../apps/desktop/electron/quick-support.cjs";
+import type { SupportDraft } from "../../../packages/common/src/quick-support";
 
 // Only tests use this store; production always uses Firestore transactions.
 export class TestStore implements LicenseStore {
@@ -40,6 +42,87 @@ async function fixture() {
   const business = async () => { const created = await engine.createBusiness(admin, { name: "Example", email: "owner@example.test" }); await engine.payment(admin, { licenseId: created.licenseId, paymentId: "initial-payment", amountCents: 20000 }); await engine.activate(actor, credentials, created.key); return created; };
   return { store, engine, actor, host, credentials, reserve, establish, business, time: () => time, advance: (ms: number) => time += ms };
 }
+describe("QuickSupport licensing", { timeout: 15000 }, () => {
+  const draft: SupportDraft = { name: "Suporte Example", company: "Example", message: "Atendimento autorizado", logo: "", permissions: ["screen:view", "mouse:control"], confirmation: false, password: "Example-support-2026!" };
+  async function portable(confirmation = false) {
+    const f = await fixture(), business = await f.business();
+    const result = await f.engine.createSupportProfile(f.actor, f.credentials, { ...draft, confirmation });
+    const profile = support.verifyProfile(result.token, keys.publicKey);
+    f.store.data.set("devices/987654321", { ownerUid: f.host.uid, nodusId: "987654321", supportProfileId: profile.id });
+    const reserve = (sessionId: string, password = draft.password, offline = false) => f.engine.reserve(f.actor, f.credentials, { sessionId, targetNodusId: "987654321", supportProfileId: profile.id, supportPassword: password, offline });
+    const admit = (sessionId: string, actor = f.host) => f.engine.supportAdmission(actor, { profileId: profile.id, sessionId, targetNodusId: "987654321", requesterNodusId: "123456789" });
+    return { ...f, business, profile, result, supportReserve: reserve, admit };
+  }
+  test("only active Business can issue signed profiles, without plaintext password", async () => {
+    const free = await fixture();
+    await expect(free.engine.createSupportProfile(free.actor, free.credentials, draft)).rejects.toMatchObject({ code: "FORBIDDEN" });
+    const f = await portable();
+    expect(f.profile.licenseId).toBe(f.business.licenseId);
+    expect(JSON.stringify([...f.store.data])).not.toContain(draft.password);
+    expect(f.profile.passwordVerifier.hash).toHaveLength(64);
+    expect(() => support.verifyProfile(`${f.result.token}x`, keys.publicKey)).toThrow();
+  });
+  test("profile issuance accepts three characters but rejects shorter and oversized passwords", async () => {
+    const f = await fixture(); await f.business();
+    for (const password of ["", "ab", "x".repeat(129)]) await expect(f.engine.createSupportProfile(f.actor, f.credentials, { ...draft, password })).rejects.toMatchObject({ code: "INVALID_INPUT" });
+    const result = await f.engine.createSupportProfile(f.actor, f.credentials, { ...draft, password: "abc" });
+    const profile = support.verifyProfile(result.token, keys.publicKey);
+    await expect(support.verifyPassword("abc", profile.passwordVerifier)).resolves.toBe(true);
+  });
+  test("password is validated server-side even when free enforcement is off; receiver uses no company slot", async () => {
+    const f = await portable();
+    f.store.data.set("license_policy/current", { ...LICENSE_DEFAULTS, enforced: false });
+    await expect(f.supportReserve("wrong", "wrong-password")).rejects.toMatchObject({ code: "UNAUTHORIZED" });
+    await expect(f.reserve("omitted-profile")).rejects.toMatchObject({ code: "FORBIDDEN" });
+    await expect(f.supportReserve("offline", draft.password, true)).rejects.toMatchObject({ code: "FORBIDDEN" });
+    await f.supportReserve("supported");
+    await expect(f.admit("supported")).resolves.toEqual({ permissions: draft.permissions, confirmation: false });
+    await f.establish("supported");
+    const license = f.store.data.get(`license_licenses/${f.business.licenseId}`) as License;
+    expect(license.deviceIds).toEqual([f.credentials.deviceId]);
+    expect(license.trialUsed).toBe(0);
+    await f.engine.lifecycle(f.host, "supported", "end");
+    expect(Object.keys((f.store.data.get(`license_licenses/${license.id}`) as License).slots)).toHaveLength(0);
+  });
+  test("five password attempts are persisted and blocked before deriving the sixth", async () => {
+    const f = await portable();
+    for (let i = 0; i < 5; i++) await expect(f.supportReserve(`bad-${i}`, "wrong")).rejects.toMatchObject({ code: "UNAUTHORIZED" });
+    await expect(f.supportReserve("blocked")).rejects.toMatchObject({ code: "FORBIDDEN" });
+    expect(f.store.data.get(`license_support_attempts/${f.profile.id}-987654321`)).toMatchObject({ count: 5 });
+    f.advance(60_001);
+    await expect(f.supportReserve("after-window")).resolves.toMatchObject({ sessionId: "after-window" });
+  });
+  test("confirmation mode requires an authenticated reservation, exact host and requested identity", async () => {
+    const f = await portable(true);
+    await expect(f.admit("unreserved")).rejects.toMatchObject({ code: "FORBIDDEN" });
+    await f.supportReserve("confirmed", "");
+    await expect(f.admit("confirmed", f.actor)).rejects.toMatchObject({ code: "FORBIDDEN" });
+    await expect(f.engine.supportAdmission(f.host, { profileId: f.profile.id, sessionId: "confirmed", targetNodusId: "111111111", requesterNodusId: "123456789" })).rejects.toMatchObject({ code: "FORBIDDEN" });
+    await expect(f.admit("confirmed")).resolves.toMatchObject({ confirmation: true });
+    expect([...f.store.data.keys()].some(key => key.startsWith("license_support_attempts/"))).toBe(false);
+  });
+  test.each(["profile", "license", "expiry"])("%s revocation blocks admission, renewal and future support without preventing cleanup", async kind => {
+    const f = await portable(true);
+    await f.supportReserve("active"); await f.establish("active");
+    if (kind === "profile") (f.store.data.get(`license_support_profiles/${f.profile.id}`) as { revoked: boolean }).revoked = true;
+    else if (kind === "license") (f.store.data.get(`license_licenses/${f.business.licenseId}`) as License).keyRevoked = true;
+    else f.advance(34 * 86_400_000);
+    await expect(f.supportReserve("later", "")).rejects.toMatchObject({ code: "FORBIDDEN" });
+    await expect(f.engine.lifecycle(f.host, "active", "heartbeat")).rejects.toMatchObject({ code: "SESSION_EXPIRED" });
+    await expect(f.engine.lifecycle(f.host, "active", "end")).resolves.toMatchObject({ ok: true });
+  });
+  test("another company and exceeding simultaneous capacity cannot use the package", async () => {
+    const f = await portable(true);
+    const other = await f.engine.createBusiness(admin, { name: "Other", email: "other@example.test" });
+    (f.store.data.get(`license_support_profiles/${f.profile.id}`) as { profile: { licenseId: string } }).profile.licenseId = other.licenseId;
+    await expect(f.supportReserve("foreign", "")).rejects.toMatchObject({ code: "FORBIDDEN" });
+    (f.store.data.get(`license_support_profiles/${f.profile.id}`) as { profile: { licenseId: string } }).profile.licenseId = f.business.licenseId;
+    (f.store.data.get(`license_licenses/${f.business.licenseId}`) as License).maxConcurrentSessions = 1;
+    await f.supportReserve("first", "");
+    await expect(f.supportReserve("second", "")).rejects.toMatchObject({ code: "CONCURRENT_LIMIT_REACHED" });
+  });
+});
+
 describe("server licensing", () => {
   test("tracking continues before enforcement, counts once and blocks only after rollout", async () => {
     const f = await fixture();

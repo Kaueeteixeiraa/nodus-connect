@@ -21,6 +21,16 @@ if (packaged.version !== version) throw new Error("Versao empacotada desatualiza
 const hash = (data) => createHash("sha256").update(data).digest("hex");
 const mainPath = join("apps", "desktop", "electron", "main.cjs");
 if (hash(asar.extractFile(archive, mainPath)) !== hash(readFileSync(join(root, mainPath)))) throw new Error("Electron empacotado desatualizado.");
+for (const name of ["preload.cjs", "quick-support.cjs"]) {
+  const relative = join("apps", "desktop", "electron", name);
+  if (hash(asar.extractFile(archive, relative)) !== hash(readFileSync(join(root, relative)))) throw new Error(`Modulo Electron desatualizado: ${name}`);
+}
+for (const name of ["main.cjs", "preload.cjs", "index.html"]) {
+  const relative = join("apps", "installer", name);
+  if (hash(asar.extractFile(archive, relative)) !== hash(readFileSync(join(root, relative)))) throw new Error(`Instalador empacotado desatualizado: ${name}`);
+}
+const trustName = "quick-support-trust.json";
+if (hash(readFileSync(join(root, "outputs", "installer", "win-unpacked", "resources", trustName))) !== hash(readFileSync(join(root, "build", trustName)))) throw new Error("Chave publica QuickSupport desatualizada.");
 const nativeHashes = {};
 for (const name of ["nodus-service.exe", "nodus-wgc-media.exe", "nodus-capture-status.exe"]) {
   const data = readFileSync(join(root, "outputs", "installer", "win-unpacked", "resources", "native", name));

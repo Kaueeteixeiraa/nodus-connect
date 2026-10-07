@@ -20,6 +20,8 @@ export class InputLatencyDiagnostic {
   coalesced = 0;
   sent = 0;
   bufferDrops = 0;
+  bufferDeferrals = 0;
+  staleDrops = 0;
   received = 0;
   rateDrops = 0;
   timeouts = 0;
@@ -64,7 +66,8 @@ export class InputLatencyDiagnostic {
     this.windowAt = now;
     this.lastCounts = { events: this.events, sent: this.sent, received: this.received };
     return { ...rates, events: this.events, sent: this.sent, received: this.received, coalesced: this.coalesced,
-      bufferDrops: this.bufferDrops, rateDrops: this.rateDrops, bufferedAmount, eventToSendMs: this.eventToSendMs,
+      bufferDrops: this.bufferDrops, bufferDeferrals: this.bufferDeferrals, staleDrops: this.staleDrops,
+      rateDrops: this.rateDrops, bufferedAmount, eventToSendMs: this.eventToSendMs,
       serializationMs: this.serializationMs, hostSupported: this.hostSupported, pendingProbes: this.pending.size,
       probeTimeouts: this.timeouts, latest: this.latest, oneWayTransportMs: null, commandLatencyMs: null,
       visualFeedbackLatencyMs: null, measurement: "native-input-barrier-ack-rtt-not-one-way" };
@@ -115,6 +118,18 @@ export function cumulativeMeanMs(totalSeconds: number, previousSeconds: number |
 
 export function rtpJitterMs(seconds: number): number | null {
   return Number.isFinite(seconds) && seconds >= 0 ? Math.round(seconds * 1000 * 10) / 10 : null;
+}
+
+export function videoFrameTiming(metadata: { captureTime?: number; receiveTime?: number; presentationTime?: number; processingDuration?: number }, now: number) {
+  const elapsed = (end: number | undefined, start: number | undefined) => typeof end === "number" && typeof start === "number"
+    && Number.isFinite(end) && Number.isFinite(start) && start >= 0 && end >= start ? Math.round((end - start) * 10) / 10 : null;
+  return {
+    frameAgeMs: elapsed(metadata.presentationTime, metadata.captureTime),
+    receiveToPresentMs: elapsed(metadata.presentationTime, metadata.receiveTime),
+    frameProcessingMs: elapsed(metadata.processingDuration === undefined ? undefined : metadata.processingDuration * 1000, 0),
+    presentationCallbackDelayMs: elapsed(now, metadata.presentationTime),
+    measurement: "browser-estimated-capture-to-presentation-not-input-latency" as const,
+  };
 }
 
 export function contentMotion(fps: number, targetFps: number): "LOW" | "MEDIUM" | "HIGH" | "UNKNOWN" {

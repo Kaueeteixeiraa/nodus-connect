@@ -2,6 +2,7 @@ import { LICENSE_MESSAGES, LicenseError, type LicenseInfo, type LicensePolicy } 
 import { OfflineLeaseAnchor, verifyBrowserLease } from "../../../../packages/licensing/src/offline";
 import { getDeviceAuthToken } from "./firebase";
 import type { LocalIdentity } from "./identity";
+import type { SupportDraft, SupportPermission } from "../../../../packages/common/src/quick-support";
 
 const base = String(import.meta.env.VITE_NODUS_LICENSE_API ?? "").replace(/\/$/, "");
 const pinnedKey = String(import.meta.env.VITE_NODUS_LICENSE_PUBLIC_KEY ?? "").replace(/\\n/g, "\n");
@@ -23,7 +24,7 @@ async function request<T>(path: string, body?: object, authenticated = true): Pr
     const token = await Promise.race([authenticated ? getDeviceAuthToken() : Promise.resolve(""), expired]);
     const response = await fetch(`${base}${path}`, { method: body ? "POST" : "GET", headers: { ...(token ? { authorization: `Bearer ${token}` } : {}), ...(body ? { "content-type": "application/json" } : {}) }, ...(body ? { body: JSON.stringify(body) } : {}), signal: controller.signal, cache: "no-store" });
     const value = await response.json();
-    if (!response.ok) throw new LicenseError(Object.hasOwn(LICENSE_MESSAGES, value.code) ? value.code : "SERVER_UNAVAILABLE");
+    if (!response.ok) throw new LicenseError(response.status === 404 ? "SERVER_UNAVAILABLE" : Object.hasOwn(LICENSE_MESSAGES, value.code) ? value.code : "SERVER_UNAVAILABLE");
     return value as T;
   } catch (error) { throw error instanceof LicenseError ? error : new LicenseError("SERVER_UNAVAILABLE"); } finally { clearTimeout(timer!); }
 }
@@ -46,6 +47,12 @@ export async function checkLicense(identity: LocalIdentity): Promise<LicenseInfo
 }
 export async function activateLicense(identity: LocalIdentity, key: string) { await request("/license/activate", { ...await device(identity), key }); return checkLicense(identity); }
 export async function requestMoreAccesses(identity: LocalIdentity) { return request<{ requestId: string; duplicate: boolean; notificationStatus: "PENDING" | "SENT" | "FAILED" }>("/license/access-requests", await device(identity)); }
+export async function createSupportProfile(identity: LocalIdentity, profile: SupportDraft) {
+  return request<{ token: string; template: { version: string; sha256: string } | null }>("/license/support/profiles", { ...await device(identity), profile });
+}
+export async function supportAdmission(profileId: string, sessionId: string, targetNodusId: string, requesterNodusId: string) {
+  return request<{ permissions: SupportPermission[]; confirmation: boolean }>("/license/support/admit", { profileId, sessionId, targetNodusId, requesterNodusId });
+}
 export async function prepareOfflineLicense(identity: LocalIdentity, targetNodusId: string) {
   if (!pinnedKey) throw new LicenseError("INVALID_LICENSE");
   const info = await checkLicense(identity); if (info.plan !== "business") throw new LicenseError("FORBIDDEN");
@@ -58,20 +65,20 @@ export async function prepareOfflineLicense(identity: LocalIdentity, targetNodus
   prepared.set(targetNodusId, { sessionId, anchor, deviceId: identity.deviceId });
   return sessionId;
 }
-export async function reserveLicense(identity: LocalIdentity, targetNodusId: string): Promise<string | undefined> {
-  if (!licenseConfigured()) return;
+export async function reserveLicense(identity: LocalIdentity, targetNodusId: string, supportProfileId?: string, supportPassword?: string): Promise<string | undefined> {
+  if (!licenseConfigured()) { if (supportProfileId) throw new LicenseError("SERVER_UNAVAILABLE"); return; }
   const offline = prepared.get(targetNodusId);
-  if (offline?.anchor.valid(offline.sessionId, identity.deviceId)) { prepared.delete(targetNodusId); reserved.add(offline.sessionId); return offline.sessionId; }
+  if (!supportProfileId && offline?.anchor.valid(offline.sessionId, identity.deviceId)) { prepared.delete(targetNodusId); reserved.add(offline.sessionId); return offline.sessionId; }
   prepared.delete(targetNodusId);
   const info = await checkLicense(identity);
   if (info.code === "DEVICE_REVOKED") throw new LicenseError("DEVICE_REVOKED");
   const policy = await request<LicensePolicy>("/license/policy", undefined, false);
   if (typeof policy.enforced !== "boolean") throw new LicenseError("SERVER_UNAVAILABLE");
   const sessionId = crypto.randomUUID();
-  const reservation = await request<{ sessionId: string }>("/license/sessions/reserve", { ...await device(identity), sessionId, targetNodusId });
+  const reservation = await request<{ sessionId: string }>("/license/sessions/reserve", { ...await device(identity), sessionId, targetNodusId, ...(supportProfileId ? { supportProfileId, supportPassword } : {}) });
   if (reservation.sessionId !== sessionId) throw new LicenseError("SERVER_UNAVAILABLE"); reserved.add(sessionId); return sessionId;
 }
-export async function licenseEstablished(sessionId: string, onRejected?: () => void) {
+export async function licenseEstablished(sessionId: string, onRejected?: (code: string) => void) {
   if (!licenseConfigured() || lifecycle.has(sessionId)) return;
   const state = { stopped: false, connected: false, enforced: reserved.has(sessionId), timer: undefined as ReturnType<typeof setTimeout> | undefined };
   lifecycle.set(sessionId, state);
@@ -91,7 +98,7 @@ export async function licenseEstablished(sessionId: string, onRejected?: () => v
       if (!state.enforced && error instanceof LicenseError && error.code === "FORBIDDEN") { state.stopped = true; lifecycle.delete(sessionId); return; }
       if (!state.stopped && error instanceof LicenseError && ["DEVICE_REVOKED", "SESSION_EXPIRED"].includes(error.code)) {
         state.stopped = true;
-        onRejected?.();
+        onRejected?.(error.code);
         lifecycle.delete(sessionId);
       }
       // Temporary licensing outages do not interrupt existing video sessions.

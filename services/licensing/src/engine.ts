@@ -1,4 +1,6 @@
 import { randomUUID } from "node:crypto";
+import support from "../../../apps/desktop/electron/quick-support.cjs";
+import type { SupportDraft, SupportProfile } from "../../../packages/common/src/quick-support.js";
 import { LICENSE_DEFAULTS, LicenseError, effectiveStatus, licenseCode, type License, type LicenseAccessRequest, type LicenseDevice, type LicenseInfo, type LicensePolicy, type LicenseSession } from "../../../packages/licensing/src/index.js";
 import type { LicenseStore, LicenseTransaction } from "./store.js";
 import { matchesSecret, newDeviceToken, newLicenseKey, secretHash, signLease } from "./security.js";
@@ -7,6 +9,7 @@ export interface Actor { uid: string; admin?: boolean; recent?: boolean; ip?: st
 export interface DeviceCredentials { deviceId: string; deviceToken: string; }
 type Claim = { ownerUid: string; deviceId: string; deviceClaim: string; };
 const DAY = 86_400_000;
+type SupportSession = LicenseSession & { supportProfileId?: string };
 export function validId(value: unknown): string { if (typeof value !== "string" || !/^[a-zA-Z0-9_-]{1,128}$/.test(value)) throw new LicenseError("INVALID_INPUT"); return value; }
 export function text(value: unknown, max = 120): string { if (typeof value !== "string" || !value.trim() || value.length > max) throw new LicenseError("INVALID_INPUT"); return value.trim(); }
 export function requireAdmin(actor: Actor, sensitive = false): void { if (!actor.admin) throw new LicenseError("FORBIDDEN"); if (sensitive && !actor.recent) throw new LicenseError("REAUTH_REQUIRED"); }
@@ -152,13 +155,73 @@ export class LicenseEngine {
     });
   }
 
-  async reserve(actor: Actor, credentials: DeviceCredentials, input: { sessionId: string; targetNodusId: string; offline?: boolean }) {
+  async createSupportProfile(actor: Actor, credentials: DeviceCredentials, draft: SupportDraft) {
+    if (!draft || typeof draft.password !== "string" || draft.password.length < 3 || draft.password.length > 128) throw new LicenseError("INVALID_INPUT");
+    const info = await this.info(actor, credentials);
+    if (!info.allowed || info.plan !== "business") throw new LicenseError("FORBIDDEN");
+    const verifier = await support.passwordVerifier(draft.password);
+    return this.store.transaction(async tx => {
+      const device = await this.device(tx, actor, credentials), license = await this.license(tx, device.licenseId);
+      if (device.status !== "ACTIVE" || license.plan !== "business" || license.keyRevoked || licenseCode(license, this.now()) !== "LICENSE_ACTIVE") throw new LicenseError("FORBIDDEN");
+      const profile: SupportProfile = { version: 1, id: randomUUID(), organizationId: license.organizationId, licenseId: license.id,
+        name: text(draft.name, 80), company: text(draft.company, 120), message: draft.message ?? "", logo: draft.logo ?? "",
+        permissions: draft.permissions, confirmation: draft.confirmation, passwordVerifier: verifier, createdAt: this.now() };
+      if (process.env.NODUS_SUPPORT_TEMPLATE_SHA256 && process.env.NODUS_SUPPORT_TEMPLATE_VERSION) profile.template = { sha256: process.env.NODUS_SUPPORT_TEMPLATE_SHA256, version: process.env.NODUS_SUPPORT_TEMPLATE_VERSION };
+      support.validateProfile(profile);
+      const token: string = support.signProfile(profile, this.signingKey);
+      tx.set(`license_support_profiles/${profile.id}`, { profile, token, revoked: false });
+      return { token, template: process.env.NODUS_SUPPORT_TEMPLATE_SHA256 ? { sha256: process.env.NODUS_SUPPORT_TEMPLATE_SHA256, version: process.env.NODUS_SUPPORT_TEMPLATE_VERSION } : null };
+    });
+  }
+
+  private async supportAuthentication(actor: Actor, credentials: DeviceCredentials, targetNodusId: string, password?: string): Promise<string | undefined> {
+    const profile = await this.store.transaction(async tx => {
+      const device = await this.device(tx, actor, credentials), license = await this.license(tx, device.licenseId);
+      const target = await tx.get<{ supportProfileId?: string }>(`devices/${targetNodusId}`);
+      if (!target?.supportProfileId) return null;
+      const stored = await tx.get<{ profile: SupportProfile; revoked: boolean }>(`license_support_profiles/${validId(target.supportProfileId)}`);
+      if (!stored || stored.revoked || device.status !== "ACTIVE" || license.plan !== "business" || license.keyRevoked
+        || license.id !== stored.profile.licenseId || licenseCode(license, this.now()) !== "LICENSE_ACTIVE") throw new LicenseError("FORBIDDEN");
+      if (!stored.profile.confirmation) {
+        const path = `license_support_attempts/${stored.profile.id}-${targetNodusId}`, now = this.now();
+        const old = await tx.get<{ startedAt: number; count: number }>(path);
+        const attempts = old && now - old.startedAt < 60_000 ? old : { startedAt: now, count: 0 };
+        if (attempts.count >= 5) throw new LicenseError("FORBIDDEN");
+        tx.set(path, { ...attempts, count: attempts.count + 1 });
+      }
+      return stored.profile;
+    });
+    if (profile && !profile.confirmation && !await support.verifyPassword(password, profile.passwordVerifier)) throw new LicenseError("UNAUTHORIZED");
+    return profile?.id;
+  }
+
+  async supportAdmission(actor: Actor, input: { profileId: string; sessionId: string; targetNodusId: string; requesterNodusId: string }) {
+    return this.store.transaction(async tx => {
+      const session = await tx.get<SupportSession>(`license_sessions/${validId(input.sessionId)}`);
+      const stored = await tx.get<{ profile: SupportProfile; revoked: boolean }>(`license_support_profiles/${validId(input.profileId)}`);
+      if (!session || !stored || stored.revoked || session.supportProfileId !== stored.profile.id || session.targetUid !== actor.uid
+        || session.targetNodusId !== input.targetNodusId || session.requesterNodusId !== input.requesterNodusId
+        || session.status !== "RESERVED" || session.expiresAt <= this.now()) throw new LicenseError("FORBIDDEN");
+      const license = await this.license(tx, session.licenseId), device = await tx.get<LicenseDevice>(`license_devices/${session.deviceId}`);
+      if (license.id !== stored.profile.licenseId || license.keyRevoked || licenseCode(license, this.now()) !== "LICENSE_ACTIVE" || device?.status !== "ACTIVE") throw new LicenseError("FORBIDDEN");
+      return { permissions: stored.profile.permissions, confirmation: stored.profile.confirmation };
+    }, { readOnly: true });
+  }
+
+  async reserve(actor: Actor, credentials: DeviceCredentials, input: { sessionId: string; targetNodusId: string; offline?: boolean; supportProfileId?: string; supportPassword?: string }) {
     validId(input.sessionId); if (!/^\d{9}$/.test(input.targetNodusId)) throw new LicenseError("INVALID_INPUT"); const now = this.now();
+    const supportProfileId = input.supportProfileId ? await this.supportAuthentication(actor, credentials, input.targetNodusId, input.supportPassword) : undefined;
+    if (input.supportProfileId && input.supportProfileId !== supportProfileId) throw new LicenseError("FORBIDDEN");
     return this.store.transaction(async tx => {
       const device = await this.device(tx, actor, credentials); if (device.status !== "ACTIVE") throw new LicenseError("DEVICE_REVOKED");
       const license = await this.license(tx, device.licenseId), policy = await this.readPolicy(tx);
-      const target = await tx.get<{ ownerUid: string; nodusId: string }>(`devices/${input.targetNodusId}`);
+      const target = await tx.get<{ ownerUid: string; nodusId: string; supportProfileId?: string }>(`devices/${input.targetNodusId}`);
       if (!target?.ownerUid || target.ownerUid === actor.uid || input.targetNodusId === device.nodusId) throw new LicenseError("INVALID_INPUT");
+      if (target.supportProfileId !== supportProfileId || supportProfileId && input.offline) throw new LicenseError("FORBIDDEN");
+      if (supportProfileId) {
+        const stored = await tx.get<{ profile: SupportProfile; revoked: boolean }>(`license_support_profiles/${supportProfileId}`);
+        if (!stored || stored.revoked || license.plan !== "business" || license.id !== stored.profile.licenseId || license.keyRevoked || licenseCode(license, now) !== "LICENSE_ACTIVE") throw new LicenseError("FORBIDDEN");
+      }
       const existing = await tx.get<LicenseSession>(`license_sessions/${input.sessionId}`);
       if (existing) {
         if (existing.requesterUid !== actor.uid || existing.deviceId !== device.id || existing.targetNodusId !== input.targetNodusId || existing.status === "ENDED" || (existing.status === "RESERVED" && existing.expiresAt <= now)) throw new LicenseError("SESSION_EXPIRED");
@@ -170,6 +233,7 @@ export class LicenseEngine {
       if (expiresAt <= now) throw new LicenseError("LICENSE_EXPIRED");
       license.slots = Object.fromEntries(activeSlots(license, now)); license.slots[input.sessionId] = { deviceId: device.id, expiresAt, established: false, offline };
       const session: LicenseSession = { id: input.sessionId, licenseId: license.id, deviceId: device.id, requesterUid: actor.uid, targetUid: target.ownerUid, requesterNodusId: device.nodusId, targetNodusId: input.targetNodusId, status: "RESERVED", connectedUids: [], consumed: false, createdAt: now, establishedAt: 0, lastHeartbeatAt: now, endedAt: 0, expiresAt, offline };
+      if (supportProfileId) (session as SupportSession).supportProfileId = supportProfileId;
       tx.set(`license_licenses/${license.id}`, license); tx.set(`license_sessions/${session.id}`, session);
       tx.set(`license_session_grants/${session.id}`, { sessionId: session.id, requesterUid: session.requesterUid, targetUid: session.targetUid, requesterNodusId: session.requesterNodusId, targetNodusId: session.targetNodusId, status: "RESERVED", expiresAt });
       return this.reservation(session, now);
@@ -196,6 +260,10 @@ export class LicenseEngine {
       } else {
         const requester = await tx.get<LicenseDevice>(`license_devices/${session.deviceId}`);
         if (!requester || requester.status !== "ACTIVE") throw new LicenseError("DEVICE_REVOKED");
+        if ((session as SupportSession).supportProfileId) {
+          const stored = await tx.get<{ revoked: boolean }>(`license_support_profiles/${(session as SupportSession).supportProfileId}`);
+          if (!stored || stored.revoked || license.keyRevoked || licenseCode(license, now) !== "LICENSE_ACTIVE") throw new LicenseError("SESSION_EXPIRED");
+        }
         if (!slot || (session.status !== "ESTABLISHED" && session.expiresAt <= now)) throw new LicenseError("SESSION_EXPIRED");
         if (action === "establish") {
           session.connectedUids = [...new Set([...session.connectedUids, actor.uid])];

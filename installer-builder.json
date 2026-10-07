@@ -29,7 +29,8 @@
     {
       "from": "work/gstreamer-runtime-package",
       "to": "native/gstreamer"
-    }
+    },
+    { "from": "build/quick-support-trust.json", "to": "quick-support-trust.json" }
   ],
   "win": {
     "artifactName": "Nodus-Connect-Installer-${version}.${ext}",

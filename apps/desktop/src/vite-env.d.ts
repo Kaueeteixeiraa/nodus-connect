@@ -5,6 +5,9 @@ interface Window {
     iceDiagnosticsEnabled: boolean;
     setTrayIdentity(identity: { nodusId: string; deviceName: string; status: string }): void;
     getIdentity(legacyIdentity?: unknown): Promise<unknown>;
+    getSupportProfile(): Promise<import("../../../packages/common/src/quick-support").SupportProfile | null>;
+    generateSupportPackage(input: { token: string; template: { version: string; sha256: string } | null }): Promise<{ canceled?: boolean; path?: string }>;
+    quit(): Promise<void>;
     saveIdentity(identity: unknown): Promise<unknown>;
     getLicenseCredentials(): Promise<{ deviceId: string; deviceToken: string } | null>;
     saveLicenseCredentials(credentials: { deviceId: string; deviceToken: string }): Promise<boolean>;
@@ -29,7 +32,9 @@ interface Window {
     setHostCursorActive(active: boolean): Promise<void>;
     setRemoteKeyboardCapture(active: boolean): Promise<void>;
     toggleFullScreen(enabled?: boolean): Promise<boolean>;
-    checkForUpdates(): Promise<{ ok: boolean; version?: string; url?: string; error?: string }>;
+    checkForUpdates(): Promise<{ ok: boolean; version?: string; available?: boolean; installing?: boolean; error?: string }>;
+    setActiveSessionCount(count: number): void;
+    onUpdateProgress(callback: (progress: { phase: "checking" | "downloading" | "installing"; percent: number }) => void): () => void;
     restartComputer(): Promise<{ ok: boolean; error?: string }>;
     sendSecureAttention(): Promise<{ ok: boolean; error?: string }>;
     setStartupOptions(options: { startWithWindows: boolean; startMinimized: boolean; minimizeToTray: boolean }): Promise<void>;

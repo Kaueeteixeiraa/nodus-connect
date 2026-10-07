@@ -5513,7 +5513,7 @@ button[type="submit"]:hover,
   padding: 0 8px;
   font-size: .7rem;
 }
-:root[data-theme] :is(.apex-app, .access-gate, .device-menu-actions) :is(.recent-device-row > .recent-device-connect, .connection-overview .connect-box > button, .device-access:not(:disabled), .themed-action) {
+:root[data-theme] :is(.apex-app, .access-gate, .device-menu-actions, .quick-support-shell, .support-generator) :is(.recent-device-row > .recent-device-connect, .connection-overview .connect-box > button, .device-access:not(:disabled), .themed-action) {
   --connect-accent: var(--theme-accent, var(--blue));
   min-width: 0;
   gap: 6px;
@@ -5526,17 +5526,17 @@ button[type="submit"]:hover,
   white-space: nowrap;
   cursor: pointer;
 }
-:root[data-theme] :is(.apex-app, .access-gate, .device-menu-actions) :is(.recent-device-row > .recent-device-connect, .connection-overview .connect-box > button, .device-access:not(:disabled), .themed-action) svg { flex-shrink: 0; }
-:root[data-theme] :is(.apex-app, .access-gate, .device-menu-actions) :is(.recent-device-row > .recent-device-connect, .connection-overview .connect-box > button, .device-access:not(:disabled), .themed-action):not(:disabled):hover {
+:root[data-theme] :is(.apex-app, .access-gate, .device-menu-actions, .quick-support-shell, .support-generator) :is(.recent-device-row > .recent-device-connect, .connection-overview .connect-box > button, .device-access:not(:disabled), .themed-action) svg { flex-shrink: 0; }
+:root[data-theme] :is(.apex-app, .access-gate, .device-menu-actions, .quick-support-shell, .support-generator) :is(.recent-device-row > .recent-device-connect, .connection-overview .connect-box > button, .device-access:not(:disabled), .themed-action):not(:disabled):hover {
   border-color: var(--connect-accent) !important;
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, .2), 0 4px 12px color-mix(in srgb, var(--connect-accent) 24%, transparent) !important;
 }
-:root[data-theme] :is(.apex-app, .access-gate, .device-menu-actions) :is(.recent-device-row > .recent-device-connect, .connection-overview .connect-box > button, .device-access:not(:disabled), .themed-action):focus-visible {
+:root[data-theme] :is(.apex-app, .access-gate, .device-menu-actions, .quick-support-shell, .support-generator) :is(.recent-device-row > .recent-device-connect, .connection-overview .connect-box > button, .device-access:not(:disabled), .themed-action):focus-visible {
   outline: 2px solid var(--connect-accent);
   outline-offset: 3px;
 }
-:root[data-theme] :is(.apex-app, .access-gate, .device-menu-actions) :is(.recent-device-row > .recent-device-connect, .connection-overview .connect-box > button, .device-access:not(:disabled), .themed-action):not(:disabled):active { box-shadow: inset 0 2px 4px rgba(0, 0, 0, .22) !important; }
-:is(.apex-app, .access-gate, .device-menu-actions) .themed-action { display: inline-flex; align-items: center; justify-content: center; min-height: 40px; padding: 8px 12px; font-family: inherit; font-size: .75rem; }
+:root[data-theme] :is(.apex-app, .access-gate, .device-menu-actions, .quick-support-shell, .support-generator) :is(.recent-device-row > .recent-device-connect, .connection-overview .connect-box > button, .device-access:not(:disabled), .themed-action):not(:disabled):active { box-shadow: inset 0 2px 4px rgba(0, 0, 0, .22) !important; }
+:is(.apex-app, .access-gate, .device-menu-actions, .quick-support-shell, .support-generator) .themed-action { display: inline-flex; align-items: center; justify-content: center; min-height: 40px; padding: 8px 12px; font-family: inherit; font-size: .75rem; }
 .access-card > .themed-action { width:100%; min-height:44px; white-space:normal !important; }
 .access-card > .themed-action:hover { transform:none; }
 :root[data-theme] :is(.apex-app, .device-menu-actions) .themed-action:disabled {
@@ -6372,3 +6372,38 @@ button[type="submit"]:hover,
 .remote-mode[data-theme]:not([data-theme="dark"]) :is(.viewer-session-switcher input, .viewer-session-switcher select, .viewer-tool-fields select) { color: var(--text); }
 .remote-mode[data-theme]:not([data-theme="dark"]) .viewer-session-switcher input::placeholder { color: var(--text-muted); }
 .remote-mode[data-theme]:not([data-theme="dark"]) .viewer-tool-popover { box-shadow: 0 18px 55px color-mix(in srgb, var(--remote-accent) 14%, transparent); }
+
+.quick-support-shell { height: 100dvh; overflow-y: auto; display: flex; flex-direction: column; background: #050d17; color: #eef5ff; padding: 24px; }
+.quick-support-brand { display: flex; gap: 14px; align-items: center; border-bottom: 1px solid #15374a; padding-bottom: 22px; }
+.quick-support-brand img { width: 56px; height: 56px; object-fit: contain; }
+.quick-support-brand div { min-width: 0; display: grid; gap: 5px; }
+.quick-support-brand strong { font-size: 20px; overflow-wrap: anywhere; }
+.quick-support-brand span, .quick-support-content p, .quick-support-session small { color: #a2bed3; overflow-wrap: anywhere; }
+.quick-support-name { display: grid; gap: 8px; padding-top: 18px; }
+.quick-support-name > span { color: #a2bed3; font-size: 12px; }
+.quick-support-name > div, .quick-support-name form { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.quick-support-name strong, .quick-support-name input { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.quick-support-name .icon-button { flex: 0 0 36px; }
+.quick-support-session [role="alert"] { color: #ff9aa8; }
+.quick-support-content { flex: 1; padding: 28px 0; display: flex; flex-direction: column; align-items: flex-start; gap: 16px; min-width: 0; }
+.quick-support-content > svg { color: #22c6ec; }
+.quick-support-content h1 { font-size: 26px; margin: 0; letter-spacing: 0; }
+.quick-support-content p { margin: 0; line-height: 1.5; }
+.quick-support-id { width: 100%; display: grid; grid-template-columns: 1fr 36px; gap: 10px; padding: 20px 0; border-block: 1px solid #15374a; }
+.quick-support-id > span { grid-column: 1 / -1; color: #a2bed3; }
+.quick-support-id > strong { font-size: 30px; white-space: nowrap; }
+.quick-support-session { width: 100%; display: flex; flex-wrap: wrap; gap: 12px; justify-content: space-between; align-items: center; }
+.quick-support-session div { display: grid; gap: 4px; min-width: 0; overflow-wrap: anywhere; }
+.quick-support-shell footer { display: flex; align-items: center; gap: 8px; color: #80a3bb; font-size: 12px; }
+.quick-support-shell footer img { width: 24px; height: 24px; object-fit: contain; }
+.support-generator { gap: 16px; min-width: 0; grid-column: 1 / -1; width: 100%; max-width: 680px; }
+.support-generator h3 { margin: 0; }
+.support-generator .settings-field { display: grid; gap: 8px; }
+.support-generator input:not([type="checkbox"]) { width: 100%; min-width: 0; }
+.support-password-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.support-option { display: flex; align-items: center; gap: 10px; }
+.support-option input[type="checkbox"] { flex: 0 0 16px; width: 16px; height: 16px; margin: 0; accent-color: var(--theme-accent, var(--blue)); }
+.support-logo-preview { display: flex; align-items: center; gap: 12px; }
+.support-logo-preview img { width: 64px; height: 64px; object-fit: contain; }
+.support-generator [role="status"] { overflow-wrap: anywhere; }
+@media (max-width: 560px) { .support-password-fields { grid-template-columns: 1fr; } .quick-support-shell { padding: 18px; } .quick-support-id > strong { font-size: 26px; } }
