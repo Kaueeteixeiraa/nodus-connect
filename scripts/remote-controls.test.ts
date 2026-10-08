@@ -381,6 +381,7 @@ test.each([
 });
 
 const updateMain = "apps/desktop/electron/main.cjs";
+const desktopUpdates = createRequire(import.meta.url)("../apps/desktop/electron/desktop-update.cjs");
 function releaseFixture(version = "1.1.11") {
   return { tag_name: `v${version}`, assets: [{ name: `Nodus-Connect-Setup-${version}.exe`,
     browser_download_url: `https://github.com/Kaueeteixeiraa/nodus-connect/releases/download/v${version}/Nodus-Connect-Setup-${version}.exe`,
@@ -388,7 +389,7 @@ function releaseFixture(version = "1.1.11") {
 }
 
 test("updater compares numeric versions and never installs a downgrade", () => {
-  const release = uiFunction("updateRelease", {}, updateMain);
+  const release = desktopUpdates.updateRelease;
   expect(release(releaseFixture("1.1.10"), "1.1.9").available).toBe(true);
   expect(release(releaseFixture("1.1.9"), "1.1.10").available).toBe(false);
   expect(release(releaseFixture(), "1.1.11").available).toBe(false);
@@ -419,13 +420,13 @@ test.each(["valid", "hash", "truncated", "oversize", "network"])("verified downl
 });
 
 function updateFlowFixture() {
-  const context: any = { updateInProgress: false, activeSessionCount: 0, portableSupport: false,
+  const context: any = { updateInProgress: false, activeSessionCount: 0, portableSupport: false, isQuitting: false,
     app: { isPackaged: true, getVersion: () => "1.1.10", getPath: () => "C:\\cache", getLoginItemSettings: () => ({ openAtLogin: true }) },
     process: { platform: "win32", execPath: "C:\\Programs\\Nodus Connect\\Nodus Connect.exe" }, path: path.win32, crypto, AbortSignal,
     fs: { mkdirSync: vi.fn(), existsSync: () => false, writeFileSync: vi.fn(), rmSync: vi.fn() },
     fetch: vi.fn(async () => ({ ok: true, json: async () => releaseFixture() })),
     downloadVerifiedFile: vi.fn(async (_url, _file, _sha, _size, progress) => progress(50)),
-    updateRelease: uiFunction("updateRelease", {}, updateMain), launchUpdate: vi.fn(async () => {}),
+    updateRelease: desktopUpdates.updateRelease, releasedStartupUpdate: vi.fn(async () => desktopUpdates.updateRelease(releaseFixture(), "1.1.10")), launchUpdate: vi.fn(async () => {}),
     appendLog: vi.fn(), setTimeout: vi.fn(), quitApp: vi.fn() };
   const sender = { isDestroyed: () => false, send: vi.fn() };
   return { context, sender, check: uiFunction("checkAndInstallUpdate", context, updateMain) };
@@ -452,6 +453,47 @@ test.each(["download", "spawn", "current"])("updater keeps the app open after %s
   if (mode === "current") context.fetch.mockResolvedValueOnce({ ok: true, json: async () => releaseFixture("1.1.10") });
   expect((await check(sender)).ok).toBe(mode === "current");
   expect(context.setTimeout).not.toHaveBeenCalled(); expect(context.updateInProgress).toBe(false);
+});
+
+test.each(["approved", "paused", "changed", "offline", "active", "closed", "quitting", "portable", "development", "cooldown"])("startup distribution handles %s without unsafe installation", async mode => {
+  const { check, context, sender } = updateFlowFixture();
+  if (mode === "paused") context.releasedStartupUpdate.mockResolvedValue({ available: false });
+  if (mode === "changed") context.releasedStartupUpdate.mockResolvedValueOnce(desktopUpdates.updateRelease(releaseFixture(), "1.1.10")).mockResolvedValueOnce({ available: false });
+  if (mode === "offline") context.releasedStartupUpdate.mockRejectedValue(new Error("offline"));
+  if (mode === "active") context.downloadVerifiedFile.mockImplementationOnce(async () => { context.activeSessionCount = 1; });
+  if (mode === "closed") sender.isDestroyed = () => true;
+  if (mode === "quitting") context.isQuitting = true;
+  if (mode === "portable") context.portableSupport = true;
+  if (mode === "development") context.app.isPackaged = false;
+  if (mode === "cooldown") context.fs.readFileSync = () => JSON.stringify({ sha256: "a".repeat(64), at: Date.now() });
+  const result = await check(sender, true);
+  expect(context.fetch).not.toHaveBeenCalled();
+  expect(context.launchUpdate).toHaveBeenCalledTimes(mode === "approved" ? 1 : 0);
+  expect(context.setTimeout).toHaveBeenCalledTimes(mode === "approved" ? 1 : 0);
+  expect(result.installing === true).toBe(mode === "approved");
+});
+
+test("startup policy verifies the pinned signing key before consulting the installer", async () => {
+  const keys = crypto.generateKeyPairSync("ed25519", { privateKeyEncoding: { type: "pkcs8", format: "pem" }, publicKeyEncoding: { type: "spki", format: "pem" } });
+  const token = desktopUpdates.signPolicy({ enabled: true, release: releaseFixture(), updatedAt: Date.now() }, keys.privateKey);
+  const context = { fetch: vi.fn(async () => new Response(JSON.stringify({ token }))), desktopUpdates, supportKey: keys.publicKey, AbortSignal,
+    updateRelease: desktopUpdates.updateRelease, app: { getVersion: () => "1.1.10" } };
+  const check = uiFunction("releasedStartupUpdate", context, updateMain);
+  expect(await check()).toMatchObject({ available: true, version: "1.1.11" });
+  context.fetch.mockResolvedValueOnce(new Response(JSON.stringify({ token: token.replace(/^./, "x") })));
+  await expect(check()).rejects.toThrow("INVALID_UPDATE_POLICY");
+  context.fetch.mockResolvedValueOnce(new Response("x".repeat(10_001)));
+  await expect(check()).rejects.toThrow("INVALID_UPDATE_POLICY");
+});
+
+test("only the trusted main renderer starts one update check per application launch", () => {
+  const listeners = new Map(), context = { startupUpdateChecked: false, ipcMain: { on: (name: string, handler: unknown) => listeners.set(name, handler), handle: vi.fn() },
+    isMainAppSender: (event: any) => event.trusted === true, markStartup: vi.fn(), checkAndInstallUpdate: vi.fn() };
+  uiFunction("setupIpc", context, updateMain)();
+  const ready = listeners.get("nodus:ui-ready"), sender = {};
+  ready({ sender }); expect(context.checkAndInstallUpdate).not.toHaveBeenCalled();
+  ready({ sender, trusted: true }); ready({ sender, trusted: true });
+  expect(context.checkAndInstallUpdate).toHaveBeenCalledExactlyOnceWith(sender, true);
 });
 
 test.each([true, false])("automatic installer reopens installed or rolled-back application (success: %s)", async (ok) => {

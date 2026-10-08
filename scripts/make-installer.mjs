@@ -21,7 +21,7 @@ if (packaged.version !== version) throw new Error("Versao empacotada desatualiza
 const hash = (data) => createHash("sha256").update(data).digest("hex");
 const mainPath = join("apps", "desktop", "electron", "main.cjs");
 if (hash(asar.extractFile(archive, mainPath)) !== hash(readFileSync(join(root, mainPath)))) throw new Error("Electron empacotado desatualizado.");
-for (const name of ["preload.cjs", "quick-support.cjs"]) {
+for (const name of ["preload.cjs", "quick-support.cjs", "desktop-update.cjs"]) {
   const relative = join("apps", "desktop", "electron", name);
   if (hash(asar.extractFile(archive, relative)) !== hash(readFileSync(join(root, relative)))) throw new Error(`Modulo Electron desatualizado: ${name}`);
 }
@@ -43,7 +43,7 @@ const supportResources = join(root, "outputs", "quick-support", "win-unpacked", 
 const supportArchive = join(supportResources, "app.asar");
 if (!existsSync(supportExe) || !existsSync(supportArchive)) throw new Error("QuickSupport desta versao ausente. Use pnpm installer:build para gerar os dois pacotes juntos.");
 if (JSON.parse(asar.extractFile(supportArchive, "package.json").toString()).version !== version) throw new Error("Versao QuickSupport desatualizada.");
-for (const name of ["main.cjs", "preload.cjs", "quick-support.cjs"]) {
+for (const name of ["main.cjs", "preload.cjs", "quick-support.cjs", "desktop-update.cjs"]) {
   const relative = join("apps", "desktop", "electron", name);
   if (hash(asar.extractFile(supportArchive, relative)) !== hash(asar.extractFile(archive, relative))) throw new Error(`QuickSupport desatualizado: ${name}`);
 }

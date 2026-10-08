@@ -70,7 +70,7 @@ describe("custom installer", () => {
       asar: { extractFile: (file: string, name: string) => Buffer.from(name === "package.json" ? JSON.stringify({ version: failure === "version" ? "1.1.13" : "1.1.14" }) : failure && file !== "installer.asar" && name.endsWith(failure) ? "stale" : "current") },
     });
     expect(run()).toEqual({ fileName: "Nodus-QuickSupport-1.1.14.exe", sha256: hash(Buffer.from("MZportable")) });
-    for (const failure of ["missing", "version", "main.cjs", "preload.cjs", "quick-support.cjs", "nodus-service.exe", "quick-support-trust.json"]) expect(() => run(failure), failure).toThrow();
+    for (const failure of ["missing", "version", "main.cjs", "preload.cjs", "quick-support.cjs", "desktop-update.cjs", "nodus-service.exe", "quick-support-trust.json"]) expect(() => run(failure), failure).toThrow();
   });
   it("keeps every required screen and gates the license step", () => {
     for (const screen of ["welcome", "license", "location", "installing", "complete", "uninstall", "error"]) {
@@ -122,7 +122,7 @@ describe("custom installer", () => {
     expect(config.files).toContain("apps/desktop/electron/**/*");
     expect(config.extraResources).toContainEqual({ from: "build/quick-support-trust.json", to: "quick-support-trust.json" });
     const builder = readFileSync(new URL("make-installer.mjs", import.meta.url), "utf8");
-    expect(builder).toContain('["preload.cjs", "quick-support.cjs"]');
+    expect(builder).toContain('["preload.cjs", "quick-support.cjs", "desktop-update.cjs"]');
     expect(builder).toContain("Chave publica QuickSupport desatualizada.");
   });
 });

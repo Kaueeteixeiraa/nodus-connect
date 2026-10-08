@@ -13,6 +13,7 @@ import { createRelayServer } from "../../coordination/src/relay";
 import { OfflineLeaseAnchor, verifyBrowserLease } from "../../../packages/licensing/src/offline";
 import { FIRESTORE_CLIENT_CONFIG } from "./firestore-store";
 import support from "../../../apps/desktop/electron/quick-support.cjs";
+import desktopUpdates from "../../../apps/desktop/electron/desktop-update.cjs";
 import type { SupportDraft } from "../../../packages/common/src/quick-support";
 
 // Only tests use this store; production always uses Firestore transactions.
@@ -42,6 +43,53 @@ async function fixture() {
   const business = async () => { const created = await engine.createBusiness(admin, { name: "Example", email: "owner@example.test" }); await engine.payment(admin, { licenseId: created.licenseId, paymentId: "initial-payment", amountCents: 20000 }); await engine.activate(actor, credentials, created.key); return created; };
   return { store, engine, actor, host, credentials, reserve, establish, business, time: () => time, advance: (ms: number) => time += ms };
 }
+describe("desktop update distribution", () => {
+  const version = "1.1.16";
+  const release = { tag_name: `v${version}`, assets: [{ name: `Nodus-Connect-Setup-${version}.exe`, browser_download_url: `https://github.com/Kaueeteixeiraa/nodus-connect/releases/download/v${version}/Nodus-Connect-Setup-${version}.exe`, digest: `sha256:${"a".repeat(64)}`, size: 100 }] };
+  const fetchRelease = () => vi.fn<typeof fetch>(async () => new Response(JSON.stringify(release)));
+  test("only a recently authenticated admin can release a verified official installer", async () => {
+    const f = await fixture(), network = fetchRelease();
+    await expect(f.engine.publishDesktopUpdate(f.actor, true, version, network)).rejects.toMatchObject({ code: "FORBIDDEN" });
+    await expect(f.engine.publishDesktopUpdate({ ...admin, recent: false }, true, version, network)).rejects.toMatchObject({ code: "REAUTH_REQUIRED" });
+    expect(network).not.toHaveBeenCalled();
+    await f.engine.signedDesktopUpdate();
+    expect(await f.engine.publishDesktopUpdate(admin, true, version, network)).toMatchObject({ enabled: true, release });
+    const signed = await f.engine.signedDesktopUpdate();
+    expect(desktopUpdates.verifyPolicy(signed.token, keys.publicKey, f.time())).toMatchObject({ enabled: true, release });
+    expect([...f.store.data.values()].some((row: any) => row.action === "DESKTOP_UPDATE_CHANGED" && row.adminUserId === admin.uid)).toBe(true);
+    expect(await f.engine.publishDesktopUpdate(admin, false, undefined, network)).toMatchObject({ enabled: false, release });
+    expect(network).toHaveBeenCalledTimes(1);
+    expect(desktopUpdates.verifyPolicy((await f.engine.signedDesktopUpdate()).token, keys.publicKey, f.time()).enabled).toBe(false);
+  });
+  test.each(["draft", "prerelease", "missing", "hash", "url", "version", "not-found"])("rejects %s releases without changing distribution", async mode => {
+    const f = await fixture(), published = structuredClone(release);
+    if (mode === "draft" || mode === "prerelease") Object.assign(published, { [mode]: true });
+    if (mode === "missing") published.assets = [];
+    if (mode === "hash") published.assets[0].digest = "invalid";
+    if (mode === "url") published.assets[0].browser_download_url = "https://example.com/setup.exe";
+    const network = vi.fn<typeof fetch>(async () => new Response(JSON.stringify(published), { status: mode === "not-found" ? 404 : 200 }));
+    await expect(f.engine.publishDesktopUpdate(admin, true, mode === "version" ? "../../malicious" : version, network)).rejects.toMatchObject({ code: "INVALID_INPUT" });
+    expect(f.store.data.has("license_desktop_updates/current")).toBe(false);
+  });
+  test("signature, audience and expiry prevent replay of unrelated or stale authorizations", () => {
+    const policy = { enabled: true, release, updatedAt: 1000 }, token = desktopUpdates.signPolicy(policy, keys.privateKey, 1000);
+    expect(() => desktopUpdates.verifyPolicy(token.replace(/^./, "x"), keys.publicKey, 1000)).toThrow();
+    expect(() => desktopUpdates.verifyPolicy(token, keys.publicKey, 301_001)).toThrow();
+    expect(() => desktopUpdates.verifyPolicy(token, keys.publicKey, -60_000)).toThrow();
+    const unrelated = desktopUpdates.signPolicy({ ...policy, kind: "nodus-support" } as any, keys.privateKey, 1000);
+    expect(() => desktopUpdates.verifyPolicy(unrelated, keys.publicKey, 1000)).toThrow();
+  });
+  test("cached reads refresh after one minute and recover after database failures", async () => {
+    const f = await fixture(), transaction = vi.spyOn(f.store, "transaction");
+    await Promise.all([f.engine.signedDesktopUpdate(), f.engine.signedDesktopUpdate()]);
+    expect(transaction).toHaveBeenCalledTimes(1);
+    f.advance(60_001); await f.engine.signedDesktopUpdate(); expect(transaction).toHaveBeenCalledTimes(2);
+    f.advance(60_001); transaction.mockRejectedValueOnce(new Error("offline"));
+    await expect(f.engine.signedDesktopUpdate()).rejects.toThrow("offline");
+    await expect(f.engine.signedDesktopUpdate()).resolves.toHaveProperty("token");
+  });
+});
+
 describe("QuickSupport licensing", { timeout: 15000 }, () => {
   const draft: SupportDraft = { name: "Suporte Example", company: "Example", message: "Atendimento autorizado", logo: "", permissions: ["screen:view", "mouse:control"], confirmation: false, password: "Example-support-2026!" };
   async function portable(confirmation = false) {
@@ -223,6 +271,22 @@ async function httpFixture() {
   return { ...f, base, post, providers, notifyAccessRequest, close: () => new Promise<void>((resolve, reject) => { server.closeAllConnections(); server.close(error => error ? reject(error) : resolve()); }) };
 }
 describe("licensing HTTP and relay enforcement", () => {
+  test("public startup update checks coalesce reads and bypass authentication and writes", async () => {
+    const f = await httpFixture();
+    try {
+      const transaction = vi.spyOn(f.store, "transaction"), before = structuredClone([...f.store.data]);
+      const responses = await Promise.all(Array.from({ length: 12 }, () => fetch(`${f.base}/license/desktop-update`)));
+      expect(transaction).toHaveBeenCalledTimes(1);
+      expect(transaction.mock.calls[0][1]).toEqual({ readOnly: true });
+      for (const response of responses) {
+        expect(response.status).toBe(200); expect(response.headers.get("cache-control")).toContain("s-maxage=60");
+        expect(desktopUpdates.verifyPolicy((await response.json()).token, keys.publicKey, 1_800_000_000_000)).toMatchObject({ enabled: false });
+      }
+      expect([...f.store.data]).toEqual(before);
+      expect((await f.post("/admin/desktop-update", { enabled: true, version: "1.1.16" }, "source-token")).status).toBe(403);
+      expect((await f.post("/admin/desktop-update", { enabled: false }, "old-admin-token")).status).toBe(403);
+    } finally { await f.close(); }
+  });
   test("license checks retain counts and authentication when database writes are unavailable", async () => {
     const f = await httpFixture();
     try {

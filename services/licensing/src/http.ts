@@ -29,6 +29,11 @@ export function createLicenseHandler(deps: HttpDependencies) {
       if (origin) { response.setHeader("access-control-allow-origin", origin); response.setHeader("vary", "Origin"); }
       if (request.method === "OPTIONS") { response.setHeader("access-control-allow-methods", "GET, POST"); response.setHeader("access-control-allow-headers", "Authorization, Content-Type"); return send(204, null); }
       if (request.method === "GET" && path === "/health") return send(200, { ok: true, service: "nodus-license" });
+      if (request.method === "GET" && path === "/license/desktop-update") {
+        const result = await deps.engine.signedDesktopUpdate();
+        response.setHeader("cache-control", "public, max-age=0, s-maxage=60");
+        return send(200, result);
+      }
       if (request.method === "GET" && path === "/license/policy") return send(200, await deps.engine.policy());
       const webhook = path.match(/^\/webhooks\/([a-zA-Z0-9_-]+)$/);
       if (request.method === "POST" && webhook) {

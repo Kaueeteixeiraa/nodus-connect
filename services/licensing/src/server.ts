@@ -39,6 +39,8 @@ async function authenticate(token: string): Promise<Actor> {
   return { uid: decoded.uid, admin: admin?.status === "ACTIVE" && admin.role === "SUPER_ADMIN" && mfa, recent: Date.now() / 1000 - decoded.auth_time >= 0 && Date.now() / 1000 - decoded.auth_time < 300 };
 }
 async function admin(actor: Actor, path: string, input: Record<string, unknown>): Promise<unknown> {
+  if (path === "GET /admin/desktop-update") return engine.desktopUpdatePolicy();
+  if (path === "POST /admin/desktop-update") return engine.publishDesktopUpdate(actor, input.enabled, input.version);
   if (path === "POST /admin/organizations") return engine.createBusiness(actor, { name: text(input.name), email: text(input.email, 254) });
   if (path === "POST /admin/license") return engine.modify(actor, validId(input.licenseId), input.patch as Parameters<LicenseEngine["modify"]>[2]);
   if (path === "POST /admin/device") return engine.deviceStatus(actor, validId(input.deviceId), input.status as Parameters<LicenseEngine["deviceStatus"]>[2]);

@@ -12,6 +12,7 @@ const { createLogWriter } = require("./log-writer.cjs");
 const { RemoteCursorVisibility } = require("./remote-cursor-visibility.cjs");
 const { RemoteWindowsKeys } = require("./remote-windows-keys.cjs");
 const supportPackages = require("./quick-support.cjs");
+const desktopUpdates = require("./desktop-update.cjs");
 const supportTrustPath = app.isPackaged ? path.join(process.resourcesPath, "quick-support-trust.json") : path.join(__dirname, "../../../build/quick-support-trust.json");
 let supportKey = "";
 try { supportKey = JSON.parse(fs.readFileSync(supportTrustPath, "utf8")).publicKey; } catch {}
@@ -27,6 +28,7 @@ let tray;
 let themedIcon;
 let isQuitting = false;
 let updateInProgress = false;
+let startupUpdateChecked = false;
 let activeSessionCount = 0;
 let trayIdentity = { nodusId: "", deviceName: "Nodus Connect", status: "Online" };
 let remoteControlActive = false;
@@ -451,7 +453,11 @@ require("electron").ipcMain.on("nodus:tray-identity", (_event, identity) => {
 });
 
 function setupIpc() {
-  ipcMain.on("nodus:ui-ready", (event) => { if (isMainAppSender(event)) markStartup("ui-ready", event.sender); });
+  ipcMain.on("nodus:ui-ready", (event) => {
+    if (!isMainAppSender(event)) return;
+    markStartup("ui-ready", event.sender);
+    if (!startupUpdateChecked) { startupUpdateChecked = true; checkAndInstallUpdate(event.sender, true); }
+  });
   ipcMain.handle("nodus:get-support-profile", () => supportProfile);
   ipcMain.handle("nodus:quit", (event) => { if (isMainAppSender(event)) quitApp(); });
   ipcMain.handle("nodus:generate-support-package", (event, input) => {
@@ -601,21 +607,19 @@ function setupIpc() {
 }
 
 function updateRelease(release, currentVersion) {
-  const version = String(release.tag_name || "").replace(/^v/i, "");
-  const validVersion = value => /^\d{1,5}\.\d{1,5}\.\d{1,5}$/.test(value);
-  if (release.draft || release.prerelease || !validVersion(version) || !validVersion(currentVersion)) throw new Error("INVALID_UPDATE");
-  const next = version.split(".").map(Number), current = currentVersion.split(".").map(Number);
-  const differing = next.findIndex((part, index) => part !== current[index]);
-  if (differing < 0 || next[differing] < current[differing]) return { version, available: false };
-  const name = `Nodus-Connect-Setup-${version}.exe`;
-  const url = `https://github.com/Kaueeteixeiraa/nodus-connect/releases/download/v${version}/${name}`;
-  const asset = release.assets?.find(item => item.name === name);
-  if (!asset || asset.browser_download_url !== url || !/^sha256:[a-f0-9]{64}$/.test(asset.digest)
-    || !Number.isSafeInteger(asset.size) || asset.size <= 0 || asset.size > 350 * 1024 * 1024) throw new Error("INVALID_UPDATE");
-  return { version, available: true, url, sha256: asset.digest.slice(7), size: asset.size };
+  return desktopUpdates.updateRelease(release, currentVersion);
 }
 
-async function checkAndInstallUpdate(sender) {
+async function releasedStartupUpdate() {
+  const response = await fetch("https://nodus-connect-license.vercel.app/license/desktop-update", { cache: "no-store", signal: AbortSignal.timeout(8000) });
+  if (!response.ok) throw new Error("UPDATE_CHECK_FAILED");
+  const body = await response.text();
+  if (body.length > 10_000) throw new Error("INVALID_UPDATE_POLICY");
+  const policy = desktopUpdates.verifyPolicy(JSON.parse(body).token, supportKey);
+  return policy.enabled ? updateRelease(policy.release, app.getVersion()) : { available: false };
+}
+
+async function checkAndInstallUpdate(sender, automatic = false) {
   if (updateInProgress) return { ok: false, error: "Atualização em andamento." };
   if (portableSupport || !app.isPackaged || process.platform !== "win32") return { ok: false, error: "Atualização automática disponível apenas no Nodus instalado." };
   updateInProgress = true;
@@ -623,22 +627,38 @@ async function checkAndInstallUpdate(sender) {
   const progress = (phase, percent = 0) => { if (!sender.isDestroyed()) sender.send("nodus:update-progress", { phase, percent }); };
   try {
     progress("checking");
-    const response = await fetch("https://api.github.com/repos/Kaueeteixeiraa/nodus-connect/releases/latest", { headers: { Accept: "application/vnd.github+json", "User-Agent": "Nodus-Connect", "X-GitHub-Api-Version": "2022-11-28" }, signal: AbortSignal.timeout(8000) });
-    if (!response.ok) throw new Error("UPDATE_CHECK_FAILED");
-    const update = updateRelease(await response.json(), app.getVersion());
+    let update;
+    if (automatic) update = await releasedStartupUpdate();
+    else {
+      const response = await fetch("https://api.github.com/repos/Kaueeteixeiraa/nodus-connect/releases/latest", { headers: { Accept: "application/vnd.github+json", "User-Agent": "Nodus-Connect", "X-GitHub-Api-Version": "2022-11-28" }, signal: AbortSignal.timeout(8000) });
+      if (!response.ok) throw new Error("UPDATE_CHECK_FAILED");
+      update = updateRelease(await response.json(), app.getVersion());
+    }
     if (!update.available) return { ok: true, version: app.getVersion(), available: false };
     if (activeSessionCount) return { ok: false, error: "Encerre as sessões remotas antes de atualizar." };
     const installDir = path.dirname(process.execPath);
     if (path.basename(installDir).toLowerCase() !== "nodus connect") throw new Error("INVALID_INSTALL_TARGET");
     const cache = path.join(app.getPath("userData"), "updates");
     fs.mkdirSync(cache, { recursive: true });
+    const attemptFile = path.join(cache, "automatic-attempt.json");
+    if (automatic) {
+      let attempt;
+      try { attempt = JSON.parse(fs.readFileSync(attemptFile, "utf8")); } catch {}
+      if (attempt?.sha256 === update.sha256 && Number.isSafeInteger(attempt.at) && Date.now() - attempt.at < 3_600_000) return { ok: true, available: true, deferred: true };
+    }
     const setup = path.join(cache, `${update.sha256}.exe`);
     if (!fs.existsSync(setup) || await hashFile(setup) !== update.sha256) {
       await downloadVerifiedFile(update.url, setup, update.sha256, update.size, percent => progress("downloading", percent));
     }
     if (activeSessionCount) return { ok: false, error: "Encerre as sessões remotas antes de atualizar." };
+    if (automatic) {
+      const approved = await releasedStartupUpdate();
+      if (!approved.available || approved.sha256 !== update.sha256) return { ok: true, available: false };
+    }
+    if (activeSessionCount || isQuitting || sender.isDestroyed()) return { ok: false, error: "Atualização adiada para a próxima abertura." };
     const optionsFile = path.join(cache, `${crypto.randomUUID()}.json`);
     fs.writeFileSync(optionsFile, JSON.stringify({ installDir, startWithWindows: app.getLoginItemSettings().openAtLogin }), { flag: "wx" });
+    if (automatic) fs.writeFileSync(attemptFile, JSON.stringify({ sha256: update.sha256, at: Date.now() }));
     try { await launchUpdate(setup, optionsFile); }
     catch (error) { fs.rmSync(optionsFile, { force: true }); throw error; }
     installing = true;

@@ -3,6 +3,10 @@ export type LicenseStatus = "TRIAL" | "ACTIVE" | "PAST_DUE" | "GRACE_PERIOD" | "
 export type LicenseCode = "LICENSE_ACTIVE" | "LICENSE_EXPIRED" | "LICENSE_SUSPENDED" | "PAYMENT_OVERDUE" | "DEVICE_LIMIT_REACHED" | "CONCURRENT_LIMIT_REACHED" | "LICENSE_REVOKED" | "DEVICE_REVOKED" | "INVALID_LICENSE" | "SERVER_UNAVAILABLE" | "TRIAL_LIMIT_REACHED" | "INVALID_INPUT" | "UNAUTHORIZED" | "FORBIDDEN" | "REAUTH_REQUIRED" | "SESSION_EXPIRED" | "SESSION_RECONCILIATION_REQUIRED" | "ROLLOUT_NOT_READY";
 export class LicenseError extends Error { constructor(public readonly code: LicenseCode) { super(code); } }
 export type LicensePolicy = { enforced: boolean } & { -readonly [K in keyof typeof LICENSE_DEFAULTS]: number };
+export interface DesktopUpdatePolicy {
+  enabled: boolean; updatedAt: number;
+  release: { tag_name: string; assets: { name: string; browser_download_url: string; digest: string; size: number }[]; draft?: boolean; prerelease?: boolean } | null;
+}
 export interface Slot { deviceId: string; expiresAt: number; established: boolean; offline: boolean; }
 export interface License {
   id: string; organizationId: string; plan: "free" | "business"; status: LicenseStatus;

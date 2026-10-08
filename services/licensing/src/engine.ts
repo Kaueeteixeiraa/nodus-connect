@@ -1,5 +1,7 @@
 import { randomUUID } from "node:crypto";
 import support from "../../../apps/desktop/electron/quick-support.cjs";
+import desktopUpdates from "../../../apps/desktop/electron/desktop-update.cjs";
+import type { DesktopUpdatePolicy } from "../../../packages/licensing/src/index.js";
 import type { SupportDraft, SupportProfile } from "../../../packages/common/src/quick-support.js";
 import { LICENSE_DEFAULTS, LicenseError, effectiveStatus, licenseCode, type License, type LicenseAccessRequest, type LicenseDevice, type LicenseInfo, type LicensePolicy, type LicenseSession } from "../../../packages/licensing/src/index.js";
 import type { LicenseStore, LicenseTransaction } from "./store.js";
@@ -29,7 +31,47 @@ function audit(tx: LicenseTransaction, actor: Actor, action: string, licenseId: 
 }
 
 export class LicenseEngine {
+  private desktopUpdateCache?: { expiresAt: number; value: Promise<DesktopUpdatePolicy> };
   constructor(private readonly store: LicenseStore, private readonly pepper: string, private readonly signingKey: string, private readonly now = () => Date.now()) { secretHash("configuration-check", pepper); }
+
+  async desktopUpdatePolicy(cached = false): Promise<DesktopUpdatePolicy> {
+    if (cached && this.desktopUpdateCache && this.desktopUpdateCache.expiresAt > this.now()) return this.desktopUpdateCache.value;
+    const value = this.store.transaction(async tx => await tx.get<DesktopUpdatePolicy>("license_desktop_updates/current") ?? { enabled: false, release: null, updatedAt: 0 }, { readOnly: true });
+    if (cached) {
+      const entry = { expiresAt: this.now() + 60_000, value };
+      this.desktopUpdateCache = entry;
+      value.catch(() => { if (this.desktopUpdateCache === entry) this.desktopUpdateCache = undefined; });
+    }
+    return value;
+  }
+
+  async signedDesktopUpdate() {
+    return { token: desktopUpdates.signPolicy(await this.desktopUpdatePolicy(true), this.signingKey, this.now()) };
+  }
+
+  async publishDesktopUpdate(actor: Actor, enabled: unknown, version: unknown, fetchRelease = fetch): Promise<DesktopUpdatePolicy> {
+    requireAdmin(actor, true);
+    if (typeof enabled !== "boolean" || (enabled && (typeof version !== "string" || !/^\d{1,5}\.\d{1,5}\.\d{1,5}$/.test(version)))) throw new LicenseError("INVALID_INPUT");
+    let release: DesktopUpdatePolicy["release"] = null;
+    if (enabled) {
+      const response = await fetchRelease(`https://api.github.com/repos/Kaueeteixeiraa/nodus-connect/releases/tags/v${version}`, { headers: { Accept: "application/vnd.github+json", "User-Agent": "Nodus-Connect" }, signal: AbortSignal.timeout(8000) });
+      if (!response.ok) throw new LicenseError("INVALID_INPUT");
+      const published = await response.json();
+      let update;
+      try { update = desktopUpdates.updateRelease(published, "0.0.0"); } catch { throw new LicenseError("INVALID_INPUT"); }
+      if (update.version !== version || !update.available) throw new LicenseError("INVALID_INPUT");
+      release = { tag_name: `v${version}`, assets: [{ name: `Nodus-Connect-Setup-${version}.exe`, browser_download_url: update.url, digest: `sha256:${update.sha256}`, size: update.size }] };
+    }
+    const policy = await this.store.transaction(async tx => {
+      const before = await tx.get<DesktopUpdatePolicy>("license_desktop_updates/current"), now = this.now();
+      const next = { enabled, release: release ?? before?.release ?? null, updatedAt: now };
+      tx.set("license_desktop_updates/current", next);
+      audit(tx, actor, "DESKTOP_UPDATE_CHANGED", "desktop-update", before, next, now);
+      return next;
+    });
+    this.desktopUpdateCache = undefined;
+    return policy;
+  }
 
   async policy(): Promise<LicensePolicy> { return this.store.transaction(tx => this.readPolicy(tx)); }
   private async readPolicy(tx: LicenseTransaction): Promise<LicensePolicy> {

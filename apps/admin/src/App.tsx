@@ -2,8 +2,8 @@ import { useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { initializeApp } from "firebase/app";
 import { getAuth, GoogleAuthProvider, inMemoryPersistence, onAuthStateChanged, reauthenticateWithPopup, setPersistence, signInWithPopup, signOut, type User } from "firebase/auth";
-import { ArrowLeft, ArrowRight, Ban, Building2, Check, ChevronDown, ChevronLeft, ChevronRight, Copy, DollarSign, FileCheck2, KeyRound, Laptop, LayoutDashboard, LoaderCircle, LogOut, Plus, RefreshCw, Save, Search, ShieldCheck, Users, X } from "lucide-react";
-import { LICENSE_MESSAGES, type License, type LicenseAccessRequest, type LicenseDevice } from "../../../packages/licensing/src/index";
+import { ArrowLeft, ArrowRight, Ban, Building2, Check, ChevronDown, ChevronLeft, ChevronRight, Copy, DollarSign, Download, FileCheck2, KeyRound, Laptop, LayoutDashboard, LoaderCircle, LogOut, Plus, RefreshCw, Save, Search, ShieldCheck, Users, X } from "lucide-react";
+import { LICENSE_MESSAGES, type DesktopUpdatePolicy, type License, type LicenseAccessRequest, type LicenseDevice } from "../../../packages/licensing/src/index";
 import logo from "../../desktop/src/assets/nodus-logo-icon.png";
 import "./styles.css";
 
@@ -16,7 +16,7 @@ type Organization = { id: string; name: string; email: string; licenseId: string
 type Details = { devices: { id: string; deviceName: string; nodusId: string; status: string }[]; payments: { paymentId: string; amountCents: number; paidAt: number; status: string }[]; audits: { action: string; adminUserId: string; timestamp: number }[] };
 type Dashboard = { active: number; suspended: number; trials: number; devices: number; online: number; pendingRequests: number; organizations: number; mrrCents: number };
 type PublicDevice = Omit<LicenseDevice, "claimHash" | "tokenHash"> & { online: boolean };
-const ADMIN_VIEWS = [{ id: "dashboard", label: "Visão geral", icon: LayoutDashboard }, { id: "access", label: "Solicitações", icon: KeyRound }, { id: "devices", label: "Dispositivos", icon: Laptop }, { id: "organizations", label: "Empresas", icon: Building2 }] as const;
+const ADMIN_VIEWS = [{ id: "dashboard", label: "Visão geral", icon: LayoutDashboard }, { id: "access", label: "Solicitações", icon: KeyRound }, { id: "devices", label: "Dispositivos", icon: Laptop }, { id: "organizations", label: "Empresas", icon: Building2 }, { id: "updates", label: "Atualizações", icon: Download }] as const;
 type AdminView = typeof ADMIN_VIEWS[number]["id"];
 const money = (value: number) => new Intl.NumberFormat("pt-BR", { style: "currency", currency: "BRL" }).format(value / 100);
 const date = (value: number) => new Date(value).toLocaleString("pt-BR");
@@ -68,6 +68,7 @@ function Admin() {
   const [query, setQuery] = useState(""), [filter, setFilter] = useState("all"), [page, setPage] = useState(1), [updatedAt, setUpdatedAt] = useState(0);
   const [confirmation, setConfirmation] = useState<{ title: string; message: string; action: () => Promise<void> } | null>(null);
   const [refreshing, setRefreshing] = useState(false);
+  const [desktopUpdate, setDesktopUpdate] = useState<DesktopUpdatePolicy | null>(null), [updateVersion, setUpdateVersion] = useState("");
   const paymentAttempts = useRef(new Map<string, string>());
   const grantAttempts = useRef(new Map<string, string>());
   const organization = organizations.find(item => item.licenseId === selected);
@@ -83,13 +84,15 @@ function Admin() {
   async function copy(value: string) { await navigator.clipboard.writeText(value); setFeedback("Copiado para a área de transferência."); }
   async function reload(only: typeof view = view, summaryOnly = false) {
     const uid = auth?.currentUser?.uid;
-    const [summary, rows, requests, deviceRows] = await Promise.all([
+    const [summary, rows, requests, deviceRows, update] = await Promise.all([
       !only || only === "dashboard" ? api<Dashboard>("/admin/dashboard") : null,
       !only || (only === "dashboard" && !summaryOnly) || only === "organizations" ? api<Organization[]>("/admin/organizations") : null,
       !only || (only === "dashboard" && !summaryOnly) || only === "access" ? api<LicenseAccessRequest[]>("/admin/access-requests") : null,
       !only || (only === "dashboard" && !summaryOnly) || only === "devices" ? api<PublicDevice[]>("/admin/devices") : null,
+      only === "updates" ? api<DesktopUpdatePolicy>("/admin/desktop-update") : null,
     ]);
     if (!uid || auth?.currentUser?.uid !== uid) return;
+    if (update) { setDesktopUpdate(update); setUpdateVersion(update.release?.tag_name.replace(/^v/, "") ?? ""); }
     if (summary) setDashboard(summary); if (rows) setOrganizations(rows); if (requests) setAccessRequests(requests); if (deviceRows) setDevices(deviceRows); setFeedback(""); setVerified(true); setUpdatedAt(Date.now());
   }
   useEffect(() => {
@@ -98,6 +101,7 @@ function Admin() {
     const stop = onAuthStateChanged(auth, next => {
       const current = ++revision;
       setUser(next); setVerified(false); setSecret(""); setDetails(null); setOrganizations([]); setDashboard(null); setSelected(""); setDevices([]); setAccessRequests([]); setConfirmation(null); setUpdatedAt(0);
+      setDesktopUpdate(null); setUpdateVersion("");
       if (next) reload().catch(error => { if (current === revision) setFeedback(error.message); });
     });
     return () => { revision++; stop(); };
@@ -153,8 +157,16 @@ function Admin() {
     <header className="admin-header"><div className="admin-brand"><img src={logo} alt="" /><strong>Nodus Admin</strong></div>{user && <details className="admin-account"><summary><span className="avatar">{(user.displayName ?? user.email ?? "A").slice(0, 1).toUpperCase()}</span><span><strong>{user.displayName ?? user.email}</strong><small>{verified ? "Administrador" : "Acesso não verificado"}</small></span><ChevronDown size={18} /></summary><div className="account-menu"><small>{user.email}</small><button className="danger" onClick={() => run(async () => { await signOut(auth!); })} disabled={busy}><LogOut size={17} />Sair da conta</button></div></details>}</header>
     {!verified ? <main className="admin-login"><ShieldCheck size={32} /><h1>Nodus Admin</h1>{!configured ? <p>Administração indisponível.</p> : <button disabled={busy} onClick={() => run(async () => { await persistence; if (auth!.currentUser) await reload(); else await signInWithPopup(auth!, provider); })}><ShieldCheck size={18} />{user ? "Verificar acesso" : "Entrar com Google"}</button>}{feedback && <p role="alert">{feedback}</p>}</main> : <>
       <nav className="admin-nav" aria-label="Administração">{ADMIN_VIEWS.map(({ id, label, icon: Icon }) => <button key={id} disabled={busy} className={view === id ? "active" : ""} aria-current={view === id ? "page" : undefined} onClick={() => navigate(id)}><Icon size={18} /><span>{label}</span>{id === "access" && pendingRequests.length > 0 && <span className="nav-badge">{pendingRequests.length}</span>}</button>)}<div className="nav-footer"><ShieldCheck size={14} />Administração Nodus</div></nav>
-      <main className="admin-main" aria-busy={busy}><div className="page-title"><div>{view === "organizations" && organization && <button className="text-action back-action" disabled={busy} onClick={() => { setSelected(""); setDetails(null); setSecret(""); setPage(1); }}><ArrowLeft size={16} />Empresas</button>}<h1 id="company-heading" tabIndex={-1}>{view === "organizations" && organization ? organization.name : { dashboard: "Visão geral", access: "Solicitações", devices: "Dispositivos", organizations: "Empresas" }[view]}</h1><p>{view === "organizations" && organization ? organization.email : { dashboard: "Resumo do ambiente Nodus Connect", access: "Pedidos de acessos adicionais e histórico de decisões", devices: "Disponibilidade e permissões dos dispositivos registrados", organizations: "Licenças, dispositivos e assinaturas empresariais" }[view]}</p></div><div className="refresh-tools">{updatedAt > 0 && <small>Última consulta {new Date(updatedAt).toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" })}</small>}<button className="icon-button" title="Atualizar" aria-label="Atualizar" disabled={busy} onClick={() => run(refresh)}><RefreshCw size={17} className={refreshing ? "spinning" : ""} /></button></div></div>
+      <main className="admin-main" aria-busy={busy}><div className="page-title"><div>{view === "organizations" && organization && <button className="text-action back-action" disabled={busy} onClick={() => { setSelected(""); setDetails(null); setSecret(""); setPage(1); }}><ArrowLeft size={16} />Empresas</button>}<h1 id="company-heading" tabIndex={-1}>{view === "organizations" && organization ? organization.name : { dashboard: "Visão geral", access: "Solicitações", devices: "Dispositivos", organizations: "Empresas", updates: "Atualizações" }[view]}</h1><p>{view === "organizations" && organization ? organization.email : { dashboard: "Resumo do ambiente Nodus Connect", access: "Pedidos de acessos adicionais e histórico de decisões", devices: "Disponibilidade e permissões dos dispositivos registrados", organizations: "Licenças, dispositivos e assinaturas empresariais", updates: "Distribuição do Nodus Connect" }[view]}</p></div><div className="refresh-tools">{updatedAt > 0 && <small>Última consulta {new Date(updatedAt).toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" })}</small>}<button className="icon-button" title="Atualizar" aria-label="Atualizar" disabled={busy} onClick={() => run(refresh)}><RefreshCw size={17} className={refreshing ? "spinning" : ""} /></button></div></div>
         {feedback && <p className="admin-feedback" role="status">{feedback}</p>}
+        {view === "updates" && <section className="data-section"><div className="section-heading"><h2>Atualização na próxima abertura</h2><span className={`status ${desktopUpdate?.enabled ? "status-active" : "status-suspended"}`}><i aria-hidden="true" />{desktopUpdate?.enabled ? "Liberada" : "Pausada"}</span></div>{desktopUpdate ? <>
+          <dl className="company-summary"><div><dt>Destino</dt><dd>Todos os usuários</dd></div><div><dt>Versão liberada</dt><dd>{desktopUpdate.release?.tag_name.replace(/^v/, "") ?? "Nenhuma"}</dd></div><div><dt>Última alteração</dt><dd>{desktopUpdate.updatedAt ? date(desktopUpdate.updatedAt) : "Nenhuma"}</dd></div></dl>
+          <form className="license-form" onSubmit={event => { event.preventDefault(); confirmAction("Liberar atualização", `Instalar a versão ${updateVersion.trim()} na próxima abertura do Nodus de todos os usuários?`, () => mutate("/admin/desktop-update", { enabled: true, version: updateVersion.trim() })); }}>
+            <label>Versão publicada<input required pattern="[0-9]{1,5}\.[0-9]{1,5}\.[0-9]{1,5}" maxLength={17} placeholder="1.1.16" value={updateVersion} disabled={busy} onChange={event => setUpdateVersion(event.target.value)} /></label>
+            <button type="submit" disabled={busy || !updateVersion.trim()}><Download size={16} />Liberar para todos</button>
+            <button type="button" className="danger" disabled={busy || !desktopUpdate.enabled} onClick={() => confirmAction("Pausar atualização", "Suspender novas instalações automáticas desta versão?", () => mutate("/admin/desktop-update", { enabled: false }))}><Ban size={16} />Pausar distribuição</button>
+          </form>
+        </> : <p className="empty-state">{busy ? "Carregando atualização..." : "Atualização indisponível. Tente atualizar a consulta."}</p>}</section>}
         {view === "dashboard" && dashboard && <>
           <dl className="summary-grid">{[{ label: "Empresas", value: dashboard.organizations, icon: Building2 }, { label: "Licenças ativas", value: dashboard.active, icon: Users }, { label: "Dispositivos", value: dashboard.devices, icon: Laptop }, { label: "Receita mensal", value: money(dashboard.mrrCents), icon: DollarSign }].map(({ label, value, icon: Icon }) => <div key={label}><dt>{label}</dt><dd><span className={`summary-icon${label === "Receita mensal" ? " revenue" : ""}`}><Icon size={30} /></span>{value}</dd></div>)}</dl>
           <div className="dashboard-panels"><section className="data-section"><div className="section-heading"><h2>Solicitações pendentes</h2><button className="text-action" onClick={() => navigate("access")}>Ver todas <ArrowRight size={16} /></button></div>{requestsTable(true)}</section><section className="data-section"><div className="section-heading"><h2>Dispositivos recentes</h2><button className="text-action" onClick={() => navigate("devices")}>Ver todos <ArrowRight size={16} /></button></div>{devicesTable(true)}</section></div>
