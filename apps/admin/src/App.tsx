@@ -69,6 +69,7 @@ function Admin() {
   const [confirmation, setConfirmation] = useState<{ title: string; message: string; action: () => Promise<void> } | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [desktopUpdate, setDesktopUpdate] = useState<DesktopUpdatePolicy | null>(null), [updateVersion, setUpdateVersion] = useState("");
+  const [updateVersions, setUpdateVersions] = useState<string[]>([]);
   const paymentAttempts = useRef(new Map<string, string>());
   const grantAttempts = useRef(new Map<string, string>());
   const organization = organizations.find(item => item.licenseId === selected);
@@ -84,16 +85,17 @@ function Admin() {
   async function copy(value: string) { await navigator.clipboard.writeText(value); setFeedback("Copiado para a área de transferência."); }
   async function reload(only: typeof view = view, summaryOnly = false) {
     const uid = auth?.currentUser?.uid;
-    const [summary, rows, requests, deviceRows, update] = await Promise.all([
+    const [summary, rows, requests, deviceRows, update, releases] = await Promise.all([
       !only || only === "dashboard" ? api<Dashboard>("/admin/dashboard") : null,
       !only || (only === "dashboard" && !summaryOnly) || only === "organizations" ? api<Organization[]>("/admin/organizations") : null,
       !only || (only === "dashboard" && !summaryOnly) || only === "access" ? api<LicenseAccessRequest[]>("/admin/access-requests") : null,
       !only || (only === "dashboard" && !summaryOnly) || only === "devices" ? api<PublicDevice[]>("/admin/devices") : null,
       only === "updates" ? api<DesktopUpdatePolicy>("/admin/desktop-update") : null,
+      only === "updates" ? api<string[]>("/admin/desktop-releases").then(versions => ({ versions, error: "" }), error => ({ versions: [] as string[], error: error.message as string })) : null,
     ]);
     if (!uid || auth?.currentUser?.uid !== uid) return;
-    if (update) { setDesktopUpdate(update); setUpdateVersion(update.release?.tag_name.replace(/^v/, "") ?? ""); }
-    if (summary) setDashboard(summary); if (rows) setOrganizations(rows); if (requests) setAccessRequests(requests); if (deviceRows) setDevices(deviceRows); setFeedback(""); setVerified(true); setUpdatedAt(Date.now());
+    if (update && releases) { const version = update.release?.tag_name.replace(/^v/, "") ?? ""; setDesktopUpdate(update); setUpdateVersions(releases.versions); setUpdateVersion(releases.versions.includes(version) ? version : ""); }
+    if (summary) setDashboard(summary); if (rows) setOrganizations(rows); if (requests) setAccessRequests(requests); if (deviceRows) setDevices(deviceRows); setFeedback(releases?.error ?? ""); setVerified(true); setUpdatedAt(Date.now());
   }
   useEffect(() => {
     if (!auth) return;
@@ -101,7 +103,7 @@ function Admin() {
     const stop = onAuthStateChanged(auth, next => {
       const current = ++revision;
       setUser(next); setVerified(false); setSecret(""); setDetails(null); setOrganizations([]); setDashboard(null); setSelected(""); setDevices([]); setAccessRequests([]); setConfirmation(null); setUpdatedAt(0);
-      setDesktopUpdate(null); setUpdateVersion("");
+      setDesktopUpdate(null); setUpdateVersion(""); setUpdateVersions([]);
       if (next) reload().catch(error => { if (current === revision) setFeedback(error.message); });
     });
     return () => { revision++; stop(); };
@@ -162,8 +164,8 @@ function Admin() {
         {view === "updates" && <section className="data-section"><div className="section-heading"><h2>Atualização na próxima abertura</h2><span className={`status ${desktopUpdate?.enabled ? "status-active" : "status-suspended"}`}><i aria-hidden="true" />{desktopUpdate?.enabled ? "Liberada" : "Pausada"}</span></div>{desktopUpdate ? <>
           <dl className="company-summary"><div><dt>Destino</dt><dd>Todos os usuários</dd></div><div><dt>Versão liberada</dt><dd>{desktopUpdate.release?.tag_name.replace(/^v/, "") ?? "Nenhuma"}</dd></div><div><dt>Última alteração</dt><dd>{desktopUpdate.updatedAt ? date(desktopUpdate.updatedAt) : "Nenhuma"}</dd></div></dl>
           <form className="license-form" onSubmit={event => { event.preventDefault(); confirmAction("Liberar atualização", `Instalar a versão ${updateVersion.trim()} na próxima abertura do Nodus de todos os usuários?`, () => mutate("/admin/desktop-update", { enabled: true, version: updateVersion.trim() })); }}>
-            <label>Versão publicada<input required pattern="[0-9]{1,5}\.[0-9]{1,5}\.[0-9]{1,5}" maxLength={17} placeholder="1.1.16" value={updateVersion} disabled={busy} onChange={event => setUpdateVersion(event.target.value)} /></label>
-            <button type="submit" disabled={busy || !updateVersion.trim()}><Download size={16} />Liberar para todos</button>
+            <label>Versão publicada<select required value={updateVersion} disabled={busy || !updateVersions.length} onChange={event => setUpdateVersion(event.target.value)}><option value="">{updateVersions.length ? "Selecione uma versão" : "Nenhuma versão disponível"}</option>{updateVersions.map(version => <option key={version} value={version}>{version}</option>)}</select></label>
+            <button type="submit" disabled={busy || !updateVersions.includes(updateVersion)}><Download size={16} />Liberar para todos</button>
             <button type="button" className="danger" disabled={busy || !desktopUpdate.enabled} onClick={() => confirmAction("Pausar atualização", "Suspender novas instalações automáticas desta versão?", () => mutate("/admin/desktop-update", { enabled: false }))}><Ban size={16} />Pausar distribuição</button>
           </form>
         </> : <p className="empty-state">{busy ? "Carregando atualização..." : "Atualização indisponível. Tente atualizar a consulta."}</p>}</section>}

@@ -32,7 +32,30 @@ function audit(tx: LicenseTransaction, actor: Actor, action: string, licenseId: 
 
 export class LicenseEngine {
   private desktopUpdateCache?: { expiresAt: number; value: Promise<DesktopUpdatePolicy> };
+  private desktopReleasesCache?: { expiresAt: number; value: Promise<string[]> };
   constructor(private readonly store: LicenseStore, private readonly pepper: string, private readonly signingKey: string, private readonly now = () => Date.now()) { secretHash("configuration-check", pepper); }
+
+  async desktopReleases(actor: Actor, fetchReleases = fetch): Promise<string[]> {
+    requireAdmin(actor);
+    if (this.desktopReleasesCache && this.desktopReleasesCache.expiresAt > this.now()) return this.desktopReleasesCache.value;
+    const value = (async () => {
+      try {
+        const response = await fetchReleases("https://api.github.com/repos/Kaueeteixeiraa/nodus-connect/releases?per_page=100", { headers: { Accept: "application/vnd.github+json", "User-Agent": "Nodus-Connect" }, signal: AbortSignal.timeout(8000) });
+        if (!response.ok) throw new Error("RELEASES_UNAVAILABLE");
+        const releases = await response.json();
+        if (!Array.isArray(releases)) throw new Error("INVALID_RELEASES");
+        const versions = new Set<string>();
+        for (const release of releases) {
+          try { const update = desktopUpdates.updateRelease(release, "0.0.0"); if (update.available) versions.add(update.version); } catch { /* Ignore releases without a verified stable installer. */ }
+        }
+        return [...versions].sort((a, b) => b.localeCompare(a, "en", { numeric: true }));
+      } catch { throw new LicenseError("SERVER_UNAVAILABLE"); }
+    })();
+    const entry = { expiresAt: this.now() + 60_000, value };
+    this.desktopReleasesCache = entry;
+    value.catch(() => { if (this.desktopReleasesCache === entry) this.desktopReleasesCache = undefined; });
+    return value;
+  }
 
   async desktopUpdatePolicy(cached = false): Promise<DesktopUpdatePolicy> {
     if (cached && this.desktopUpdateCache && this.desktopUpdateCache.expiresAt > this.now()) return this.desktopUpdateCache.value;

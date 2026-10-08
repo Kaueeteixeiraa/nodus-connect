@@ -47,6 +47,30 @@ describe("desktop update distribution", () => {
   const version = "1.1.16";
   const release = { tag_name: `v${version}`, assets: [{ name: `Nodus-Connect-Setup-${version}.exe`, browser_download_url: `https://github.com/Kaueeteixeiraa/nodus-connect/releases/download/v${version}/Nodus-Connect-Setup-${version}.exe`, digest: `sha256:${"a".repeat(64)}`, size: 100 }] };
   const fetchRelease = () => vi.fn<typeof fetch>(async () => new Response(JSON.stringify(release)));
+  test("lists only verified stable installers in descending version order without database reads", async () => {
+    const f = await fixture(), transaction = vi.spyOn(f.store, "transaction");
+    const older = JSON.parse(JSON.stringify(release).replaceAll(version, "1.1.9"));
+    const newer = JSON.parse(JSON.stringify(release).replaceAll(version, "1.1.100"));
+    const network = vi.fn<typeof fetch>(async () => new Response(JSON.stringify([older, { ...release, draft: true }, { ...release, prerelease: true }, { ...release, assets: [] }, null, release, newer, release])));
+    await expect(f.engine.desktopReleases(f.actor, network)).rejects.toMatchObject({ code: "FORBIDDEN" });
+    expect(network).not.toHaveBeenCalled();
+    const expected = ["1.1.100", version, "1.1.9"];
+    expect(await Promise.all([f.engine.desktopReleases(admin, network), f.engine.desktopReleases(admin, network)])).toEqual([expected, expected]);
+    expect(network).toHaveBeenCalledTimes(1);
+    await expect(f.engine.desktopReleases(f.actor, network)).rejects.toMatchObject({ code: "FORBIDDEN" });
+    f.advance(60_001); await f.engine.desktopReleases(admin, network);
+    expect(network).toHaveBeenCalledTimes(2);
+    expect(transaction).not.toHaveBeenCalled();
+  });
+  test.each(["network", "rate-limit", "invalid-json", "invalid-list"])("release listing recovers after %s failures", async mode => {
+    const f = await fixture(), network = fetchRelease();
+    if (mode === "network") network.mockRejectedValueOnce(new Error("offline"));
+    else network.mockResolvedValueOnce(new Response(mode === "invalid-json" ? "invalid" : JSON.stringify(mode === "invalid-list" ? {} : []), { status: mode === "rate-limit" ? 403 : 200 }));
+    await expect(f.engine.desktopReleases(admin, network)).rejects.toMatchObject({ code: "SERVER_UNAVAILABLE" });
+    network.mockResolvedValueOnce(new Response(JSON.stringify([release])));
+    await expect(f.engine.desktopReleases(admin, network)).resolves.toEqual([version]);
+    expect(network).toHaveBeenCalledTimes(2);
+  });
   test("only a recently authenticated admin can release a verified official installer", async () => {
     const f = await fixture(), network = fetchRelease();
     await expect(f.engine.publishDesktopUpdate(f.actor, true, version, network)).rejects.toMatchObject({ code: "FORBIDDEN" });
