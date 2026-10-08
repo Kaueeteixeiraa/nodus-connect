@@ -70,10 +70,6 @@ export async function reserveLicense(identity: LocalIdentity, targetNodusId: str
   const offline = prepared.get(targetNodusId);
   if (!supportProfileId && offline?.anchor.valid(offline.sessionId, identity.deviceId)) { prepared.delete(targetNodusId); reserved.add(offline.sessionId); return offline.sessionId; }
   prepared.delete(targetNodusId);
-  const info = await checkLicense(identity);
-  if (info.code === "DEVICE_REVOKED") throw new LicenseError("DEVICE_REVOKED");
-  const policy = await request<LicensePolicy>("/license/policy", undefined, false);
-  if (typeof policy.enforced !== "boolean") throw new LicenseError("SERVER_UNAVAILABLE");
   const sessionId = crypto.randomUUID();
   const reservation = await request<{ sessionId: string }>("/license/sessions/reserve", { ...await device(identity), sessionId, targetNodusId, ...(supportProfileId ? { supportProfileId, supportPassword } : {}) });
   if (reservation.sessionId !== sessionId) throw new LicenseError("SERVER_UNAVAILABLE"); reserved.add(sessionId); return sessionId;

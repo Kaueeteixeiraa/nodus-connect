@@ -9,13 +9,13 @@ import { createContext, runInContext, runInNewContext } from "node:vm";
 import ts from "typescript";
 import * as React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { Activity, ArrowRight, Gauge, Monitor, UserRound } from "lucide-react";
+import { Activity, ArrowRight, Gauge, Grid2X2, List, Monitor, Search, UserRound } from "lucide-react";
 import { afterEach, expect, test, vi } from "vitest";
 import { translateText } from "../apps/desktop/src/core/localization";
 import { advanceStage, assessQuality, DESKTOP_VIDEO_POLICY, nativeVideoBitrate, nextBitrate, STAGE_LIMITS } from "../apps/desktop/src/core/adaptive-quality";
 import { LicenseError, LICENSE_MESSAGES } from "../packages/licensing/src/index";
 import { mapVideoPointer } from "../apps/desktop/src/core/remote-cursor";
-import { normalizeNodusId } from "../packages/common/src/nodusId";
+import { formatNodusId, normalizeNodusId } from "../packages/common/src/nodusId";
 
 const { RemoteWindowsKeys, keyboardInput } = createRequire(import.meta.url)("../apps/desktop/electron/remote-windows-keys.cjs");
 const managers: any[] = [];
@@ -210,12 +210,14 @@ test("dynamic translation keeps user names, paths, versions and progress intact"
   expect(translateText("Enviando 75%", "ru-RU")).toContain("75%");
 });
 
-test("release notes describe the current main-window session in every language", () => {
+test("header has no release notes while settings retain automatic updates and incoming notifications", () => {
   const source = readFileSync("apps/desktop/src/App.tsx", "utf8");
-  expect(source).not.toContain('"Acesso remoto aberto em janela própria."');
-  for (const language of ["en-US", "ru-RU", "ja-JP"] as const) {
-    expect(translateText("A sessão atual utiliza a janela principal do Nodus.", language)).not.toBe("A sessão atual utiliza a janela principal do Nodus.");
-  }
+  expect(source).not.toContain("release-notifications");
+  expect(source).not.toContain("releaseNotes");
+  expect(source).not.toContain('aria-label="Notas das versões"');
+  expect(source).toContain("onClick={checkForUpdates}");
+  expect(source).toContain("window.nodusDesktop?.checkForUpdates()");
+  expect(source).toContain('label="Notificar pedidos recebidos"');
 });
 
 test("catalog and favorites use different labels without changing removal callbacks", () => {
@@ -350,8 +352,33 @@ function uiFunction(name: string, context = {}, file = "apps/desktop/src/App.tsx
   visit(source);
   if (!node) throw new Error(`UI function missing: ${name}`);
   const code = ts.transpileModule(`${ts.isVariableDeclaration(node) ? "const " : ""}${node.getText(source)}`, { fileName: file.endsWith(".cjs") ? "fixture.ts" : file, compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.React } }).outputText;
+  for (const [key, value] of Object.entries({ payloadWrapper: "", payloadMetadata: undefined, logConnectionPhase: vi.fn(), connectionTimingsRef: { current: new Map() } })) {
+    if (!(key in context)) Object.assign(context, { [key]: value });
+  }
   return runInNewContext(`${code};${name}`, context);
 }
+
+test.each([
+  ["", "all", ["host", "987654321", "111222333"]],
+  ["  cLiEnTe  ", "all", ["987654321"]],
+  ["CAIXA", "all", ["987654321"]],
+  ["111222", "all", ["111222333"]],
+  ["cliente", "online", ["987654321"]],
+  ["cliente", "offline", []],
+  ["filial", "offline", ["111222333"]],
+  ["inexistente", "all", []],
+] as const)("device search %s combines name, alias and ID with %s filter", (query, filter, expected) => {
+  const state: unknown[] = [filter, "grid", query];
+  const Devices = uiFunction("Devices", { React, Grid2X2, List, Search, formatNodusId, currentLocale: () => "pt-BR", navigateUiTabs: vi.fn(),
+    useState: () => [state.shift(), vi.fn()], DeviceCard: ({ current, item }: any) => React.createElement("article", { "data-device-id": current ? "host" : item.nodusId }) });
+  const markup = renderToStaticMarkup(Devices({ identity: { deviceName: "Tecnico", nodusId: "123456789" }, items: [
+    { nodusId: "987654321", deviceName: "Cliente", alias: "Caixa", status: "online" },
+    { nodusId: "111222333", deviceName: "Filial", status: "offline" },
+  ], favorites: [], onConnect: vi.fn(), onDeleteDevice: vi.fn(), onRenameDevice: vi.fn(), onToggleFavorite: vi.fn() }));
+  expect([...markup.matchAll(/data-device-id="([^"]+)"/g)].map(match => match[1])).toEqual(expected);
+  expect(markup).toContain('placeholder="Buscar dispositivos..."');
+  expect(markup.includes("Nenhum dispositivo encontrado.")).toBe(expected.length === 0);
+});
 
 const updateMain = "apps/desktop/electron/main.cjs";
 function releaseFixture(version = "1.1.11") {
@@ -497,6 +524,157 @@ test.each([true, false])("host activity never leaves both viewer cursors hidden 
   expect(cursor.style.opacity === "1" || surface.style.cursor === "default").toBe(true);
   expect(cursor.style.opacity).toBe(visible ? "1" : "0");
   expect(surface.dataset.physicalViewerCursorHidden).toBe(String(visible));
+});
+
+test("host cursor maps to the video, rejects stale samples and yields back to local movement", () => {
+  const video = { videoWidth: 1920, videoHeight: 1080, getBoundingClientRect: () => ({ left: 0, top: 0, width: 1000, height: 800 }) };
+  const surface = { style: { cursor: "none" }, dataset: { viewScale: "fit" }, clientLeft: 0, clientTop: 0, scrollLeft: 0, scrollTop: 0,
+    getBoundingClientRect: () => ({ left: 0, top: 0 }), querySelector: () => video };
+  const cursor = { style: { opacity: "0", transform: "" } };
+  const videoPoint = uiFunction("videoPoint", { mapVideoPointer });
+  const hostCursorPoint = uiFunction("hostCursorPoint", { videoPoint });
+  expect(hostCursorPoint(surface, { x: 0.5, y: 0.5 })).toMatchObject({ left: 500, top: 400 });
+  expect(hostCursorPoint(surface, { x: Infinity, y: 0.5 })).toBeNull();
+  const context = { localCursorRef: { current: cursor }, viewerSurfaceRef: { current: surface }, hostCursorSampleRef: { current: -Infinity }, performance: { now: () => 0 } };
+  const hideLocalCursor = uiFunction("hideLocalCursor", context), yieldCursorToHost = uiFunction("yieldCursorToHost", { ...context, hideLocalCursor });
+  const show = uiFunction("showHostCursor", { ...context, hostCursorPoint, hideLocalCursor, yieldCursorToHost });
+  show({ x: 0.5, y: 0.5, visible: true, sampleAt: 20 });
+  expect(cursor.style.transform).toBe("translate3d(500px, 400px, 0)");
+  expect(surface.dataset).toMatchObject({ cursorOwner: "host", localCursorOverlay: "false" });
+  show({ x: 0.1, y: 0.1, visible: true, sampleAt: 10 });
+  expect(cursor.style.transform).toBe("translate3d(500px, 400px, 0)");
+  const move = uiFunction("moveLocalCursor", { ...context, videoPoint, hideLocalCursor });
+  move(surface, { clientX: 600, clientY: 400, timeStamp: 0 });
+  expect(surface.dataset).toMatchObject({ cursorOwner: "viewer", localCursorOverlay: "true" });
+  expect(cursor.style.opacity).toBe("1");
+  show({ visible: false, sampleAt: 30 });
+  expect(cursor.style.opacity).toBe("0");
+  expect(hostCursorPoint(surface, { x: -1, y: 0 })).toBeNull();
+});
+
+test("host mouse positions use the shared monitor and drop congested telemetry without signaling reads", () => {
+  const channel = { readyState: "open", bufferedAmount: 0, send: vi.fn() };
+  const broadcast = uiFunction("broadcastHostMouseActivity", { sessionsRef: { current: [{ session: { sessionId: "s", role: "host", permissions: ["screen:view"] } }] },
+    auxiliaryChannel: () => channel, nativeHostDisplaysRef: { current: new Map([["s", "secondary"]]) }, settings: { preferredDisplayId: "primary" },
+    captureSources: [{ id: "primary", displayId: "1" }, { id: "secondary", displayId: "2" }], pointerSequencesRef: { current: new Map([["s", 12]]) }, performance: { now: () => 100 } });
+  const positions = [{ displayId: "1", x: 1.2, y: 0.1, visible: false }, { displayId: "2", x: 0.2, y: 0.3, visible: true }];
+  broadcast(positions);
+  expect(JSON.parse(channel.send.mock.calls[0][0])).toMatchObject({ type: "host-mouse-activity", x: 0.2, y: 0.3, visible: true, inputSequence: 12 });
+  channel.bufferedAmount = 2049;
+  broadcast(positions);
+  expect(channel.send).toHaveBeenCalledOnce();
+});
+
+test("late host cursor telemetry cannot take ownership after a newer viewer movement", () => {
+  const dispatchEvent = vi.fn(), channel: any = { label: "telemetry" };
+  const context = { telemetryChannelsRef: { current: new Map() }, pointerSequencesRef: { current: new Map([["s", 12]]) },
+    window: { dispatchEvent }, CustomEvent: class { constructor(public type: string, public options: any) {} }, updateRuntime: vi.fn() };
+  uiFunction("attachViewerControl", context)("s", channel, true);
+  channel.onmessage({ data: JSON.stringify({ type: "host-mouse-activity", inputSequence: 11, x: 0.1, y: 0.1 }) });
+  expect(dispatchEvent).not.toHaveBeenCalled();
+  channel.onmessage({ data: JSON.stringify({ type: "host-mouse-activity", inputSequence: 12, x: 0.4, y: 0.5 }) });
+  expect(dispatchEvent).toHaveBeenCalledOnce();
+});
+
+test("saved connection passwords are reused from recents without being deleted or clearing the field", async () => {
+  const device = { nodusId: "987654321", deviceName: "Cliente", status: "online" };
+  const save = vi.fn(async () => ({ ok: true })), reserveLicense = vi.fn(async () => undefined), setTargetPassword = vi.fn();
+  const context = { supportProfile: null, normalizeNodusId, formatNodusId, identity: { nodusId: "123456789", deviceName: "Tecnico" },
+    crypto, rememberTargetPassword: false, targetPasswordLookupRef: { current: 0 }, window: { nodusDesktop: { getConnectionPassword: vi.fn(async () => "saved-example"), saveConnectionPassword: save } },
+    setTargetId: vi.fn(), setTargetPassword, setRememberTargetPassword: vi.fn(), setFeedback: vi.fn(), iceWarmupRef: { current: null }, settings: { coordinationUrl: "", preferredResolution: "native", maxFps: 60 },
+    fetchIceServers: async () => [], setServerIceServers: vi.fn(), lookupDevice: async () => device, setRecents: vi.fn(), saveRecent: (value: unknown) => [value], setHiddenCatalogDevices: vi.fn(), loadHiddenCatalogDevices: () => [],
+    reserveLicense, createSessionRequest: vi.fn(async () => ({ id: "request", sessionId: "session" })), currentUser: null, hashPassword: async (value: string) => `hash:${value}`, recordAccess: vi.fn(), setOutgoingRequest: vi.fn(),
+    LicenseError, licenseFeedback: vi.fn(), licenseEnded: vi.fn(), scheduleConnectionReset: vi.fn() };
+  const persistConnectionPassword = uiFunction("persistConnectionPassword", context);
+  const connect = uiFunction("connectToDevice", { ...context, persistConnectionPassword });
+  await connect("987 654 321");
+  expect(reserveLicense).toHaveBeenCalledWith(context.identity, "987654321", undefined, "saved-example");
+  expect(context.createSessionRequest.mock.calls[0][0]).toMatchObject({ passwordHash: "hash:saved-example" });
+  expect(setTargetPassword).toHaveBeenLastCalledWith("saved-example");
+  expect(save).not.toHaveBeenCalledWith("987654321", "");
+  await connect("987654321", "typed-example");
+  expect(reserveLicense).toHaveBeenLastCalledWith(context.identity, "987654321", undefined, "typed-example");
+  expect(save).not.toHaveBeenCalledWith("987654321", "");
+  expect(context.scheduleConnectionReset).not.toHaveBeenCalled();
+});
+
+test("connection reset clears only temporary fields after five seconds", async () => {
+  vi.useFakeTimers();
+  const context = { connectionResetTimerRef: { current: null as ReturnType<typeof setTimeout> | null }, targetPasswordLookupRef: { current: 0 }, outgoingRequestRef: { current: null as any },
+    window: { setTimeout, clearTimeout }, setTargetId: vi.fn(), setTargetPassword: vi.fn(), setRememberTargetPassword: vi.fn(), setFeedback: vi.fn(), setConnectionFormVersion: vi.fn(), persistConnectionPassword: vi.fn() };
+  const reset = uiFunction("scheduleConnectionReset", context);
+  reset();
+  await vi.advanceTimersByTimeAsync(4_999);
+  expect(context.setTargetId).not.toHaveBeenCalled();
+  await vi.advanceTimersByTimeAsync(1);
+  expect(context.setTargetId).toHaveBeenCalledExactlyOnceWith("");
+  expect(context.setTargetPassword).toHaveBeenCalledExactlyOnceWith("");
+  expect(context.setRememberTargetPassword).toHaveBeenCalledExactlyOnceWith(false);
+  expect(context.setFeedback).toHaveBeenCalledExactlyOnceWith("");
+  expect(context.setConnectionFormVersion.mock.calls[0][0](4)).toBe(5);
+  expect(context.persistConnectionPassword).not.toHaveBeenCalled();
+  expect(context.targetPasswordLookupRef.current).toBe(1);
+});
+
+test("connection reset preserves new edits and pending requests and restarts its deadline", async () => {
+  vi.useFakeTimers();
+  const context = { connectionResetTimerRef: { current: null as ReturnType<typeof setTimeout> | null }, targetPasswordLookupRef: { current: 0 }, outgoingRequestRef: { current: null as any },
+    window: { setTimeout, clearTimeout }, setTargetId: vi.fn(), setTargetPassword: vi.fn(), setRememberTargetPassword: vi.fn(), setFeedback: vi.fn(), setConnectionFormVersion: vi.fn() };
+  const reset = uiFunction("scheduleConnectionReset", context);
+  reset();
+  uiFunction("updateTargetPassword", context)("new-password");
+  await vi.advanceTimersByTimeAsync(5_000);
+  expect(context.setTargetId).not.toHaveBeenCalled();
+  reset(); context.outgoingRequestRef.current = { id: "pending" };
+  await vi.advanceTimersByTimeAsync(5_000);
+  expect(context.setTargetId).not.toHaveBeenCalled();
+  context.outgoingRequestRef.current = null;
+  reset(); await vi.advanceTimersByTimeAsync(4_000); reset();
+  await vi.advanceTimersByTimeAsync(4_999);
+  expect(context.setTargetId).not.toHaveBeenCalled();
+  reset(0);
+  await vi.advanceTimersByTimeAsync(1);
+  expect(context.setTargetId).toHaveBeenCalledExactlyOnceWith("");
+});
+
+test.each(["", "123456789", "987654321"])("failed connection %s schedules form cleanup without creating a request", async target => {
+  const scheduleConnectionReset = vi.fn(), setFeedback = vi.fn(), createSessionRequest = vi.fn();
+  const connect = uiFunction("connectToDevice", { supportProfile: null, targetPasswordLookupRef: { current: 0 }, normalizeNodusId, identity: { nodusId: "123456789" },
+    crypto, rememberTargetPassword: false, setFeedback, scheduleConnectionReset, iceWarmupRef: { current: null }, settings: { coordinationUrl: "" },
+    fetchIceServers: async () => [], setServerIceServers: vi.fn(), lookupDevice: async () => null, createSessionRequest });
+  await connect(target, "");
+  expect(setFeedback).toHaveBeenCalled();
+  expect(scheduleConnectionReset).toHaveBeenCalledOnce();
+  expect(createSessionRequest).not.toHaveBeenCalled();
+});
+
+test("disconnect resets its connection form but never another target or an incoming session", () => {
+  const context = { sessionsRef: { current: [{ session: { sessionId: "s", role: "viewer", remoteNodusId: "987654321" } }] },
+    targetId: "987 654 321", normalizeNodusId, outgoingRequestRef: { current: null }, logDiagnostic: vi.fn(), cleanupSession: vi.fn(), removeRuntime: vi.fn(), scheduleConnectionReset: vi.fn() };
+  uiFunction("endSession", context)("s", false);
+  expect(context.scheduleConnectionReset).toHaveBeenCalledOnce();
+  context.scheduleConnectionReset.mockClear(); context.targetId = "111 222 333";
+  uiFunction("endSession", context)("s", false);
+  context.targetId = "987 654 321"; context.sessionsRef.current[0].session.role = "host";
+  uiFunction("endSession", context)("s", false);
+  expect(context.scheduleConnectionReset).not.toHaveBeenCalled();
+});
+
+test("editing a target password cancels old lookups and only explicit unchecking removes the saved password", async () => {
+  let resolve: (value: string) => void = () => {};
+  const loaded = new Promise<string>(done => { resolve = done; }), setTargetPassword = vi.fn(), persistConnectionPassword = vi.fn();
+  const context = { targetId: "", targetPassword: "typed-example", targetPasswordLookupRef: { current: 0 }, normalizeNodusId, formatNodusId,
+    setTargetId: vi.fn(), setTargetPassword, setRememberTargetPassword: vi.fn(), window: { nodusDesktop: { getConnectionPassword: () => loaded } }, persistConnectionPassword };
+  uiFunction("updateTargetId", context)("987654321");
+  uiFunction("updateTargetPassword", context)("typed-example");
+  resolve("old-saved-example"); await loaded;
+  expect(setTargetPassword).toHaveBeenLastCalledWith("typed-example");
+  context.targetId = "987 654 321";
+  const remember = uiFunction("updateRememberTargetPassword", context);
+  remember(true);
+  expect(persistConnectionPassword).toHaveBeenLastCalledWith("987654321", "typed-example");
+  remember(false);
+  expect(persistConnectionPassword).toHaveBeenLastCalledWith("987654321", "");
 });
 
 test("unsupported receiver latency hints do not prevent video reception", () => {
@@ -694,10 +872,12 @@ test("Firebase sessions bypass both request polling effects and dispose signal l
 test("acceptance synchronization starts once and a late pending snapshot cannot restore the request", async () => {
   const request = { id: "pending", sessionId: "session", status: "accepted", targetNodusId: "987654321" };
   const outgoingRequestRef = { current: { id: request.id } as any }, startViewerSession = vi.fn(async () => undefined), recordAccess = vi.fn(), setOutgoingRequest = vi.fn();
-  const update = uiFunction("handleRequestUpdate", { outgoingRequestRef, startViewerSession, recordAccess, setOutgoingRequest, setFeedback: vi.fn() });
+  const scheduleConnectionReset = vi.fn();
+  const update = uiFunction("handleRequestUpdate", { outgoingRequestRef, startViewerSession, recordAccess, setOutgoingRequest, setFeedback: vi.fn(), scheduleConnectionReset });
   update(request); update(request); update({ ...request, status: "pending" });
   expect(startViewerSession).toHaveBeenCalledExactlyOnceWith(request); expect(recordAccess).toHaveBeenCalledOnce(); expect(setOutgoingRequest).toHaveBeenCalledExactlyOnceWith(null);
   expect(outgoingRequestRef.current).toBeNull();
+  expect(scheduleConnectionReset).toHaveBeenCalledOnce();
 });
 
 test("fallback signal polling never overlaps and ignores a late response after close", async () => {
@@ -876,8 +1056,8 @@ test.each(["DEVICE_REVOKED", "SESSION_EXPIRED", "SERVER_UNAVAILABLE"])("licensin
 });
 
 test("remote input IPC is restricted to the main app and renderer cleanup closes the helper pipe", () => {
-  const sender = { getURL: () => "app" }, trusted = uiFunction("isMainAppSender", { mainWindow: { webContents: sender }, isAllowedAppUrl: (url: string) => url === "app" }, "apps/desktop/electron/main.cjs");
-  expect(trusted({ sender })).toBe(true); expect(trusted({ sender: { getURL: () => "app" } })).toBe(false);
+  const sender = { getURL: () => "app", isDestroyed: () => false }, trusted = uiFunction("isMainAppSender", { mainWindow: { isDestroyed: () => false, webContents: sender }, isAllowedAppUrl: (url: string) => url === "app" }, "apps/desktop/electron/main.cjs");
+  expect(trusted({ sender })).toBe(true); expect(trusted({ sender: { getURL: () => "app", isDestroyed: () => false } })).toBe(false);
   sender.getURL = () => "https://external.test"; expect(trusted({ sender })).toBe(false);
   const end = vi.fn(), locks = vi.fn();
   const deactivate = uiFunction("setRemoteControlActive", { remoteControlActive: true, clearTimeout, clearInputLocks: locks, inputHelper: { stdin: { end, writable: true } }, powerSaveBlockerId: -1 }, "apps/desktop/electron/main.cjs");
@@ -886,11 +1066,20 @@ test("remote input IPC is restricted to the main app and renderer cleanup closes
   expect(native).toContain("if (pressedButtons[button]) sendMouseButton(button, false)");
   expect(native).toContain("extendedKeys[key] ? KEYEVENTF_EXTENDEDKEY : 0");
 });
+test("both desktop modes restrict native caption commands to their own Electron process", () => {
+  const child = Object.assign(new EventEmitter(), { stdin: new EventEmitter(), nodusBinaryInput: false });
+  const spawn = vi.fn(() => child);
+  const ensure = uiFunction("ensureInputHelper", { inputHelper: null, process: { platform: "win32", pid: 321 }, fs: { existsSync: () => true },
+    nativeService: "nodus-service.exe", spawn, performanceDiagnostic: null, appendLog: vi.fn() }, "apps/desktop/electron/main.cjs");
+  expect(ensure()).toBe(child);
+  expect(spawn).toHaveBeenCalledWith("nodus-service.exe", ["--input-helper", "321"], expect.objectContaining({ windowsHide: true }));
+  expect(child.nodusBinaryInput).toBe(true);
+});
 
 test("admin loads only the active view and reports timeouts in Portuguese", async () => {
   const api = vi.fn(async (path: string) => path === "/admin/dashboard" ? { devices: 2 } : []);
   const setDashboard = vi.fn(), setFeedback = vi.fn(), setVerified = vi.fn();
-  const reload = uiFunction("reload", { view: "dashboard", auth: { currentUser: { uid: "owner" } }, api, setDashboard, setFeedback, setVerified, setOrganizations: vi.fn(), setAccessRequests: vi.fn(), setDevices: vi.fn() }, "apps/admin/src/App.tsx");
+  const reload = uiFunction("reload", { view: "dashboard", auth: { currentUser: { uid: "owner" } }, api, setDashboard, setFeedback, setVerified, setUpdatedAt: vi.fn(), setOrganizations: vi.fn(), setAccessRequests: vi.fn(), setDevices: vi.fn() }, "apps/admin/src/App.tsx");
   await reload();
   expect(api.mock.calls.map(([path]) => path)).toEqual(["/admin/dashboard", "/admin/organizations", "/admin/access-requests", "/admin/devices"]);
   expect(setDashboard).toHaveBeenCalledExactlyOnceWith({ devices: 2 });
@@ -912,6 +1101,28 @@ test("admin reports a completed mutation even when its follow-up refresh fails",
   const mutate = uiFunction("mutate", { api: vi.fn(async () => ({})), reload: vi.fn().mockRejectedValue(new Error("offline")), view: "devices", selected: "", setDetails: vi.fn(), setFeedback: feedback }, "apps/admin/src/App.tsx");
   await mutate("/admin/device", { deviceId: "device", status: "BLOCKED" });
   expect(feedback).toHaveBeenLastCalledWith("Alteração registrada. Use Atualizar para confirmar os dados.");
+});
+
+test("admin searches formatted IDs and accented names locally and clamps pagination", () => {
+  const matches = uiFunction("matches", {}, "apps/admin/src/App.tsx");
+  expect(matches("123 456 789", "123456789")).toBe(true);
+  expect(matches("kaue", undefined, "Kauê Tecnologia")).toBe(true);
+  expect(matches("ausente", "Empresa")).toBe(false);
+  const rows = Array.from({ length: 23 }, (_, index) => index);
+  const paginate = uiFunction("pageRows", { page: 9, PAGE_SIZE: 10 }, "apps/admin/src/App.tsx");
+  expect(paginate(rows)).toEqual([20, 21, 22]);
+  expect(paginate([])).toEqual([]);
+});
+
+test("admin preserves the issued company key when its refresh fails", async () => {
+  const api = vi.fn().mockResolvedValue({ key: "fixture-key", licenseId: "business-test" });
+  const setSecret = vi.fn(), setFeedback = vi.fn(), setCreate = vi.fn();
+  const createCompany = uiFunction("createCompany", { api, name: "Empresa", email: "company@example.test", reload: vi.fn().mockRejectedValue(new Error("offline")), setSecret, setFeedback, setCreate, setSelected: vi.fn(), setTab: vi.fn(), setDetails: vi.fn(), setName: vi.fn(), setEmail: vi.fn(), updateQuery: vi.fn(), updateFilter: vi.fn() }, "apps/admin/src/App.tsx");
+  await createCompany();
+  expect(api).toHaveBeenCalledExactlyOnceWith("/admin/organizations", { name: "Empresa", email: "company@example.test" });
+  expect(setSecret).toHaveBeenCalledExactlyOnceWith("fixture-key");
+  expect(setCreate).toHaveBeenCalledExactlyOnceWith(false);
+  expect(setFeedback).toHaveBeenLastCalledWith("Empresa criada. Guarde a chave emitida e atualize para consultar os detalhes.");
 });
 
 test("desktop heartbeat reuses the registered identity without rewriting its ownership claim", async () => {

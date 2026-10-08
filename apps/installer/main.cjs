@@ -3,6 +3,7 @@ const { spawn, spawnSync } = require("node:child_process");
 const fs = require("original-fs");
 const os = require("node:os");
 const path = require("node:path");
+const crypto = require("node:crypto");
 
 const productName = "Nodus Connect";
 const localAppData = realPath(process.env.LOCALAPPDATA || path.join(os.homedir(), "AppData", "Local"));
@@ -12,6 +13,9 @@ const installedApp = !uninstallMode && (path.basename(process.execPath).toLowerC
 if (uninstallMode && path.basename(process.execPath).toLowerCase() === "nodus connect.exe") installDir = path.dirname(process.execPath);
 let cancelRequested = false;
 let installing = false;
+const payloadWrapper = app.isPackaged ? process.argv.find(arg => arg.startsWith("--payload-wrapper="))?.slice("--payload-wrapper=".length) : "";
+let payloadMetadata;
+try { payloadMetadata = require("../../payload-metadata.json"); } catch {}
 
 let win;
 
@@ -46,12 +50,15 @@ if (installedApp) {
       backgroundColor: "#050811",
       icon: path.resolve(__dirname, "../../build/icon.ico"),
       autoHideMenuBar: true,
+      show: false,
       webPreferences: {
         contextIsolation: true,
         nodeIntegration: false,
         preload: path.join(__dirname, "preload.cjs"),
       },
     });
+    markStartup("window-created");
+    win.once("ready-to-show", () => { markStartup("ready-to-show"); win.show(); });
     win.on("close", (event) => {
       if (!installing) return;
       event.preventDefault();
@@ -79,6 +86,7 @@ if (installedApp) {
     const send = (message, progress, step) => event.sender.send("progress", { message, progress, step });
     return installNodus(send, options);
   });
+  ipcMain.on("ui-ready", () => markStartup("ui-ready"));
   ipcMain.handle("cancel-install", () => {
     if (installing) cancelRequested = true;
     return { ok: true };
@@ -86,18 +94,13 @@ if (installedApp) {
   ipcMain.handle("uninstall", (_event, options) => uninstallNodus(options));
 
   ipcMain.handle("system-info", async () => {
-    let graphics = "Indisponivel";
-    try {
-      const gpu = await app.getGPUInfo("basic");
-      graphics = gpu?.gpuDevice?.[0]?.deviceString || gpu?.gpuDevice?.[0]?.vendorString || graphics;
-    } catch {}
     return {
       platform: windowsLabel(),
       architecture: process.arch === "x64" ? "x64 (64 bits)" : process.arch,
       network: hasNetwork() ? "Disponivel" : "Indisponivel",
-      graphics,
+      graphics: "Indisponivel",
       disk: formatBytes(getFreeDiskBytes(installDir)),
-      required: formatBytes(getPayloadSize(path.dirname(process.execPath))),
+      required: formatBytes(payloadMetadata?.bytes || getPayloadSize(path.dirname(process.execPath))),
       version: app.getVersion(),
       logPath: path.join(os.tmpdir(), "nodus-connect-installer.log"),
       installDir,
@@ -177,7 +180,7 @@ async function installNodus(send, rawOptions = {}) {
     backupDir = `${installDir}.backup`;
     assertSafeAuxiliaryDir(stagingDir, ".installing");
     assertSafeAuxiliaryDir(backupDir, ".backup");
-    const payloadSize = getPayloadSize(source);
+    const payloadSize = payloadMetadata?.bytes || getPayloadSize(source);
     if (getFreeDiskBytes(installDir) < payloadSize * 1.15) throw new Error("INSUFFICIENT_DISK_SPACE");
 
     send("Fechando versões abertas...", 10, "prepare");
@@ -187,7 +190,8 @@ async function installNodus(send, rawOptions = {}) {
     removeDir(stagingDir);
     removeDir(backupDir);
     fs.mkdirSync(stagingDir, { recursive: true });
-    await copyTree(source, stagingDir, send, 14, 78);
+    if (payloadWrapper) await extractPayload(stagingDir, send);
+    else await copyTree(source, stagingDir, send, 14, 78);
     renameInstalledExe(stagingDir);
     throwIfCancelled();
 
@@ -221,6 +225,27 @@ async function installNodus(send, rawOptions = {}) {
   } finally {
     installing = false;
   }
+}
+
+async function extractPayload(target, send) {
+  assertSafeAuxiliaryDir(target, ".installing");
+  if (!path.isAbsolute(payloadWrapper) || !fs.existsSync(payloadWrapper) || !/^[a-f0-9]{64}$/.test(payloadMetadata?.appAsarSha256 || "")) throw new Error("INSTALLER_SOURCE_NOT_FOUND");
+  send("Extraindo arquivos...", 14, "copy");
+  await new Promise((resolve, reject) => {
+    const child = spawn(payloadWrapper, [`/EXTRACT=${target}`], { windowsHide: true, stdio: "ignore" });
+    const cancel = setInterval(() => { if (cancelRequested) child.kill(); }, 100);
+    const deadline = setTimeout(() => child.kill(), 5 * 60_000);
+    const clear = () => { clearInterval(cancel); clearTimeout(deadline); };
+    child.once("error", error => { clear(); reject(error); });
+    child.once("close", code => { clear(); code === 0 ? resolve() : reject(new Error(cancelRequested ? "INSTALL_CANCELLED" : "PAYLOAD_EXTRACTION_FAILED")); });
+  });
+  throwIfCancelled();
+  const extracted = listFiles(target);
+  if (extracted.length !== payloadMetadata.fileCount || extracted.reduce((total, file) => total + fs.statSync(file).size, 0) !== payloadMetadata.bytes) throw new Error("INCOMPLETE_PAYLOAD");
+  const digest = crypto.createHash("sha256");
+  for await (const chunk of fs.createReadStream(path.join(target, "resources", "app.asar"))) digest.update(chunk);
+  if (digest.digest("hex") !== payloadMetadata.appAsarSha256) throw new Error("PAYLOAD_HASH_MISMATCH");
+  send("Arquivos extraidos e verificados.", 78, "copy");
 }
 
 function assertSafeInstallDir(target) {
@@ -510,6 +535,11 @@ function log(message) {
   try {
     fs.appendFileSync(path.join(os.tmpdir(), "nodus-connect-installer.log"), `[${new Date().toISOString()}] ${message}\n`);
   } catch {}
+}
+
+function markStartup(phase) {
+  log(JSON.stringify({ event: "startup", mode: "installer", phase, processId: process.pid,
+    at: new Date().toISOString(), elapsedMs: Math.round(process.uptime() * 1000) }));
 }
 
 function hasNetwork() {

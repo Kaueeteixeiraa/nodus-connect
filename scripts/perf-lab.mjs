@@ -3,7 +3,28 @@ import WebSocket from "ws";
 
 const args = process.argv.slice(2);
 if (args[0] === "report") await printReport(args.slice(1));
+else if (args[0] === "timings") await printTimings(args.slice(1));
 else await evaluateCdp(args);
+
+async function printTimings(values) {
+  const primary = values.find(value => !value.startsWith("--"));
+  if (!primary) throw new Error("Uso: node scripts/perf-lab.mjs timings <performance.log> [--peer=outro-performance.log]");
+  const paths = [primary, option(values, "peer")].filter(Boolean);
+  const records = (await Promise.all(paths.map(path => readFile(path, "utf8")))).flatMap(parseRecords);
+  const phases = records.filter(item => item.event === "connection-phase");
+  const sessions = [...new Set(phases.map(item => item.sessionId))].map(sessionId => ({ sessionId,
+    roles: Object.fromEntries(["host", "viewer"].map(role => {
+      const events = phases.filter(item => item.sessionId === sessionId && item.role === role);
+      const elapsed = Object.fromEntries(events.map(item => [item.phase, item.elapsedMs]));
+      const delta = (first, last) => Number.isFinite(elapsed[first]) && Number.isFinite(elapsed[last]) ? elapsed[last] - elapsed[first] : null;
+      return [role, { phases: elapsed, deviceLookupMs: delta("connect-click", "device-located"),
+        licenseReserveMs: delta("device-located", "license-reserved"), requestWriteMs: delta("license-reserved", "request-created"),
+        acceptToPeerMs: delta("accept-click", "webrtc-started"), iceMs: delta("webrtc-started", "ice-connected"),
+        iceToFirstPresentedFrameMs: delta("ice-connected", "first-frame") }];
+    })) }));
+  console.log(JSON.stringify({ startup: records.filter(item => item.event === "startup"), sessions,
+    requestDeliveryOneWayMs: null, note: "Cross-PC clocks are not synchronized; input RTT remains in the existing report command." }, null, 2));
+}
 
 async function evaluateCdp([port, expression]) {
   if (!port || !expression) throw new Error("Uso: node scripts/perf-lab.mjs <porta-cdp> <expressao-js> | report <performance.log> [--duration=60] [--session=id]");

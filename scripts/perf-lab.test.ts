@@ -127,6 +127,17 @@ describe("performance report", () => {
     expect(result.bottleneck.predominant).toBe("UNKNOWN");
   });
 
+  it("reports local phase deltas without claiming synchronized cross-PC timing", () => {
+    const viewer = report("viewer", [
+      { event: "startup", phase: "ui-ready", elapsedMs: 300 },
+      ...[["connect-click", 0], ["device-located", 40], ["license-reserved", 90], ["request-created", 120], ["webrtc-started", 150], ["ice-connected", 250], ["first-frame", 280]].map(([phase, elapsedMs]) => ({ event: "connection-phase", phase, elapsedMs })),
+    ]);
+    const result = JSON.parse(execFileSync(process.execPath, [resolve("scripts/perf-lab.mjs"), "timings", viewer], { encoding: "utf8" }));
+    expect(result.startup).toHaveLength(1);
+    expect(result.sessions[0].roles.viewer).toMatchObject({ deviceLookupMs: 40, licenseReserveMs: 50, requestWriteMs: 30, acceptToPeerMs: null, iceMs: 100, iceToFirstPresentedFrameMs: 30 });
+    expect(result.requestDeliveryOneWayMs).toBeNull();
+  });
+
   it("keeps requested video separate from runtime capture and sender parameters", () => {
     const host = report("host", [{
       event: "diagnostic-preset-activated", preset: "1080p60", requestedWidth: 1920, requestedHeight: 1080, requestedFps: 60,

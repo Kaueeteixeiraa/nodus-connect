@@ -2,6 +2,9 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "no
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
+import { runInNewContext } from "node:vm";
+import ts from "typescript";
 import { describe, expect, it } from "vitest";
 
 const html = readFileSync(new URL("../apps/installer/index.html", import.meta.url), "utf8");
@@ -11,6 +14,17 @@ const packageJson = JSON.parse(readFileSync(new URL("../package.json", import.me
 const makensis = join(process.env.LOCALAPPDATA || "", "electron-builder", "Cache", "nsis-3.0.4.1", "nsis-3.0.4.1-1mx3n", "makensis.exe");
 
 describe("custom installer", () => {
+  it("shows a minimal bootstrap and extracts the complete application only after install confirmation", () => {
+    expect(wrapper).toContain('File /r /x resources');
+    expect(wrapper).toContain('bootstrap\\app.asar');
+    expect(wrapper).toContain('"--payload-wrapper=$EXEPATH"');
+    expect(wrapper).toContain('${GetOptions} $R0 "/EXTRACT=" $R3');
+    expect(main).toContain('if (payloadWrapper) await extractPayload(stagingDir, send)');
+    expect(main).toContain('payloadMetadata?.bytes || getPayloadSize(source)');
+    expect(main).toContain('PAYLOAD_HASH_MISMATCH');
+    expect(main).toContain('INCOMPLETE_PAYLOAD');
+    expect(html).not.toContain('dataset.ready="true",300');
+  });
   it.skipIf(process.platform !== "win32" || !existsSync(makensis))("real NSIS parses Node-quoted update arguments with spaces and Unicode", () => {
     const directory = mkdtempSync(join(tmpdir(), "nodus-nsis-test-"));
     const parser = wrapper.slice(wrapper.indexOf("${GetParameters} $R0"), wrapper.indexOf('StrCmp $R1 "" normal_update'));
@@ -31,6 +45,32 @@ describe("custom installer", () => {
     expect(builder).toContain("Binario nativo desatualizado");
     expect(builder).toContain('realTwoPcValidation: "PENDING"');
     expect(builder).toContain("lockfileSha256");
+  });
+  it("builds and validates the matching QuickSupport before completing a setup", () => {
+    const command = packageJson.scripts["installer:build"];
+    expect(command).toContain("node scripts/build-quick-support.mjs && electron-builder --win portable --x64 --config quick-support-builder.cjs && node scripts/make-installer.mjs");
+    const builder = readFileSync(new URL("make-installer.mjs", import.meta.url), "utf8");
+    expect(builder).toContain("!existsSync(supportExe) || !existsSync(supportArchive)");
+    expect(builder).toContain('asar.extractFile(supportArchive, "package.json")');
+    expect(builder).toContain("Binario QuickSupport desatualizado");
+    expect(builder).toContain("sha256: hash(readFileSync(supportExe))");
+    expect(builder).toContain("setupSha256, quickSupport,");
+  });
+  it("rejects missing, mismatched or stale QuickSupport artifacts", () => {
+    const source = ts.createSourceFile("make-installer.mjs", readFileSync(new URL("make-installer.mjs", import.meta.url), "utf8"), ts.ScriptTarget.Latest, true, ts.ScriptKind.JS);
+    const start = source.statements.findIndex(node => node.getText(source).startsWith("const supportName ="));
+    const end = source.statements.findIndex(node => node.getText(source).startsWith("const quickSupport ="));
+    const code = source.statements.slice(start, end + 1).map(node => node.getText(source)).join("\n");
+    const hash = (data: Buffer) => createHash("sha256").update(data).digest("hex");
+    const run = (failure = "") => runInNewContext(`${code}; quickSupport`, {
+      root: "build-test", version: "1.1.14", archive: "installer.asar", trustName: "quick-support-trust.json", join, hash,
+      nativeHashes: { "nodus-service.exe": hash(Buffer.from("current")) },
+      existsSync: (file: string) => !(failure === "missing" && file.endsWith(".exe")),
+      readFileSync: (file: string) => Buffer.from(file.endsWith("Nodus-QuickSupport-1.1.14.exe") ? "MZportable" : failure && file.includes(join("outputs", "quick-support")) && file.endsWith(failure) ? "stale" : "current"),
+      asar: { extractFile: (file: string, name: string) => Buffer.from(name === "package.json" ? JSON.stringify({ version: failure === "version" ? "1.1.13" : "1.1.14" }) : failure && file !== "installer.asar" && name.endsWith(failure) ? "stale" : "current") },
+    });
+    expect(run()).toEqual({ fileName: "Nodus-QuickSupport-1.1.14.exe", sha256: hash(Buffer.from("MZportable")) });
+    for (const failure of ["missing", "version", "main.cjs", "preload.cjs", "quick-support.cjs", "nodus-service.exe", "quick-support-trust.json"]) expect(() => run(failure), failure).toThrow();
   });
   it("keeps every required screen and gates the license step", () => {
     for (const screen of ["welcome", "license", "location", "installing", "complete", "uninstall", "error"]) {
@@ -55,8 +95,7 @@ describe("custom installer", () => {
   });
 
   it("opens the branded setup without an intermediate extraction window", () => {
-    expect(wrapper).toContain("SetCompressor /FINAL lzma");
-    expect(wrapper).toContain("SetCompressorDictSize 8");
+    expect(wrapper).toContain("SetCompressor /FINAL zlib");
     expect(wrapper).not.toContain("/SOLID");
     expect(wrapper).toContain("SilentInstall silent");
     expect(wrapper).not.toContain("MUI_PAGE_INSTFILES");

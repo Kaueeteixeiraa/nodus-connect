@@ -69,6 +69,16 @@ describe("QuickSupport licensing", { timeout: 15000 }, () => {
     const profile = support.verifyProfile(result.token, keys.publicKey);
     await expect(support.verifyPassword("abc", profile.passwordVerifier)).resolves.toBe(true);
   });
+  test("issued profiles sign the configured release version and template hash", async () => {
+    const template = { version: "1.1.14", sha256: "a".repeat(64) };
+    vi.stubEnv("NODUS_SUPPORT_TEMPLATE_VERSION", template.version);
+    vi.stubEnv("NODUS_SUPPORT_TEMPLATE_SHA256", template.sha256);
+    try {
+      const f = await portable();
+      expect(f.profile.template).toEqual(template);
+      expect(f.result.template).toEqual(template);
+    } finally { vi.unstubAllEnvs(); }
+  });
   test("password is validated server-side even when free enforcement is off; receiver uses no company slot", async () => {
     const f = await portable();
     f.store.data.set("license_policy/current", { ...LICENSE_DEFAULTS, enforced: false });

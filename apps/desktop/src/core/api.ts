@@ -23,6 +23,8 @@ export type RemoteResolution = "native" | `${number}x${number}`;
 const DEFAULT_API_BASE = import.meta.env.VITE_NODUS_API ?? "";
 const AUTH_TOKEN_KEY = "nodus.coordination.auth-token.v1";
 let runtimeApiBase = firstApiBase(DEFAULT_API_BASE);
+const iceRequests = new Map<string, Promise<RTCIceServer[]>>();
+const iceCache = new Map<string, { servers: RTCIceServer[]; until: number }>();
 
 export type CoordinationAuthSession = { token: string; user: { id: string; email: string; name: string } };
 
@@ -101,22 +103,38 @@ export interface IceRouteCheck {
 export async function fetchIceServers(baseOverride: string = apiBase()): Promise<RTCIceServer[]> {
   const bases = baseOverride.split(/[\n,]+/).map((base) => base.trim().replace(/\/$/, "")).filter(Boolean);
   if (!bases.length) return [];
+  const key = bases.join(",");
+  const cached = iceCache.get(key);
+  if (cached && cached.until > Date.now()) return structuredClone(cached.servers);
+  let pending = iceRequests.get(key);
+  if (!pending) {
+    pending = Promise.any(bases.map(fetchIceEndpoint)).then(({ servers, cacheSeconds }) => {
+      if (cacheSeconds > 0) {
+        if (iceCache.size >= 8) iceCache.delete(iceCache.keys().next().value!);
+        iceCache.set(key, { servers, until: Date.now() + Math.min(300, cacheSeconds) * 1000 });
+      }
+      return servers;
+    }).catch(() => [] as RTCIceServer[]);
+    iceRequests.set(key, pending);
+  }
   try {
-    return await Promise.any(bases.map(fetchIceEndpoint));
-  } catch {
-    return [];
+    return structuredClone(await pending);
+  } finally {
+    if (iceRequests.get(key) === pending) iceRequests.delete(key);
   }
 }
 
-async function fetchIceEndpoint(base: string): Promise<RTCIceServer[]> {
+async function fetchIceEndpoint(base: string): Promise<{ servers: RTCIceServer[]; cacheSeconds: number }> {
   const controller = new AbortController();
   const timer = window.setTimeout(() => controller.abort(), 3500);
   try {
     const response = await fetch(`${base}/v1/ice-servers`, { signal: controller.signal, cache: "no-store" });
     if (!response.ok) throw new Error("Servidor indisponivel");
-    const data = await response.json() as { iceServers?: RTCIceServer[] };
+    const data = await response.json() as { iceServers?: RTCIceServer[]; expiresAt?: number };
     if (!Array.isArray(data.iceServers) || !data.iceServers.length) throw new Error("Servidor sem rota");
-    return data.iceServers;
+    const hasTurn = data.iceServers.some(server => (Array.isArray(server.urls) ? server.urls : [server.urls]).some(url => /^turns?:/i.test(url)));
+    const cacheSeconds = hasTurn ? Number.isFinite(data.expiresAt) ? Math.max(0, (data.expiresAt! - Date.now()) / 1000 - 60) : 0 : 300;
+    return { servers: data.iceServers, cacheSeconds };
   } finally {
     window.clearTimeout(timer);
   }
@@ -220,8 +238,8 @@ export async function createSessionRequest(input: {
   passwordHash?: string;
   preferredResolution?: RemoteResolution;
   preferredFps?: RemoteFrameRate;
-}): Promise<SessionRequestRecord> {
-  if (firebaseConfigured()) return cloudCreateSessionRequest(input);
+}, locatedDevice?: CoordinationDevice): Promise<SessionRequestRecord> {
+  if (firebaseConfigured()) return cloudCreateSessionRequest(input, locatedDevice);
   return requestJson("/v1/session-requests", {
     method: "POST",
     body: JSON.stringify(input),

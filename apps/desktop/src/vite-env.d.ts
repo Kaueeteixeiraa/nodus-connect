@@ -13,6 +13,7 @@ interface Window {
     saveLicenseCredentials(credentials: { deviceId: string; deviceToken: string }): Promise<boolean>;
     getServerInfo(): Promise<{ port: number; urls: string[] }>;
     getAppInfo(): Promise<{ version: string; googleClientConfigured?: boolean }>;
+    markUiReady?(): void;
     setThemeIcon(theme: string, dataUrl: string): Promise<boolean>;
     getPerformanceDiagnostic(): Promise<{ label: string; preset?: string | null; source?: "cli" | "env" | "json"; videoOnly: boolean; inputLatency?: boolean; inputOnly?: boolean; resolution?: string; fps?: number; bitrate?: number; maxFramerate?: number; scaleResolutionDownBy?: number; lockAdaptive: boolean; nativeResolution?: boolean; contentHint?: "detail" | "motion"; degradationPreference?: "maintain-resolution" | "maintain-framerate" } | null>;
     getNativeCaptureStatus(): Promise<{ available: boolean; supported: boolean; requestedBackend?: "chromium" | "wgc"; allowLegacyFallback?: boolean; nativeMediaExperimental?: boolean; nativeMediaAvailable?: boolean; cursorSuppressionSupported?: boolean; backend?: string; d3d11Hardware?: boolean; hardwareH264?: boolean; hardwareH264Encoders?: number; adapter?: string }>;
@@ -29,7 +30,7 @@ interface Window {
     stopService(): Promise<{ ok: boolean; error?: string }>;
     setRemoteControlActive(active: boolean): Promise<void>;
     setHostInputLock(input: { sessionId: string; mouse: boolean; keyboard: boolean }): Promise<{ ok: boolean; mouse?: boolean; keyboard?: boolean; error?: string }>;
-    setHostCursorActive(active: boolean): Promise<void>;
+    setHostCursorActive(active: boolean, hideOnRemote?: boolean): Promise<void>;
     setRemoteKeyboardCapture(active: boolean): Promise<void>;
     toggleFullScreen(enabled?: boolean): Promise<boolean>;
     checkForUpdates(): Promise<{ ok: boolean; version?: string; available?: boolean; installing?: boolean; error?: string }>;
@@ -64,7 +65,7 @@ interface Window {
       ) => void,
     ): () => void;
     onRemoteKeyInput?(callback: (type: "keyDown" | "keyUp", input: { keyCode: number; code: string; location: number; repeat: boolean }) => void): () => void;
-    onHostMouseActivity?(callback: () => void): () => void;
+    onHostMouseActivity?(callback: (positions?: { displayId: string; x: number; y: number; visible: boolean }[]) => void): () => void;
     onOpenWorkspace?(callback: () => void): () => void;
   };
 }

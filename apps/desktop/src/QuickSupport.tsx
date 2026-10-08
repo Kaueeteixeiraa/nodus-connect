@@ -2,16 +2,10 @@ import { useState, type ReactNode } from "react";
 import { Check, Copy, Download, LoaderCircle, Pencil, Power, ShieldCheck, X } from "lucide-react";
 import type { SupportDraft, SupportProfile, SupportPermission } from "../../../packages/common/src/quick-support";
 import type { LocalIdentity } from "./core/identity";
-import type { LocalSettings } from "./core/storage";
 import { checkLicense, createSupportProfile, licenseFeedback } from "./core/licensing";
-import nodusLogo from "./assets/nodus-logo.png?inline";
+import nodusLogo from "./assets/nodus-logo.png";
 
-export function supportSettings(settings: LocalSettings, profile?: SupportProfile | null): LocalSettings {
-  if (!profile) return settings;
-  return { ...settings, startWithWindows: false, startMinimized: false, minimizeToTray: false, threeDimensionalStandby: false,
-    lightweightMode: true, theme: "dark", accessPasswordHash: "", allowRemoteControl: profile.permissions.includes("mouse:control") || profile.permissions.includes("keyboard:control"),
-    allowClipboard: profile.permissions.includes("clipboard:sync"), allowFileTransfer: profile.permissions.includes("files:transfer"), shareAudio: profile.permissions.includes("audio:remote") };
-}
+export { supportSettings } from "./core/storage";
 
 export function QuickSupportView({ profile, nodusId, deviceName, onRename, ready, sessions, error, onEnd, onQuit, children }: {
   profile: SupportProfile; nodusId: string; deviceName: string; onRename: (name: string) => void;
@@ -89,7 +83,7 @@ export function SupportGenerator({ identity }: { identity: LocalIdentity }) {
     {draft.logo && <div className="support-logo-preview"><img src={draft.logo} alt="Logotipo" /><button className="secondary-button themed-action" type="button" onClick={() => patch({ logo: "" })}>Remover</button></div>}
     {OPTIONS.map(([permissions, label]) => <label className="support-option" key={label}><input type="checkbox" checked={permissions.every(p => draft.permissions.includes(p))} onChange={e => patch({ permissions: e.target.checked ? [...new Set([...draft.permissions, ...permissions])] : draft.permissions.filter(p => !permissions.includes(p)) })} />{label}</label>)}
     <label className="support-option"><input type="checkbox" checked={draft.confirmation} onChange={e => patch({ confirmation: e.target.checked })} />Solicitar confirmacao do cliente</label>
-    <button className="primary-button themed-action" disabled={busy} type="submit">{busy ? <LoaderCircle className="is-checking" size={16} /> : <Download size={16} />} Gerar QuickSupport</button>
+    <button className="primary-button themed-action" disabled={busy} aria-busy={busy} type="submit">{busy ? <LoaderCircle aria-hidden="true" className="is-checking" size={16} /> : <Download aria-hidden="true" size={16} />}{busy ? "Gerando QuickSupport..." : "Gerar QuickSupport"}</button>
     {status && <p role="status" aria-live="polite">{status}</p>}
   </form>;
 }

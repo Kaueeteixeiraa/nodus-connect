@@ -1,4 +1,5 @@
 import type { CoordinationDevice, RemoteFrameRate, RemoteResolution } from "./api";
+import type { SupportProfile } from "../../../../packages/common/src/quick-support";
 
 const RECENTS_KEY = "nodus.recents.v1";
 const FAVORITES_KEY = "nodus.favorites.v1";
@@ -56,7 +57,7 @@ export interface LocalSettings {
   startMinimized: boolean;
   minimizeToTray: boolean;
   confirmBeforeDisconnect: boolean;
-  theme: "dark" | "japan" | "sakura-night" | "neo-tokyo" | "cosmos" | "arctic";
+  theme: "dark" | "japan" | "japan-dark" | "sakura-night" | "neo-tokyo" | "cosmos" | "arctic";
   language: "pt-BR" | "en-US" | "ru-RU" | "ja-JP";
   lightweightMode: boolean;
   threeDimensionalStandby: boolean;
@@ -101,6 +102,10 @@ export function saveRecent(device: CoordinationDevice): RecentDevice[] {
   };
   const merged = [next, ...loadRecents().filter((item) => item.nodusId !== device.nodusId)].slice(0, 12);
   localStorage.setItem(RECENTS_KEY, JSON.stringify(merged));
+  const hidden = loadHiddenCatalogDevices();
+  if (hidden.includes(device.nodusId)) {
+    localStorage.setItem(HIDDEN_CATALOG_DEVICES_KEY, JSON.stringify(hidden.filter((id) => id !== device.nodusId)));
+  }
   return merged;
 }
 
@@ -170,7 +175,7 @@ export function loadSettings(): LocalSettings {
     ...stored,
     showConnectionMetrics: typeof stored.showConnectionMetrics === "boolean" ? stored.showConnectionMetrics : true,
     threeDimensionalStandby: false,
-    theme: ["japan", "sakura-night", "neo-tokyo", "cosmos", "arctic"].includes(stored.theme ?? "")
+    theme: ["japan", "japan-dark", "sakura-night", "neo-tokyo", "cosmos", "arctic"].includes(stored.theme ?? "")
       ? stored.theme as LocalSettings["theme"]
       : "dark",
     language: ["pt-BR", "en-US", "ru-RU", "ja-JP"].includes(stored.language ?? "")
@@ -230,7 +235,7 @@ export function importSettingsBackup(raw: string): { settings: LocalSettings; re
   const sourceSettings = isRecord(value.settings) ? value.settings : {};
   const patch: Partial<LocalSettings> = {};
   for (const key of backupBooleanKeys) if (typeof sourceSettings[key] === "boolean") patch[key] = sourceSettings[key];
-  if (["dark", "japan", "sakura-night", "neo-tokyo", "cosmos", "arctic"].includes(String(sourceSettings.theme))) patch.theme = sourceSettings.theme as LocalSettings["theme"];
+  if (["dark", "japan", "japan-dark", "sakura-night", "neo-tokyo", "cosmos", "arctic"].includes(String(sourceSettings.theme))) patch.theme = sourceSettings.theme as LocalSettings["theme"];
   if (["pt-BR", "en-US", "ru-RU", "ja-JP"].includes(String(sourceSettings.language))) patch.language = sourceSettings.language as LocalSettings["language"];
   if (sourceSettings.preferredResolution === "native" || /^\d{3,5}x\d{3,5}$/.test(String(sourceSettings.preferredResolution))) patch.preferredResolution = sourceSettings.preferredResolution as RemoteResolution;
   if (["auto", "high", "balanced", "economy"].includes(String(sourceSettings.connectionQuality))) patch.connectionQuality = sourceSettings.connectionQuality as LocalSettings["connectionQuality"];
@@ -363,4 +368,10 @@ function safeDate(value: unknown): string {
 
 function uniqueNodusIds(value: unknown): string[] {
   return Array.isArray(value) ? [...new Set(value.map(String).filter((item) => /^\d{9}$/.test(item)))].slice(0, 100) : [];
+}
+export function supportSettings(settings: LocalSettings, profile?: SupportProfile | null): LocalSettings {
+  if (!profile) return settings;
+  return { ...settings, startWithWindows: false, startMinimized: false, minimizeToTray: false, threeDimensionalStandby: false,
+    lightweightMode: true, theme: "dark", accessPasswordHash: "", allowRemoteControl: profile.permissions.includes("mouse:control") || profile.permissions.includes("keyboard:control"),
+    allowClipboard: profile.permissions.includes("clipboard:sync"), allowFileTransfer: profile.permissions.includes("files:transfer"), shareAudio: profile.permissions.includes("audio:remote") };
 }

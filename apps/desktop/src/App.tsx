@@ -18,7 +18,6 @@ import { createPortal } from "react-dom";
 import {
   Activity,
   ArrowRight,
-  Bell,
   BellRing,
   CheckCircle2,
   ChevronDown,
@@ -136,27 +135,19 @@ import {
 } from "./core/storage";
 import { createFileCryptoSession, decryptFileChunk, deriveFileCryptoKey, encryptFileChunk, type FileCryptoSession } from "./core/file-crypto";
 import { CapturePool, type CaptureLease, type PooledCapture } from "./core/capture-pool";
-import nodusLogo from "./assets/nodus-logo.png?inline";
-import { QuickSupportView, SupportGenerator, supportSettings } from "./QuickSupport";
+import nodusLogo from "./assets/nodus-logo.png";
+import { supportSettings } from "./core/storage";
 import type { SupportProfile } from "../../../packages/common/src/quick-support";
 import googleLogo from "./assets/google-logo.png";
-import LicensePanel from "./LicensePanel";
 import { checkLicense, licenseConfigured, licenseEstablished, licenseEnded, licenseFeedback, reserveLicense, supportAdmission } from "./core/licensing";
 import { LicenseError } from "../../../packages/licensing/src/index";
-import nodusIcon from "./assets/nodus-logo-icon.png?inline";
+import nodusIcon from "./assets/nodus-logo-icon.png";
 import { advanceStage, assessQuality, DESKTOP_VIDEO_POLICY, nativeVideoBitrate, nextBitrate, STAGE_LIMITS, type AdaptiveStage, type AdaptiveState, type QualitySample } from "./core/adaptive-quality";
 import { classifyDecoderImplementation, contentMotion, counterDelta, cumulativeMeanMs, diagnosePipeline, encoderFallbackReason, InputLatencyDiagnostic, receiverPacketLoss, rtpJitterMs, smoothPipelineSample, videoFrameTiming, type InputDiagnosticAck, type EncoderKind, type EncoderVendor, type PipelineBottleneck, type PipelineSample } from "./core/performance-monitor";
 
-const releaseNotes = [
-  { version: "0.4.25", changes: ["Diagnóstico ICE detalhado e seleção correta da rota de conexão."] },
-  { version: "0.4.24", changes: ["Cursor local imediato na tela de acesso remoto."] },
-  { version: "0.4.23", changes: ["Diagnóstico Pixel Perfect e auditoria da qualidade visual da conexão."] },
-  { version: "0.4.22", changes: ["Cursor do computador compartilhado ocultado durante o acesso remoto."] },
-  { version: "0.4.21", changes: ["Validação explícita para benchmarks de conexão."] },
-  { version: "0.4.20", changes: ["Interface de acesso remoto revisada.", "A sessão atual utiliza a janela principal do Nodus."] },
-  { version: "0.4.19", changes: ["Status dos dispositivos atualizado em tempo real.", "Tela de espera 3D opcional."] },
-  { version: "0.4.18", changes: ["Espaço reduzido ao usar senha de acesso.", "Home mais compacta em telas menores."] },
-];
+const LicensePanel = lazy(() => import("./LicensePanel"));
+const QuickSupportView = lazy(() => import("./QuickSupport").then(module => ({ default: module.QuickSupportView })));
+const SupportGenerator = lazy(() => import("./QuickSupport").then(module => ({ default: module.SupportGenerator })));
 
 const Standby3D = lazy(() => import("./Standby3D"));
 
@@ -166,6 +157,7 @@ type View = "connection" | "devices" | "recents" | "favorites" | "files" | "sett
 const themeOptions: { id: LocalSettings["theme"]; label: string; description: string }[] = [
   { id: "dark", label: "Padrão", description: "Visual Nodus atual" },
   { id: "japan", label: "Japão Feudal", description: "Papel, vermelho e montanhas" },
+  { id: "japan-dark", label: "Japão Feudal Escuro", description: "Grafite, vermelho e templos" },
   { id: "sakura-night", label: "Sakura Night", description: "Lua, sakuras e azul noturno" },
   { id: "neo-tokyo", label: "Neo Tokyo", description: "Neon urbano e chuva" },
   { id: "cosmos", label: "Cosmos", description: "Nebulosas e espaço profundo" },
@@ -254,7 +246,7 @@ type RemoteInputMessage =
   | { type: "screen-options"; displays: CaptureSource[] }
   | { type: "input-lock"; mouse: boolean; keyboard: boolean }
   | { type: "input-lock-status"; mouse: boolean; keyboard: boolean; ok: boolean; error?: string }
-  | { type: "host-mouse-activity" }
+  | { type: "host-mouse-activity"; x?: number; y?: number; visible?: boolean; sampleAt?: number; inputSequence?: number }
   | { type: "latency-ping" | "latency-pong"; sentAt: number }
   | { type: "input-diagnostic-capability" }
   | { type: "input-capability"; version: 2 }
@@ -378,8 +370,15 @@ export function App({ initialIdentity, supportProfile = null }: { initialIdentit
   const [restartRequests, setRestartRequests] = useState<Record<string, string>>({});
   const [recordingSessionId, setRecordingSessionId] = useState<string | null>(null);
   const [standby, setStandby] = useState(false);
-  const recentPresenceIds = useMemo(() => recents.map((item) => item.nodusId).sort().join(","), [recents]);
+  const recentPresenceIds = useMemo(() => {
+    if (!currentUser || supportProfile) return "";
+    const views = [activeView, ...workspaceWindows.map(item => item.view)];
+    const visible = views.includes("devices") ? recents.filter(item => !hiddenCatalogDevices.includes(item.nodusId))
+      : [...(views.includes("connection") ? recents.slice(0, 3) : []), ...(views.includes("favorites") ? recents.filter(item => favorites.includes(item.nodusId)) : [])];
+    return [...new Set(visible.map(item => item.nodusId))].sort().join(",");
+  }, [recents, favorites, activeView, workspaceWindows, hiddenCatalogDevices, currentUser, supportProfile]);
   const peersRef = useRef(new Map<string, RTCPeerConnection>());
+  const connectionTimingsRef = useRef(new Map<string, { start: number; phases: Set<string> }>());
   const nativeVideoPeersRef = useRef(new Map<string, RTCPeerConnection>());
   const nativeHostSessionsRef = useRef(new Set<string>());
   const nativeFallbackAllowedRef = useRef(new Map<string, boolean>());
@@ -466,6 +465,8 @@ export function App({ initialIdentity, supportProfile = null }: { initialIdentit
   const processedSignalsRef = useRef(new Set<string>());
   const lastIncomingAlertRef = useRef("");
   const targetPasswordLookupRef = useRef(0);
+  const connectionResetTimerRef = useRef<number | null>(null);
+  const [connectionFormVersion, setConnectionFormVersion] = useState(0);
   const outgoingRequestRef = useRef<SessionRequestRecord | null>(null);
   const sessionsRef = useRef<SessionRuntime[]>([]);
   const remoteVideoRef = useRef<HTMLVideoElement | null>(null);
@@ -620,15 +621,22 @@ export function App({ initialIdentity, supportProfile = null }: { initialIdentit
       setAppVersion(info.version);
       setNativeGoogleClient(Boolean(info.googleClientConfigured));
     }).catch(() => undefined);
-    window.nodusDesktop?.getNativeCaptureStatus().then((status) => {
-      nativeCaptureStatusRef.current = status;
-      window.nodusDesktop?.writeDiagnostic(`capture-backend=${status.backend || "chromium-getdisplaymedia"} wgc-supported=${status.supported} d3d11=${Boolean(status.d3d11Hardware)} hardware-h264=${Boolean(status.hardwareH264)} encoders=${status.hardwareH264Encoders || 0} adapter=${status.adapter || "unknown"}`);
-    }).catch(() => undefined);
-    window.nodusDesktop?.getGpuDiagnostics().then((status) => {
-      gpuDiagnosticsRef.current = status;
-      setGpuDiagnostics(status);
-      window.nodusDesktop?.writeDiagnostic(`gpu adapter=${status.adapter || "unknown"} process=${status.gpuProcessAvailable} compositing=${status.gpuCompositing} encode=${status.videoEncode} decode=${status.videoDecode}`);
-    }).catch(() => undefined);
+    let frame = window.requestAnimationFrame(() => {
+      frame = window.requestAnimationFrame(() => {
+        window.nodusDesktop?.markUiReady?.();
+        window.nodusDesktop?.getCaptureSources().then(setCaptureSources).catch(() => undefined);
+        window.nodusDesktop?.getNativeCaptureStatus().then((status) => {
+          nativeCaptureStatusRef.current = status;
+          window.nodusDesktop?.writeDiagnostic(`capture-backend=${status.backend || "chromium-getdisplaymedia"} wgc-supported=${status.supported} d3d11=${Boolean(status.d3d11Hardware)} hardware-h264=${Boolean(status.hardwareH264)} encoders=${status.hardwareH264Encoders || 0} adapter=${status.adapter || "unknown"}`);
+        }).catch(() => undefined);
+        window.nodusDesktop?.getGpuDiagnostics().then((status) => {
+          gpuDiagnosticsRef.current = status;
+          setGpuDiagnostics(status);
+          window.nodusDesktop?.writeDiagnostic(`gpu adapter=${status.adapter || "unknown"} process=${status.gpuProcessAvailable} compositing=${status.gpuCompositing} encode=${status.videoEncode} decode=${status.videoDecode}`);
+        }).catch(() => undefined);
+      });
+    });
+    return () => window.cancelAnimationFrame(frame);
   }, []);
 
   useEffect(() => {
@@ -652,6 +660,7 @@ export function App({ initialIdentity, supportProfile = null }: { initialIdentit
       if (disposed) return;
       const effectiveIceServers = withConfiguredStun(remoteIceServers, parseIceServers(settings.iceServersJson));
       setServerIceServers(effectiveIceServers);
+      if (!window.nodusDesktop?.iceDiagnosticsEnabled) return;
       const health = await testIceServers(effectiveIceServers);
       if (disposed) return;
       logDiagnostic(`ice-check relay=${health.relayAvailable} ok=${health.ok} elapsed=${health.elapsedMs}ms candidates=${JSON.stringify(health.candidateTypes)} urls=${health.urls.length}${health.error ? ` error=${health.error}` : ""}`);
@@ -665,10 +674,6 @@ export function App({ initialIdentity, supportProfile = null }: { initialIdentit
       window.removeEventListener("online", refresh);
     };
   }, [settings.coordinationUrl, settings.iceServersJson]);
-
-  useEffect(() => {
-    window.nodusDesktop?.getCaptureSources().then(setCaptureSources).catch(() => undefined);
-  }, []);
 
   useEffect(() => {
     window.nodusDesktop?.setCaptureOptions({
@@ -760,8 +765,12 @@ export function App({ initialIdentity, supportProfile = null }: { initialIdentit
     if (!identity.deviceNameConfirmed) return;
     const realtime = connectRealtime(identity.nodusId, {
       onState: setSignalingState,
-      onIncomingRequests: setIncomingRequests,
+      onIncomingRequests: (requests) => {
+        requests.forEach(request => logConnectionPhase(request.sessionId ?? request.id, "request-received", "host"));
+        setIncomingRequests(requests);
+      },
       onIncomingRequest: (request) => {
+        logConnectionPhase(request.sessionId ?? request.id, "request-received", "host");
         setIncomingRequests((items) => (items.some((item) => item.id === request.id) ? items : [request, ...items]));
       },
       onRequestUpdate: handleRequestUpdate,
@@ -807,6 +816,7 @@ export function App({ initialIdentity, supportProfile = null }: { initialIdentit
         outgoingRequestRef.current = null;
         setOutgoingRequest(null);
         setFeedback("Solicitacao expirada. Tente novamente.");
+        scheduleConnectionReset();
       }, Math.max(0, PENDING_REQUEST_TTL_MS - (Date.now() - Date.parse(outgoingRequest.createdAt))));
       return () => { disposed = true; window.clearTimeout(timer); };
     }
@@ -817,6 +827,7 @@ export function App({ initialIdentity, supportProfile = null }: { initialIdentit
         if (current.status === "denied") {
           setFeedback("Pedido recusado pelo outro computador.");
           setOutgoingRequest(null);
+          scheduleConnectionReset();
         }
         if (current.status === "accepted" && current.sessionId) {
           recordAccess({
@@ -827,6 +838,7 @@ export function App({ initialIdentity, supportProfile = null }: { initialIdentit
           });
           setFeedback("Autorizado. Estabelecendo conexao segura...");
           setOutgoingRequest(null);
+          scheduleConnectionReset();
           await startViewerSession(current);
         }
       } catch {
@@ -856,13 +868,20 @@ export function App({ initialIdentity, supportProfile = null }: { initialIdentit
     if (request.status === "pending") return;
     outgoingRequestRef.current = null;
     setOutgoingRequest(null);
+    scheduleConnectionReset();
     if (request.status === "denied") setFeedback("Pedido recusado pelo outro computador.");
     if (request.status === "accepted" && request.sessionId) {
+      const trace = connectionTimingsRef.current.get(request.id);
+      if (trace && request.id !== request.sessionId) {
+        connectionTimingsRef.current.set(request.sessionId, trace);
+        connectionTimingsRef.current.delete(request.id);
+      }
       recordAccess({ nodusId: request.targetNodusId, deviceName: request.targetName ?? "Dispositivo remoto", direction: "outgoing", result: "accepted" });
       setFeedback("Autorizado. Estabelecendo conexao segura...");
       startViewerSession(request).catch(() => {
         updateRuntime(request.sessionId!, { error: "Nao foi possivel iniciar o acesso remoto." });
         setFeedback("Nao foi possivel iniciar o acesso remoto.");
+        scheduleConnectionReset();
       });
     }
   }
@@ -887,6 +906,7 @@ export function App({ initialIdentity, supportProfile = null }: { initialIdentit
     const onFrame: VideoFrameRequestCallback = (now, metadata) => {
       const playback = video.getVideoPlaybackQuality?.();
       if (baselinePresented === null) {
+        if (sessionId) logConnectionPhase(sessionId, "first-frame", "viewer");
         baselinePresented = metadata.presentedFrames;
         baselineDropped = playback?.droppedVideoFrames ?? null;
         started = now;
@@ -924,12 +944,7 @@ export function App({ initialIdentity, supportProfile = null }: { initialIdentit
 
   useEffect(() => {
     const restore = () => { window.nodusDesktop?.setHostCursorActive?.(false).catch(() => undefined); };
-    const removeHostMouseListener = window.nodusDesktop?.onHostMouseActivity?.(() => {
-      sessionsRef.current.filter((runtime) => runtime.session.role === "host").forEach((runtime) => {
-        const channel = controlChannelsRef.current.get(runtime.session.sessionId);
-        if (channel?.readyState === "open") channel.send(JSON.stringify({ type: "host-mouse-activity" } satisfies RemoteInputMessage));
-      });
-    });
+    const removeHostMouseListener = window.nodusDesktop?.onHostMouseActivity?.(broadcastHostMouseActivity);
     syncHostCursorVisibility();
     const timer = window.setInterval(() => syncHostCursorVisibility(), 1000);
     window.addEventListener("pagehide", restore);
@@ -939,7 +954,7 @@ export function App({ initialIdentity, supportProfile = null }: { initialIdentit
       removeHostMouseListener?.();
       restore();
     };
-  }, [settings.allowRemoteControl]);
+  }, [settings.allowRemoteControl, captureSources, settings.preferredDisplayId]);
 
   useEffect(() => {
     const request = incomingRequests[0];
@@ -955,6 +970,13 @@ export function App({ initialIdentity, supportProfile = null }: { initialIdentit
     autoAcceptingRef.current.add(request.id);
     acceptIncoming(request).finally(() => autoAcceptingRef.current.delete(request.id));
   }, [incomingRequests, settings.accessPasswordHash, supportProfile]);
+
+  useEffect(() => {
+    const normalized = normalizeNodusId(targetId);
+    if (!normalized || !rememberTargetPassword || !targetPassword) return;
+    const timer = window.setTimeout(() => { persistConnectionPassword(normalized, targetPassword); }, 400);
+    return () => window.clearTimeout(timer);
+  }, [targetId, targetPassword, rememberTargetPassword]);
 
   function completeOnboarding(event: FormEvent) {
     event.preventDefault();
@@ -986,35 +1008,75 @@ export function App({ initialIdentity, supportProfile = null }: { initialIdentit
     }
   }
 
-  async function connectToDevice(target: string, password = "") {
+  useEffect(() => () => {
+    if (connectionResetTimerRef.current !== null) window.clearTimeout(connectionResetTimerRef.current);
+  }, []);
+
+  function scheduleConnectionReset(revision = targetPasswordLookupRef.current) {
+    if (revision !== targetPasswordLookupRef.current) return;
+    if (connectionResetTimerRef.current !== null) window.clearTimeout(connectionResetTimerRef.current);
+    connectionResetTimerRef.current = window.setTimeout(() => {
+      connectionResetTimerRef.current = null;
+      if (revision !== targetPasswordLookupRef.current || outgoingRequestRef.current) return;
+      ++targetPasswordLookupRef.current;
+      setTargetId("");
+      setTargetPassword("");
+      setRememberTargetPassword(false);
+      setFeedback("");
+      setConnectionFormVersion(version => version + 1);
+    }, 5_000);
+  }
+
+  async function connectToDevice(target: string, password?: string) {
     if (supportProfile) return;
+    const revision = ++targetPasswordLookupRef.current;
     const normalized = normalizeNodusId(target);
     if (!normalized) {
       setFeedback("Informe um Nodus ID com 9 digitos.");
+      scheduleConnectionReset();
       return;
     }
     if (normalized === identity.nodusId) {
       setFeedback("Digite o Nodus ID de outro computador. Este e o ID deste PC.");
+      scheduleConnectionReset();
       return;
     }
 
     let reservedSession: string | undefined;
+    let traceId: string = crypto.randomUUID();
+    logConnectionPhase(traceId, "connect-click", "viewer");
     let supportTarget = false;
     let requestCreated = false;
+    let rememberPassword = rememberTargetPassword;
     try {
+      if (password === undefined) {
+        password = await window.nodusDesktop?.getConnectionPassword(normalized) ?? "";
+        rememberPassword = Boolean(password);
+        setTargetId(formatNodusId(normalized));
+        setTargetPassword(password);
+        setRememberTargetPassword(Boolean(password));
+      }
       setFeedback("Localizando dispositivo...");
       iceWarmupRef.current = fetchIceServers(settings.coordinationUrl).then((servers) => {
         if (servers.length) setServerIceServers(servers);
         return servers;
       }).catch(() => [] as RTCIceServer[]);
       const device = await lookupDevice(normalized);
+      logConnectionPhase(traceId, "device-located", "viewer");
       if (!device || device.status !== "online") {
         setFeedback("Dispositivo nao encontrado. Abra o Nodus no outro PC e use o ID dele.");
         return;
       }
       setRecents(saveRecent(device));
+      setHiddenCatalogDevices(loadHiddenCatalogDevices());
       supportTarget = Boolean(device.supportProfileId);
       reservedSession = await reserveLicense(identity, normalized, device.supportProfileId, password);
+      if (reservedSession) {
+        connectionTimingsRef.current.set(reservedSession, connectionTimingsRef.current.get(traceId)!);
+        connectionTimingsRef.current.delete(traceId);
+        traceId = reservedSession;
+      }
+      logConnectionPhase(traceId, "license-reserved", "viewer");
       const request = await createSessionRequest({
         ...(reservedSession ? { sessionId: reservedSession } : {}),
         requesterNodusId: identity.nodusId,
@@ -1024,8 +1086,15 @@ export function App({ initialIdentity, supportProfile = null }: { initialIdentit
         passwordHash: device.supportProfileId ? "" : await hashPassword(password),
         preferredResolution: settings.preferredResolution,
         preferredFps: settings.maxFps,
-      });
+      }, device);
       requestCreated = true;
+      const requestTraceId = request.sessionId ?? request.id;
+      if (traceId !== requestTraceId) {
+        connectionTimingsRef.current.set(requestTraceId, connectionTimingsRef.current.get(traceId)!);
+        connectionTimingsRef.current.delete(traceId);
+        traceId = requestTraceId;
+      }
+      logConnectionPhase(traceId, "request-created", "viewer");
       recordAccess({
         nodusId: device.nodusId,
         deviceName: device.deviceName,
@@ -1033,24 +1102,26 @@ export function App({ initialIdentity, supportProfile = null }: { initialIdentit
         result: "requested",
       });
       setOutgoingRequest(request);
-      if (rememberTargetPassword && password) await window.nodusDesktop?.saveConnectionPassword(normalized, password);
-      else if (!rememberTargetPassword) await window.nodusDesktop?.saveConnectionPassword(normalized, "");
-      if (!rememberTargetPassword) setTargetPassword("");
+      if (rememberPassword && password) await persistConnectionPassword(normalized, password);
+      if (!rememberPassword) setTargetPassword("");
       setFeedback(supportTarget ? `${device.deviceName} - QuickSupport. Aguardando autorizacao...` : "Dispositivo encontrado. Aguardando autorizacao...");
     } catch (error) {
       if (reservedSession && !requestCreated) licenseEnded(reservedSession);
       setFeedback(supportTarget && error instanceof LicenseError && error.code === "UNAUTHORIZED" ? "Senha incorreta." : error instanceof LicenseError ? licenseFeedback(error) : error instanceof Error ? error.message : "Nao foi possivel conectar ao dispositivo.");
+    } finally {
+      if (!requestCreated) scheduleConnectionReset(revision);
     }
   }
 
   function updateTargetId(value: string) {
-    const lookupId = ++targetPasswordLookupRef.current;
     const formatted = formatNodusId(value);
     const normalized = normalizeNodusId(formatted);
+    const lookupId = ++targetPasswordLookupRef.current;
     setTargetId(formatted);
+    if (normalized && normalized === normalizeNodusId(targetId)) return;
+    setTargetPassword("");
+    setRememberTargetPassword(false);
     if (!normalized) {
-      setTargetPassword("");
-      setRememberTargetPassword(false);
       return;
     }
     window.nodusDesktop?.getConnectionPassword(normalized).then((password) => {
@@ -1060,8 +1131,27 @@ export function App({ initialIdentity, supportProfile = null }: { initialIdentit
     }).catch(() => undefined);
   }
 
+  async function persistConnectionPassword(nodusId: string, password: string) {
+    try {
+      const result = await window.nodusDesktop?.saveConnectionPassword(nodusId, password);
+      if (!result?.ok) throw new Error("PASSWORD_STORAGE_UNAVAILABLE");
+    } catch { setFeedback("Nao foi possivel salvar a senha com seguranca neste computador."); }
+  }
+
+  function updateTargetPassword(value: string) {
+    ++targetPasswordLookupRef.current;
+    setTargetPassword(value);
+  }
+
+  function updateRememberTargetPassword(value: boolean) {
+    ++targetPasswordLookupRef.current;
+    setRememberTargetPassword(value);
+    const normalized = normalizeNodusId(targetId);
+    if (normalized && (!value || targetPassword)) persistConnectionPassword(normalized, value ? targetPassword : "");
+  }
+
   async function acceptIncoming(request: SessionRequestRecord): Promise<string | null> {
-    let captureLease: CaptureLease | null = null;
+    logConnectionPhase(request.sessionId ?? request.id, "accept-click", "host");
     let accepted: SessionRequestRecord | null = null;
     try {
       setFeedback("");
@@ -1080,13 +1170,13 @@ export function App({ initialIdentity, supportProfile = null }: { initialIdentit
       }).catch(() => [] as RTCIceServer[]);
       const capturePlan = captureBackendPlan(await window.nodusDesktop?.getNativeCaptureStatus());
       logDiagnostic(`cursor-capture-selection requested=${capturePlan.requested} backend=${capturePlan.native ? "WGC_EXPERIMENTAL" : "CHROMIUM_LEGACY"} fallback-allowed=${capturePlan.allowLegacyFallback}`);
-      if (!capturePlan.native) captureLease = await acquireHostCapture(
-        request.preferredResolution ?? settings.preferredResolution,
-        request.preferredFps ?? settings.maxFps,
-        settings.preferredDisplayId,
-        allowedPermissions(request, settings).includes("audio:remote"),
-      );
       accepted = await acceptSessionRequest(request.id, identity.deviceName, allowedPermissions(request, settings));
+      const trace = connectionTimingsRef.current.get(request.id);
+      if (trace && accepted.sessionId && request.id !== accepted.sessionId) {
+        connectionTimingsRef.current.set(accepted.sessionId, trace);
+        connectionTimingsRef.current.delete(request.id);
+      }
+      logConnectionPhase(accepted.sessionId ?? request.id, "request-accepted", "host");
       recordAccess({
         nodusId: request.requesterNodusId,
         deviceName: request.requesterName,
@@ -1094,11 +1184,9 @@ export function App({ initialIdentity, supportProfile = null }: { initialIdentit
         result: "accepted",
       });
       setIncomingRequests((items) => items.filter((item) => item.id !== request.id));
-      await startHostSession(accepted, captureLease, capturePlan.native, capturePlan.allowLegacyFallback);
-      captureLease = null;
+      await startHostSession(accepted, null, capturePlan.native, capturePlan.allowLegacyFallback);
       return null;
     } catch (error) {
-      captureLease?.release();
       if (accepted?.sessionId) {
         cleanupSession(accepted.sessionId, true);
         removeRuntime(accepted.sessionId);
@@ -1162,10 +1250,26 @@ export function App({ initialIdentity, supportProfile = null }: { initialIdentit
   }
 
   function syncHostCursorVisibility(excludeSessionId?: string) {
-    const active = sessionsRef.current.some((runtime) => runtime.session.sessionId !== excludeSessionId
-      && !nativeHostSessionsRef.current.has(runtime.session.sessionId)
-      && shouldHideHostCursor(runtime.session.role, peersRef.current.get(runtime.session.sessionId)?.connectionState ?? "closed", runtime.session.permissions, settings.allowRemoteControl, runtime.error));
-    window.nodusDesktop?.setHostCursorActive?.(active).catch(() => undefined);
+    const hosts = sessionsRef.current.filter((runtime) => runtime.session.sessionId !== excludeSessionId
+      && runtime.session.role === "host" && peersRef.current.get(runtime.session.sessionId)?.connectionState === "connected"
+      && runtime.session.permissions.includes("screen:view"));
+    const hideOnRemote = hosts.some(runtime => !nativeHostSessionsRef.current.has(runtime.session.sessionId)
+      && shouldHideHostCursor(runtime.session.role, "connected", runtime.session.permissions, settings.allowRemoteControl, runtime.error));
+    window.nodusDesktop?.setHostCursorActive?.(hosts.length > 0, hideOnRemote).catch(() => undefined);
+  }
+
+  function broadcastHostMouseActivity(positions: { displayId: string; x: number; y: number; visible: boolean }[] = []) {
+    for (const runtime of sessionsRef.current) {
+      const { sessionId, role, permissions } = runtime.session;
+      if (role !== "host" || !permissions.includes("screen:view")) continue;
+      const channel = auxiliaryChannel(sessionId, true);
+      if (channel?.readyState !== "open" || channel.bufferedAmount > 2048) continue;
+      const sourceId = nativeHostDisplaysRef.current.get(sessionId) || settings.preferredDisplayId;
+      const source = captureSources.find(item => item.id === sourceId) ?? captureSources[0];
+      const position = positions.find(item => item.displayId === source?.displayId) ?? positions[0];
+      try { channel.send(JSON.stringify({ type: "host-mouse-activity", ...(position ? { x: position.x, y: position.y, visible: position.visible } : {}),
+        sampleAt: performance.now(), inputSequence: pointerSequencesRef.current.get(sessionId) ?? 0 } satisfies RemoteInputMessage)); } catch { /* The session may have closed after sampling. */ }
+    }
   }
 
   async function startHostNativeMedia(sessionId: string, remoteNodusId: string, displayId: string, resolution: RemoteResolution, frameRate: RemoteFrameRate, shareAudio: boolean, iceServers: RTCIceServer[]) {
@@ -1301,6 +1405,7 @@ export function App({ initialIdentity, supportProfile = null }: { initialIdentit
     captureCleanupRef.current.get(request.sessionId)?.();
     const remoteNodusId = request.requesterNodusId;
     const peer = createPeer(request.sessionId, identity.nodusId, remoteNodusId, "host", await ensureSessionIceServers());
+    logConnectionPhase(request.sessionId, "peer-created", "host");
     nativeFallbackAllowedRef.current.set(request.sessionId, allowLegacyFallback);
     const permissions = request.grantedPermissions ?? allowedPermissions(request, settings);
     upsertRuntime({
@@ -1311,7 +1416,9 @@ export function App({ initialIdentity, supportProfile = null }: { initialIdentit
     const nativeVideo = preferNative && await startHostNativeMedia(request.sessionId, remoteNodusId, settings.preferredDisplayId, request.preferredResolution ?? settings.preferredResolution, request.preferredFps ?? settings.maxFps, permissions.includes("audio:remote"), peer.getConfiguration().iceServers ?? []);
     if (preferNative && !nativeVideo) requireLegacyCaptureAllowed(allowLegacyFallback);
     if (!nativeVideo && !captureLease) captureLease = await acquireHostCapture(request.preferredResolution ?? settings.preferredResolution, request.preferredFps ?? settings.maxFps, settings.preferredDisplayId, permissions.includes("audio:remote"));
+    if (!nativeVideo) nativeHostDisplaysRef.current.set(request.sessionId, settings.preferredDisplayId);
     const stream = captureLease?.stream ?? null;
+    logConnectionPhase(request.sessionId, "capture-ready", "host");
     if (nativeVideo) {
       captureLease?.release();
       requestedResolutionsRef.current.set(request.sessionId, request.preferredResolution ?? settings.preferredResolution);
@@ -1415,6 +1522,7 @@ export function App({ initialIdentity, supportProfile = null }: { initialIdentit
       bundlePolicy: "max-bundle",
     });
     peersRef.current.set(sessionId, peer);
+    logConnectionPhase(sessionId, "webrtc-started", role);
     iceStartedRef.current.set(sessionId, performance.now());
     logIceEvent(sessionId, role, "ice-started", { policy: peer.getConfiguration().iceTransportPolicy, servers });
     peer.ondatachannel = (event) => {
@@ -1485,6 +1593,7 @@ export function App({ initialIdentity, supportProfile = null }: { initialIdentit
         if (role === "viewer") scheduleIceRestart(sessionId, peer, from, to, peer.iceConnectionState === "failed" ? 0 : 5000, peer.iceConnectionState);
       }
       if (peer.iceConnectionState === "connected" || peer.iceConnectionState === "completed") {
+        logConnectionPhase(sessionId, "ice-connected", role);
         const timer = reconnectTimersRef.current.get(sessionId);
         if (timer) window.clearTimeout(timer);
         reconnectTimersRef.current.delete(sessionId);
@@ -2183,7 +2292,8 @@ export function App({ initialIdentity, supportProfile = null }: { initialIdentit
           return;
         }
         if (message.type === "host-mouse-activity") {
-          window.dispatchEvent(new CustomEvent("nodus:host-mouse-activity", { detail: { sessionId } }));
+          if (message.inputSequence !== undefined && message.inputSequence < (pointerSequencesRef.current.get(sessionId) ?? 0)) return;
+          window.dispatchEvent(new CustomEvent("nodus:host-mouse-activity", { detail: { ...message, sessionId } }));
           return;
         }
         if (message.type === "screen-options") setRemoteDisplays((current) => ({ ...current, [sessionId]: message.displays }));
@@ -2608,6 +2718,7 @@ export function App({ initialIdentity, supportProfile = null }: { initialIdentit
     }
     cleanupSession(sessionId, true);
     removeRuntime(sessionId);
+    if (current?.role === "viewer" && current.remoteNodusId === normalizeNodusId(targetId) && !outgoingRequestRef.current) scheduleConnectionReset();
   }
 
   function cleanupSession(sessionId: string, stopShare: boolean) {
@@ -2918,6 +3029,20 @@ export function App({ initialIdentity, supportProfile = null }: { initialIdentit
     window.nodusDesktop?.writeDiagnostic(message).catch(() => undefined);
   }
 
+  function logConnectionPhase(sessionId: string, phase: string, role: RemoteSession["role"]) {
+    const now = performance.now();
+    let trace = connectionTimingsRef.current.get(sessionId);
+    if (!trace) {
+      if (connectionTimingsRef.current.size >= 100) connectionTimingsRef.current.delete(connectionTimingsRef.current.keys().next().value!);
+      trace = { start: now, phases: new Set() };
+      connectionTimingsRef.current.set(sessionId, trace);
+    }
+    if (trace.phases.has(phase)) return;
+    trace.phases.add(phase);
+    window.nodusDesktop?.writePerformance?.(JSON.stringify({ event: "connection-phase", sessionId, role, phase,
+      at: new Date().toISOString(), elapsedMs: Math.round(now - trace.start) })).catch(() => undefined);
+  }
+
   function logIceEvent(sessionId: string, role: RemoteSession["role"], event: string, details: Record<string, unknown>) {
     if (!window.nodusDesktop?.iceDiagnosticsEnabled) return;
     window.nodusDesktop?.writePerformance?.(JSON.stringify({ at: new Date().toISOString(), sessionId, role, event,
@@ -3009,6 +3134,7 @@ export function App({ initialIdentity, supportProfile = null }: { initialIdentit
     logMediaDiagnostic(`capture-switched width=${capture.width || 0} height=${capture.height || 0} fps=${capture.frameRate || 0}`);
     try {
       await sender.replaceTrack(track);
+      nativeHostDisplaysRef.current.set(sessionId, displayId);
       const audioTrack = stream.getAudioTracks()[0];
       const audioSender = peer.getSenders().find((item) => item.track?.kind === "audio");
       if (audioTrack && audioSender) await audioSender.replaceTrack(audioTrack);
@@ -3277,11 +3403,11 @@ export function App({ initialIdentity, supportProfile = null }: { initialIdentit
     sendRemoteInput({ type, ...input });
   }
 
-  if (supportProfile) return <QuickSupportView profile={supportProfile} nodusId={identity.nodusId} deviceName={identity.deviceName} onRename={updateDeviceName} ready={serviceState === "online" && signalingState === "online"}
+  if (supportProfile) return <Suspense fallback={null}><QuickSupportView profile={supportProfile} nodusId={identity.nodusId} deviceName={identity.deviceName} onRename={updateDeviceName} ready={serviceState === "online" && signalingState === "online"}
     sessions={sessionRuntimes.map(item => ({ id: item.session.sessionId, name: item.session.remoteName, status: item.session.status, error: item.error, connected: peersRef.current.get(item.session.sessionId)?.connectionState === "connected" }))} error={feedback || (signalingState === "offline" ? "Nao foi possivel receber pedidos de suporte. Verifique a conexao e abra o cliente novamente." : "")}
     onEnd={id => endSession(id, true)} onQuit={async () => { await Promise.all(sessionsRef.current.map(item => endSession(item.session.sessionId, true))); await unregisterPresence(identity).catch(() => undefined); await window.nodusDesktop?.quit(); }}>
     {supportProfile.confirmation && incomingRequests[0] && <IncomingRequest request={{ ...incomingRequests[0], requestedPermissions: supportProfile.permissions.filter(p => incomingRequests[0].requestedPermissions?.includes(p)) }} onAccept={acceptIncoming} onDeny={denyIncoming} />}
-  </QuickSupportView>;
+  </QuickSupportView></Suspense>;
 
   if (!identity.deviceNameConfirmed) {
     return (
@@ -3356,23 +3482,6 @@ export function App({ initialIdentity, supportProfile = null }: { initialIdentit
             {!showSessionInMain && <p className="workspace-subtitle">{pageSubtitle}</p>}
           </div>
           <div className="workspace-actions">
-          <div className="release-notifications">
-            <button aria-label="Notas das versões" title="Notas das versões" className="icon-button" type="button"><Bell aria-hidden="true" size={18} /></button>
-            <section aria-label="Últimas atualizações" className="release-notifications-panel">
-              <div className="release-notifications-heading">
-                <BellRing aria-hidden="true" size={16} />
-                <span>Últimas atualizações</span>
-              </div>
-              <ul>
-                {releaseNotes.map((release) => (
-                  <li key={release.version}>
-                    <strong>v{release.version}</strong>
-                    {release.changes.map((change) => <span key={change}>{change}</span>)}
-                  </li>
-                ))}
-              </ul>
-            </section>
-          </div>
           <div className="user-chip" title={currentUser.name}>
             {currentUser.picture ? <img alt="" src={currentUser.picture} /> : <span>{currentUser.name.slice(0, 1)}</span>}
             <span className="user-meta"><b translate="no">{currentUser.name}</b><small><i /> Online</small></span>
@@ -3436,6 +3545,7 @@ export function App({ initialIdentity, supportProfile = null }: { initialIdentit
         ) : (
           <>
             {activeView === "connection" && <ConnectionHome
+              connectionFormVersion={connectionFormVersion}
               feedback={feedback}
               favorites={favorites}
               identity={identity}
@@ -3452,8 +3562,8 @@ export function App({ initialIdentity, supportProfile = null }: { initialIdentit
               onOpenSupport={openSupport}
               onSubmit={(event) => { if (!primary) window.focus(); return connect(event); }}
               onTargetChange={updateTargetId}
-              onTargetPasswordChange={setTargetPassword}
-              onRememberTargetPasswordChange={setRememberTargetPassword}
+              onTargetPasswordChange={updateTargetPassword}
+              onRememberTargetPasswordChange={updateRememberTargetPassword}
               onToggleFavorite={onToggleFavorite}
               outgoingRequest={outgoingRequest}
               recentDevices={recents.slice(0, 3)}
@@ -3615,6 +3725,7 @@ function NetworkPulse() {
 }
 
 function ConnectionHome({
+  connectionFormVersion,
   feedback,
   favorites,
   identity,
@@ -3642,6 +3753,7 @@ function ConnectionHome({
   targetPassword,
   rememberTargetPassword,
 }: {
+  connectionFormVersion: number;
   feedback: string;
   favorites: string[];
   identity: LocalIdentity;
@@ -3678,7 +3790,7 @@ function ConnectionHome({
           <span><i /> Disponível para conexões</span>
           <button aria-label="Copiar Nodus ID" className="icon-button copy-id" onClick={onCopy} title="Copiar Nodus ID" type="button"><Copy aria-hidden="true" size={18} /></button>
         </section>
-        <ConnectBox feedback={feedback} outgoingRequest={outgoingRequest} recentDevices={recentDevices} targetId={targetId} targetPassword={targetPassword} rememberTargetPassword={rememberTargetPassword} onSubmit={onSubmit} onTargetChange={onTargetChange} onTargetPasswordChange={onTargetPasswordChange} onRememberTargetPasswordChange={onRememberTargetPasswordChange} />
+        <ConnectBox key={connectionFormVersion} feedback={feedback} outgoingRequest={outgoingRequest} recentDevices={recentDevices} targetId={targetId} targetPassword={targetPassword} rememberTargetPassword={rememberTargetPassword} onSubmit={onSubmit} onTargetChange={onTargetChange} onTargetPasswordChange={onTargetPasswordChange} onRememberTargetPasswordChange={onRememberTargetPasswordChange} />
         <SystemStatusCard serviceState={serviceState} statusLabel={statusLabel} />
       </div>
       <div className="connection-content">
@@ -3841,9 +3953,13 @@ function Devices({
 }) {
   const [filter, setFilter] = useState<"all" | "online" | "offline">("all");
   const [layout, setLayout] = useState<"grid" | "list">("grid");
+  const [query, setQuery] = useState("");
+  const search = query.trim().toLocaleLowerCase(currentLocale());
   const onlineCount = items.filter((item) => item.status === "online").length + 1;
   const offlineCount = items.filter((item) => item.status !== "online").length;
-  const visibleItems = items.filter((item) => filter === "all" || (filter === "online" ? item.status === "online" : item.status !== "online"));
+  const visibleItems = items.filter((item) => (filter === "all" || (filter === "online" ? item.status === "online" : item.status !== "online"))
+    && `${item.alias ?? ""} ${item.deviceName} ${item.nodusId}`.toLocaleLowerCase(currentLocale()).includes(search));
+  const showCurrentDevice = `${identity.deviceName} ${identity.nodusId}`.toLocaleLowerCase(currentLocale()).includes(search);
   return (
     <section className="content-panel device-catalog">
       <div className="catalog-heading">
@@ -3860,8 +3976,9 @@ function Devices({
           <button aria-label="Exibição em lista" aria-pressed={layout === "list"} className={`view-toggle ${layout === "list" ? "active" : ""}`} onClick={() => setLayout("list")} title="Exibição em lista" type="button"><List aria-hidden="true" size={17} /></button>
         </div>
       </div>
+      <div className="favorites-tools device-search"><label><Search aria-hidden="true" size={19} /><input aria-label="Buscar dispositivos" placeholder="Buscar dispositivos..." value={query} onChange={(event) => setQuery(event.target.value)} /></label></div>
       <div aria-labelledby={`device-filter-${filter}`} id="device-filter-results" role="tabpanel" tabIndex={0} className={`device-cards ${layout === "list" ? "list-view" : ""}`}>
-        <DeviceCard current identity={identity} nodusIdLabel={nodusIdLabel} onConnect={onConnect} statusLabel={statusLabel} tone="blue" />
+        {showCurrentDevice && <DeviceCard current identity={identity} nodusIdLabel={nodusIdLabel} onConnect={onConnect} statusLabel={statusLabel} tone="blue" />}
         {visibleItems.map((item, index) => (
           <DeviceCard
             key={item.nodusId}
@@ -3875,6 +3992,7 @@ function Devices({
             tone={["red", "sunset", "forest"][index % 3] as "red" | "sunset" | "forest"}
           />
         ))}
+        {search && !showCurrentDevice && visibleItems.length === 0 && <p className="note">Nenhum dispositivo encontrado.</p>}
       </div>
       {items.length === 0 && <p className="note">Os computadores acessados aparecerao aqui para conexoes mais rapidas.</p>}
     </section>
@@ -4337,6 +4455,7 @@ function RemoteSessionPanel({
     };
   }, [isViewer, session.sessionId, viewScale, remoteVideoRef]);
   const localCursorRef = useRef<HTMLDivElement | null>(null);
+  const hostCursorSampleRef = useRef(-Infinity);
   const pressedKeysRef = useRef(new Map<string, RemoteKeyInput>());
   const onKeyInputRef = useRef(onKeyInput);
   const canControlMouse = controlReady && session.permissions.includes("mouse:control");
@@ -4355,6 +4474,7 @@ function RemoteSessionPanel({
     cursor.style.opacity = "1";
     surface.style.cursor = "none";
     surface.dataset.localCursorOverlay = "true";
+    surface.dataset.cursorOwner = "viewer";
     surface.dataset.physicalViewerCursorHidden = "true";
     surface.dataset.localCursorPosition = `${point.left.toFixed(1)},${point.top.toFixed(1)}`;
     surface.dataset.remoteInputPosition = `${point.x.toFixed(4)},${point.y.toFixed(4)}`;
@@ -4366,6 +4486,7 @@ function RemoteSessionPanel({
     if (surface) {
       surface.style.cursor = "default";
       surface.dataset.localCursorOverlay = "false";
+      surface.dataset.cursorOwner = "none";
       surface.dataset.physicalViewerCursorHidden = "false";
     }
   };
@@ -4373,9 +4494,28 @@ function RemoteSessionPanel({
     const surface = viewerSurfaceRef.current;
     if (surface && surface.dataset.localCursorOverlay !== "true") hideLocalCursor(surface);
   };
+  const showHostCursor = (position: { x?: number; y?: number; visible?: boolean; sampleAt?: number }) => {
+    if (position.sampleAt !== undefined) {
+      if (!Number.isFinite(position.sampleAt) || position.sampleAt <= hostCursorSampleRef.current) return;
+      hostCursorSampleRef.current = position.sampleAt;
+    }
+    const surface = viewerSurfaceRef.current, cursor = localCursorRef.current;
+    if (!surface || !cursor) return;
+    if (position.visible === false) { hideLocalCursor(surface); return; }
+    const point = hostCursorPoint(surface, position);
+    if (!point) { if (position.x !== undefined && position.y !== undefined) hideLocalCursor(surface); else yieldCursorToHost(); return; }
+    cursor.style.transform = `translate3d(${point.left}px, ${point.top}px, 0)`;
+    cursor.style.opacity = "1";
+    surface.style.cursor = "none";
+    surface.dataset.localCursorOverlay = "false";
+    surface.dataset.physicalViewerCursorHidden = "true";
+    surface.dataset.cursorOwner = "host";
+  };
   useEffect(() => {
+    hostCursorSampleRef.current = -Infinity;
     const onHostMouseActivity = (event: Event) => {
-      if ((event as CustomEvent<{ sessionId: string }>).detail?.sessionId === session.sessionId) yieldCursorToHost();
+      const position = (event as CustomEvent<{ sessionId: string; x?: number; y?: number; visible?: boolean; sampleAt?: number }>).detail;
+      if (position?.sessionId === session.sessionId) showHostCursor(position);
     };
     window.addEventListener("nodus:host-mouse-activity", onHostMouseActivity);
     return () => window.removeEventListener("nodus:host-mouse-activity", onHostMouseActivity);
@@ -4539,7 +4679,7 @@ function RemoteSessionPanel({
             onBlur={() => window.nodusDesktop?.setRemoteKeyboardCapture(false).catch(() => undefined)}
             onFocus={() => canControlKeyboard && window.nodusDesktop?.setRemoteKeyboardCapture(true).catch(() => undefined)}
             onMouseEnter={(event) => canControlMouse && moveLocalCursor(event.currentTarget, event.nativeEvent)}
-            onMouseLeave={(event) => hideLocalCursor(event.currentTarget)}
+            onMouseLeave={(event) => { if (event.currentTarget.dataset.cursorOwner !== "host") hideLocalCursor(event.currentTarget); }}
             onMouseMove={(event) => {
               if (!canControlMouse) return;
               if (moveLocalCursor(event.currentTarget, event.nativeEvent)) onPointerMove(event);
@@ -4930,8 +5070,8 @@ function Settings({
         <button aria-controls="settings-content" aria-selected={section === "support"} id="settings-tab-support" role="tab" tabIndex={section === "support" ? 0 : -1} className={section === "support" ? "active" : ""} onClick={() => setSection("support")} type="button"><ShieldCheck /><span>Suporte portatil<small>QuickSupport da empresa</small></span></button>
       </div>
       <div aria-labelledby={`settings-tab-${section}`} className="settings-page" id="settings-content" role="tabpanel" tabIndex={0}>
-        {section === "license" && <LicensePanel identity={identity} />}
-        {section === "support" && <SupportGenerator identity={identity} />}
+        {section === "license" && <Suspense fallback={null}><LicensePanel identity={identity} /></Suspense>}
+        {section === "support" && <Suspense fallback={null}><SupportGenerator identity={identity} /></Suspense>}
         {section === "general" && <>
           <div className="settings-column">
             {currentUser?.provider !== "google" && <SettingsGroup icon={Settings2} title="Perfil" description="Atualize o nome exibido no Nodus Connect.">
@@ -5114,6 +5254,18 @@ function videoPoint(surface: HTMLElement, event: MouseEvent) {
     { x: event.clientX - rect.left, y: event.clientY - rect.top },
   );
   return point ? { ...point, left: point.left + rect.left - surfaceRect.left - surface.clientLeft + surface.scrollLeft, top: point.top + rect.top - surfaceRect.top - surface.clientTop + surface.scrollTop } : null;
+}
+
+function hostCursorPoint(surface: HTMLElement, position: { x?: number; y?: number }) {
+  const { x, y } = position;
+  if (typeof x !== "number" || typeof y !== "number" || !Number.isFinite(x) || !Number.isFinite(y) || x < 0 || x > 1 || y < 0 || y > 1) return null;
+  const video = surface.querySelector("video");
+  if (!video?.videoWidth || !video.videoHeight) return null;
+  const rect = video.getBoundingClientRect();
+  const scale = Math.min(rect.width / video.videoWidth, rect.height / video.videoHeight);
+  const width = video.videoWidth * scale, height = video.videoHeight * scale;
+  return videoPoint(surface, { clientX: rect.left + (rect.width - width) / 2 + x * width,
+    clientY: rect.top + (rect.height - height) / 2 + y * height } as MouseEvent);
 }
 
 function nativeVideoSize(width: number, height: number, pixelRatio: number) {

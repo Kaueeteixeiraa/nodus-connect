@@ -219,13 +219,15 @@ export async function cloudCreateSessionRequest(input: {
   passwordHash?: string;
   preferredResolution?: import("./api").RemoteResolution;
   preferredFps?: import("./api").RemoteFrameRate;
-}): Promise<SessionRequestRecord> {
+}, locatedDevice?: CoordinationDevice): Promise<SessionRequestRecord> {
   const uid = await ensureDeviceUid();
   const requesterNodusId = normalizeNodusId(input.requesterNodusId);
   const targetNodusId = normalizeNodusId(input.targetNodusId);
   if (!requesterNodusId || !targetNodusId) throw new Error("Nodus ID invalido");
   if (requesterNodusId === targetNodusId) throw new Error("Digite o Nodus ID de outro computador.");
-  const target = await cloudLookupDevice(targetNodusId);
+  const target = locatedDevice?.nodusId === targetNodusId && locatedDevice.status === "online"
+    && locatedDevice.ownerUid && isFresh(locatedDevice.updatedAt, DEVICE_ONLINE_TTL_MS)
+    ? locatedDevice : await cloudLookupDevice(targetNodusId);
   if (!target) throw new Error("Dispositivo nao encontrado ou offline.");
   const now = new Date().toISOString();
   const { collection, doc, setDoc, store } = await fire();

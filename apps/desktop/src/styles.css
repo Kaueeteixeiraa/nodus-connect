@@ -341,6 +341,8 @@
 .favorites-tools label { display: flex; align-items: center; width: min(470px, 52%); min-height: 46px; gap: 10px; padding: 0 14px; border: 1px solid rgba(42, 156, 237, .64); border-radius: 8px; color: #a7cae6; background: rgba(1, 13, 26, .78); }
 .favorites-tools input { width: 100%; min-width: 0; border: 0; outline: 0; background: transparent; color: var(--text); font: inherit; }
 .favorites-tools > span { color: #b5d2e8; font-size: .82rem; }
+.device-search { padding-inline: 0; }
+.device-search label { width: min(470px, 100%); }
 .favorites-list { padding: 0 8px; }
 .favorites-list .recent-device-row { grid-template-columns: 202px minmax(190px, 1fr) minmax(230px, 1.08fr) 184px 30px 24px; min-height: 102px; padding: 12px 16px; border: 1px solid rgba(54, 151, 231, .25); border-radius: 10px; margin-bottom: 10px; }
 .favorites-list .recent-device-row:has(.device-menu-control[open]) { position: relative; z-index: 10; }
@@ -3090,40 +3092,6 @@ button[type="submit"]:hover,
   color: #a8d7ff;
 }
 .icon-button:hover { border-color: #208fe3; color: #fff; background: rgba(12, 74, 126, 0.65); }
-.release-notifications { position: relative; z-index: 30; }
-.release-notifications-panel {
-  position: absolute;
-  top: calc(100% + 8px);
-  right: 0;
-  display: grid;
-  gap: 10px;
-  width: min(340px, calc(100vw - 32px));
-  padding: 14px;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: var(--surface);
-  box-shadow: 0 18px 36px rgba(0, 0, 0, 0.28);
-  color: var(--text);
-  opacity: 0;
-  pointer-events: none;
-  transform: translateY(-5px);
-  transition: opacity 140ms ease, transform 140ms ease, visibility 140ms ease;
-  visibility: hidden;
-}
-.release-notifications:hover .release-notifications-panel,
-.release-notifications:focus-within .release-notifications-panel {
-  opacity: 1;
-  pointer-events: auto;
-  transform: translateY(0);
-  visibility: visible;
-}
-.release-notifications-heading { display: flex; align-items: center; gap: 8px; color: var(--blue-light); font-size: 0.82rem; font-weight: 800; }
-.release-notifications-heading svg { color: var(--cyan); }
-.release-notifications-panel ul { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; }
-.release-notifications-panel li { display: grid; gap: 3px; padding-top: 8px; border-top: 1px solid color-mix(in srgb, var(--line) 68%, transparent); }
-.release-notifications-panel li:first-child { padding-top: 0; border-top: 0; }
-.release-notifications-panel strong { color: var(--text); font-size: 0.79rem; }
-.release-notifications-panel li span { color: var(--text-muted); font-size: 0.73rem; line-height: 1.35; }
 .user-chip { max-width: 180px; min-height: 38px; border-radius: 9px; background: transparent; border-color: transparent; }
 .user-chip b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 0.76rem; }
 
@@ -3961,7 +3929,7 @@ button[type="submit"]:hover,
 }
 
 .device-catalog {
-  grid-template-rows: auto minmax(0, 1fr) auto;
+  grid-template-rows: auto auto minmax(0, 1fr) auto;
 }
 
 .activity-panel {
@@ -5156,6 +5124,7 @@ button[type="submit"]:hover,
 }
 
 .theme-japan .theme-option-preview { background-image: linear-gradient(180deg, rgba(55, 20, 15, .04), rgba(38, 12, 10, .82)), url("./assets/theme-feudal-japan.png"); }
+.theme-japan-dark .theme-option-preview { background-image: linear-gradient(180deg, rgba(10, 10, 12, .08), rgba(10, 10, 12, .82)), url("./assets/theme-feudal-japan-dark.png"); }
 .theme-sakura-night .theme-option-preview { background-image: linear-gradient(180deg, rgba(11, 8, 35, .08), rgba(9, 5, 28, .82)), url("./assets/theme-sakura-night.png"); }
 .theme-neo-tokyo .theme-option-preview { background-image: linear-gradient(180deg, rgba(8, 10, 42, .04), rgba(9, 3, 27, .82)), url("./assets/theme-neo-tokyo.png"); }
 .theme-cosmos .theme-option-preview { background-image: linear-gradient(180deg, rgba(5, 5, 40, .04), rgba(4, 3, 25, .84)), url("./assets/theme-cosmos.png"); }
@@ -5197,6 +5166,38 @@ button[type="submit"]:hover,
   .theme-option { transition: transform 180ms ease, border-color 180ms ease, box-shadow 180ms ease; }
   .theme-option:hover { border-color: rgba(83, 201, 255, .7); box-shadow: 0 12px 25px rgba(0, 109, 204, .2); transform: translateY(-2px); }
   .theme-option:hover .theme-option-preview { filter: saturate(1.12); transform: scale(1.04); }
+}
+
+:root[data-theme="japan-dark"] {
+  --bg: #0c0c0e; --bg-soft: #171619; --surface: #18171b; --surface-light: #242126;
+  --text: #f5eff0; --text-soft: #c8bec2; --text-muted: #a99da3;
+  --line: rgba(183, 62, 79, .28); --line-bright: rgba(237, 92, 111, .64);
+  --blue: #c93249; --blue-light: #ff8898; --blue-deep: #80172b; --cyan: #f26e82;
+  --gradient: linear-gradient(135deg, #d63850, #a61e35, #701326);
+  --theme-panel: rgba(20, 19, 23, .93); --theme-panel-raised: #252127;
+  --theme-control: rgba(15, 14, 18, .94); --theme-line: var(--line);
+  --theme-accent: #ef596b; --theme-art: #ca344e; --theme-art-base: #22161c;
+  --nodus-logo-filter: hue-rotate(138deg) saturate(1.6) brightness(1.12);
+  --theme-wallpaper: url("./assets/theme-feudal-japan-dark.png");
+  --theme-entry-art: url("./assets/theme-feudal-japan-dark-torii.png");
+}
+
+:root[data-theme="japan-dark"] :is(.apex-app:not(.remote-mode), .standby-screen) { background: linear-gradient(rgba(8, 8, 10, .15), rgba(8, 8, 10, .35)), var(--theme-wallpaper) center / cover no-repeat; }
+:root[data-theme="japan-dark"] .access-gate { background: linear-gradient(rgba(8, 8, 10, .2), rgba(8, 8, 10, .45)), var(--theme-entry-art) center / cover no-repeat !important; }
+:root[data-theme="japan-dark"] .workspace-header { background: linear-gradient(90deg, rgba(12, 11, 14, .86), rgba(12, 11, 14, .64)), var(--theme-entry-art) center / cover no-repeat; border-color: var(--theme-line); }
+:root[data-theme="japan-dark"] .app-sidebar { background: var(--bg); border-color: var(--theme-line); }
+:root[data-theme="japan-dark"] .app-sidebar::after { background: linear-gradient(rgba(12, 11, 14, .38), rgba(12, 11, 14, .78)), var(--theme-entry-art) 16% center / cover no-repeat; }
+:root[data-theme="japan-dark"] :is(.access-card, .confirm-modal, .incoming-request-panel) { background: var(--theme-panel); border-color: var(--theme-line); color: var(--text); }
+:root[data-theme="japan-dark"] :is(.sidebar-kicker, .sidebar-brand .logo small, .panel-label svg, .quick-access-panel svg, .nodus-id-value em) { color: var(--theme-accent); }
+:root[data-theme="japan-dark"] .connection-overview .connect-box { background: var(--theme-panel); border-color: var(--theme-line); }
+:root[data-theme="japan-dark"] :is(.icon-button, .quick-access-panel button > svg:first-child) { background: var(--theme-control); border-color: var(--theme-line); color: var(--theme-accent); }
+:root[data-theme="japan-dark"] .theme-option.active { border-color: var(--theme-accent); box-shadow: 0 0 0 1px var(--theme-line); }
+:root[data-theme="japan-dark"] .theme-option.active::after { background: var(--theme-accent); box-shadow: 0 0 10px var(--theme-line); }
+:root[data-theme="japan-dark"] .workspace-footer { background: var(--theme-panel); border-color: var(--theme-line); color: var(--text-soft); }
+:root[data-theme="japan-dark"] .workspace-footer b { background: var(--theme-line); }
+:root[data-theme="japan-dark"] .workspace-footer svg { color: var(--theme-accent); }
+@media (max-width: 900px) {
+  :root[data-theme="japan-dark"] .apex-app:not(.remote-mode) { grid-template-columns: minmax(0, 1fr); }
 }
 
 :root[data-theme="japan"] {
@@ -5513,7 +5514,8 @@ button[type="submit"]:hover,
   padding: 0 8px;
   font-size: .7rem;
 }
-:root[data-theme] :is(.apex-app, .access-gate, .device-menu-actions, .quick-support-shell, .support-generator) :is(.recent-device-row > .recent-device-connect, .connection-overview .connect-box > button, .device-access:not(:disabled), .themed-action) {
+:root[data-theme] :is(.apex-app, .access-gate, .device-menu-actions, .quick-support-shell, .support-generator) :is(.recent-device-row > .recent-device-connect, .connection-overview .connect-box > button, .device-access:not(:disabled), .themed-action),
+.support-generator input[type="file"]::file-selector-button {
   --connect-accent: var(--theme-accent, var(--blue));
   min-width: 0;
   gap: 6px;
@@ -5527,7 +5529,8 @@ button[type="submit"]:hover,
   cursor: pointer;
 }
 :root[data-theme] :is(.apex-app, .access-gate, .device-menu-actions, .quick-support-shell, .support-generator) :is(.recent-device-row > .recent-device-connect, .connection-overview .connect-box > button, .device-access:not(:disabled), .themed-action) svg { flex-shrink: 0; }
-:root[data-theme] :is(.apex-app, .access-gate, .device-menu-actions, .quick-support-shell, .support-generator) :is(.recent-device-row > .recent-device-connect, .connection-overview .connect-box > button, .device-access:not(:disabled), .themed-action):not(:disabled):hover {
+:root[data-theme] :is(.apex-app, .access-gate, .device-menu-actions, .quick-support-shell, .support-generator) :is(.recent-device-row > .recent-device-connect, .connection-overview .connect-box > button, .device-access:not(:disabled), .themed-action):not(:disabled):hover,
+.support-generator input[type="file"]:not(:disabled)::file-selector-button:hover {
   border-color: var(--connect-accent) !important;
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, .2), 0 4px 12px color-mix(in srgb, var(--connect-accent) 24%, transparent) !important;
 }
@@ -6400,6 +6403,8 @@ button[type="submit"]:hover,
 .support-generator h3 { margin: 0; }
 .support-generator .settings-field { display: grid; gap: 8px; }
 .support-generator input:not([type="checkbox"]) { width: 100%; min-width: 0; }
+.support-generator input[type="file"]::file-selector-button { min-height: 32px; margin-right: 12px; padding: 6px 12px; font-family: inherit; font-size: .75rem; }
+.support-generator .is-checking { animation: rotate 1s linear infinite; }
 .support-password-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
 .support-option { display: flex; align-items: center; gap: 10px; }
 .support-option input[type="checkbox"] { flex: 0 0 16px; width: 16px; height: 16px; margin: 0; accent-color: var(--theme-accent, var(--blue)); }

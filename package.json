@@ -1,6 +1,6 @@
 {
   "name": "nodus-connect",
-  "version": "1.1.11",
+  "version": "1.1.15",
   "description": "Acesso remoto seguro, rapido e gratuito.",
   "author": "Nodus Connect",
   "private": true,
@@ -22,7 +22,7 @@
     "desktop:start": "node scripts/desktop-runner.mjs start",
     "desktop:pack": "pnpm icons && pnpm native:capture && pnpm native:media && pnpm native:media:runtime && pnpm build && electron-builder --win --x64 --dir",
     "desktop:build": "pnpm icons && pnpm native:capture && pnpm native:media && pnpm native:media:runtime && pnpm build && electron-builder --win --x64",
-    "installer:build": "pnpm icons && pnpm native:capture && pnpm native:media && pnpm native:media:runtime && pnpm native:service && pnpm build && electron-builder --win --x64 --dir --config installer-builder.json && node scripts/make-installer.mjs",
+    "installer:build": "pnpm icons && pnpm native:capture && pnpm native:media && pnpm native:media:runtime && pnpm native:service && pnpm build && electron-builder --win --x64 --dir --config installer-builder.json && node scripts/build-quick-support.mjs && electron-builder --win portable --x64 --config quick-support-builder.cjs && node scripts/make-installer.mjs",
     "perf:local": "pnpm build && pnpm exec electron scripts/local-performance-lab.cjs",
     "build": "node scripts/build-quick-support.mjs --prepare && tsc --noEmit && vite build --config apps/desktop/vite.config.ts",
     "quick-support:build": "node scripts/build-quick-support.mjs && pnpm build && electron-builder --win portable --x64 --config quick-support-builder.cjs",

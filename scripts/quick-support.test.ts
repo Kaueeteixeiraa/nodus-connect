@@ -1,4 +1,5 @@
-import { generateKeyPairSync } from "node:crypto";
+import { createHash, generateKeyPairSync, randomUUID } from "node:crypto";
+import { Readable } from "node:stream";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -132,6 +133,30 @@ test("the existing native save flow generates, verifies and cancels without anot
   await expect(generate({ token: token + "bad" })).rejects.toThrow();
   expect(dialog.showSaveDialog).toHaveBeenCalledTimes(2);
 });
+test("installed generator uses only the signed matching template and rejects corrupt downloads", async () => {
+  const root = directory(), output = path.join(root, "Customer.exe"), template = Buffer.from("MZportable fixture");
+  const sha256 = createHash("sha256").update(template).digest("hex");
+  const original = { ...await profile(), template: { version: "1.1.14", sha256 } };
+  const token = support.signProfile(original, keys.privateKey);
+  const source = ts.createSourceFile("main.cjs", fs.readFileSync("apps/desktop/electron/main.cjs", "utf8"), ts.ScriptTarget.Latest, true, ts.ScriptKind.JS);
+  const code = source.statements.filter(node => ts.isFunctionDeclaration(node) && ["hashFile", "downloadVerifiedFile", "generateSupportPackage"].includes(node.name?.text || "")).map(node => node.getText(source)).join("\n");
+  const fetch = vi.fn<typeof globalThis.fetch>(async () => new Response(template));
+  const generate = runInNewContext(`${code}; generateSupportPackage`, { fs, path, crypto: { createHash, randomUUID }, Readable, fetch, AbortController, setTimeout, clearTimeout, require: createRequire(import.meta.url), supportPackages: support, supportKey: keys.publicKey, app: { isPackaged: true, getVersion: () => "1.1.14", getPath: () => root }, __dirname: root, dialog: { showSaveDialog: async () => ({ canceled: false, filePath: output }) }, mainWindow: {} });
+  await expect(generate({ token })).resolves.toEqual({ path: output });
+  expect(fetch.mock.calls[0][0]).toBe("https://github.com/Kaueeteixeiraa/nodus-connect/releases/download/v1.1.14/Nodus-QuickSupport-1.1.14.exe");
+  expect(support.readProfile(output, keys.publicKey)).toEqual(original);
+  fs.rmSync(output);
+  await generate({ token }); expect(fetch).toHaveBeenCalledOnce();
+  fs.rmSync(output);
+  fs.writeFileSync(path.join(root, "support-cache", `${sha256}.exe`), "corrupted cache");
+  fetch.mockResolvedValueOnce(new Response("corrupted download"));
+  await expect(generate({ token })).rejects.toThrow("DOWNLOAD_INTEGRITY_FAILED");
+  expect(fs.existsSync(output)).toBe(false);
+  expect(fs.readdirSync(path.join(root, "support-cache")).some(name => name.endsWith(".tmp"))).toBe(false);
+  const oldToken = support.signProfile({ ...original, template: { version: "1.1.13", sha256 } }, keys.privateKey);
+  await expect(generate({ token: oldToken })).rejects.toThrow("O template portatil desta versao ainda nao foi publicado.");
+  expect(fetch).toHaveBeenCalledTimes(2);
+});
 test("copying only a branded executable creates a distinct identity; renaming and restarting preserve it", async () => {
   const root = directory(), config = await profile();
   const { createDeviceIdentityStore } = createRequire(import.meta.url)("../apps/desktop/electron/device-identity.cjs");
@@ -170,7 +195,7 @@ test("receiver settings and active view expose no installer, login, history or l
 });
 test("portable packaging inherits the existing file exclusions and native resources, not the whole repository", () => {
   const require = createRequire(import.meta.url), base = require("../package.json").build, portable = require("../quick-support-builder.cjs");
-  expect(portable.files).toEqual([...base.files, "!dist/desktop/assets/*.png", "!dist/desktop/assets/Standby3D-*.js"]);
+  expect(portable.files).toEqual([...base.files, "!dist/desktop/assets/theme-*.png", "!dist/desktop/assets/nodus-nightscape-*.png", "!dist/desktop/assets/nodus-future-grid-*.png", "!dist/desktop/assets/Standby3D-*.js"]);
   expect(portable.compression).toBe("maximum");
   expect(portable.extraResources).toEqual(base.extraResources);
   expect(portable.afterPack).toBe(base.afterPack);

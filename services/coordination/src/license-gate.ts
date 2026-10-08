@@ -5,6 +5,7 @@ export class RelayLicenseGate {
   private policy?: { enforced: boolean; until: number };
   private policyRequest?: Promise<boolean>;
   private cache = new Map<string, number>();
+  private authorizationRequests = new Map<string, Promise<void>>();
   constructor(private readonly base = process.env.NODUS_LICENSE_API ?? "", private readonly fetcher = fetch) {
     if (base) { const url = new URL(base); if (url.protocol !== "https:" && !["localhost", "127.0.0.1"].includes(url.hostname)) throw new Error("INVALID_LICENSE_API"); }
   }
@@ -32,12 +33,22 @@ export class RelayLicenseGate {
     const cacheable = body.kind === "identity" || body.kind === "signal";
     const key = createHash("sha256").update(token).update(JSON.stringify(body)).digest("hex");
     if (cacheable && (this.cache.get(key) ?? 0) > Date.now()) return;
-    const value = await this.call(body.kind === "identity" ? "/license/transport/identity" : "/license/transport/authorize", token, body);
-    if (!value.allowed || (enforced && !value.enforced)) throw new LicenseError("FORBIDDEN");
-    if (cacheable) {
-      if (this.cache.size > 10_000) for (const [id, until] of this.cache) if (until <= Date.now()) this.cache.delete(id);
-      if (this.cache.size >= 10_000) throw new LicenseError("SERVER_UNAVAILABLE");
-      this.cache.set(key, Date.now() + (body.kind === "identity" ? 5000 : 30_000));
+    if (cacheable && this.authorizationRequests.has(key)) return this.authorizationRequests.get(key);
+    const authorize = async () => {
+      const value = await this.call(body.kind === "identity" ? "/license/transport/identity" : "/license/transport/authorize", token, body);
+      if (!value.allowed || (enforced && !value.enforced)) throw new LicenseError("FORBIDDEN");
+      if (cacheable) {
+        if (this.cache.size >= 10_000) for (const [id, until] of this.cache) if (until <= Date.now()) this.cache.delete(id);
+        if (this.cache.size >= 10_000) throw new LicenseError("SERVER_UNAVAILABLE");
+        this.cache.set(key, Date.now() + (body.kind === "identity" ? 5000 : 30_000));
+      }
+    };
+    if (!cacheable) return authorize();
+    if (this.authorizationRequests.size >= 10_000) throw new LicenseError("SERVER_UNAVAILABLE");
+    const pending = authorize();
+    this.authorizationRequests.set(key, pending);
+    try { await pending; } finally {
+      if (this.authorizationRequests.get(key) === pending) this.authorizationRequests.delete(key);
     }
   }
 }

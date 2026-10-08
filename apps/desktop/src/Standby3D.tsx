@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import * as THREE from "three";
-import nodusLogo from "./assets/nodus-logo.png?inline";
+import nodusLogo from "./assets/nodus-logo.png";
 
 function faceTexture(logoFilter: string): THREE.CanvasTexture {
   const canvas = document.createElement("canvas");

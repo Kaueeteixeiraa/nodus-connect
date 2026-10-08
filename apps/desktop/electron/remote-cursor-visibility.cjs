@@ -13,7 +13,8 @@ class RemoteCursorVisibility {
     this.timer.unref?.();
   }
 
-  setActive(active) {
+  setActive(active, hideOnRemote = true) {
+    this.hideOnRemote = hideOnRemote;
     if (this.disposed) return;
     if (!active) {
       this.active = false;
@@ -41,7 +42,7 @@ class RemoteCursorVisibility {
   remoteMouseActivity(input) {
     if (!this.active || this.blocked || this.disposed || !this.helper || this.helper.stopping) return;
     if (!["mouseMove", "mouseDown", "mouseUp", "wheel"].includes(input.type)) return;
-    try { this.helper.stdin.write("M"); }
+    try { this.helper.stdin.write(this.hideOnRemote ? "M" : "V"); }
     catch (error) { this.fail(this.helper, error); }
   }
 
@@ -55,7 +56,9 @@ class RemoteCursorVisibility {
         const lines = buffer.split(/\r?\n/);
         buffer = lines.pop();
         for (const line of lines) {
-          if (line === "[CURSOR] Physical host mouse active") this.onHostMouseActivity();
+          if (["[CURSOR] Physical host mouse active", "[CURSOR] Physical host pointer moved"].includes(line)
+            && this.active && this.helper === helper && !helper.stopping) this.onHostMouseActivity();
+          if (line === "[CURSOR] Physical host pointer moved") continue;
           if (line.startsWith("[CURSOR]")) this.log(line);
         }
       });

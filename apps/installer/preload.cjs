@@ -5,6 +5,7 @@ contextBridge.exposeInMainWorld("nodusInstaller", {
   cancelInstall: () => ipcRenderer.invoke("cancel-install"),
   uninstall: (options) => ipcRenderer.invoke("uninstall", options),
   getSystemInfo: () => ipcRenderer.invoke("system-info"),
+  markUiReady: () => ipcRenderer.send("ui-ready"),
   selectInstallDir: () => ipcRenderer.invoke("select-install-dir"),
   openApp: () => ipcRenderer.invoke("open-app"),
   setDesktopShortcut: (enabled) => ipcRenderer.invoke("set-desktop-shortcut", enabled),

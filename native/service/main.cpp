@@ -134,12 +134,53 @@ void sendMouseButton(std::uint8_t button, bool down) {
   SendInput(1, &input, sizeof(input));
 }
 
-int runInputHelper() {
+class OwnWindowCaptionClick {
+  DWORD ownerPid;
+  HWND pressedWindow = nullptr;
+  LRESULT pressedHit = HTNOWHERE;
+
+  HWND target(POINT point, LRESULT& hit) const {
+    const HWND window = GetAncestor(WindowFromPoint(point), GA_ROOT);
+    DWORD pid = 0;
+    GetWindowThreadProcessId(window, &pid);
+    if (!ownerPid || pid != ownerPid || !IsWindowEnabled(window)) return nullptr;
+    DWORD_PTR result = 0;
+    if (!SendMessageTimeoutW(window, WM_NCHITTEST, 0, MAKELPARAM(point.x, point.y),
+      SMTO_ABORTIFHUNG | SMTO_BLOCK, 50, &result)) return nullptr;
+    hit = static_cast<LRESULT>(result);
+    return hit == HTCLOSE || hit == HTMINBUTTON || hit == HTMAXBUTTON ? window : nullptr;
+  }
+public:
+  explicit OwnWindowCaptionClick(DWORD ownerPid) : ownerPid(ownerPid) {}
+  bool handle(const InputPacket& packet) {
+    if (packet.button != 0) return false;
+    LRESULT hit = HTNOWHERE;
+    const POINT point{packet.x, packet.y};
+    if (packet.type == 2) {
+      pressedWindow = target(point, hit);
+      pressedHit = hit;
+      return pressedWindow != nullptr;
+    }
+    if (packet.type != 3 || !pressedWindow) return false;
+    const HWND window = pressedWindow;
+    pressedWindow = nullptr;
+    if (target(point, hit) != window || hit != pressedHit) return true;
+    const UINT command = hit == HTCLOSE ? SC_CLOSE : hit == HTMINBUTTON ? SC_MINIMIZE
+      : IsZoomed(window) ? SC_RESTORE : SC_MAXIMIZE;
+    const UINT state = GetMenuState(GetSystemMenu(window, FALSE), command, MF_BYCOMMAND);
+    if (state != UINT(-1) && !(state & (MF_DISABLED | MF_GRAYED)))
+      PostMessageW(window, WM_SYSCOMMAND, command, MAKELPARAM(point.x, point.y));
+    return true;
+  }
+};
+
+int runInputHelper(DWORD ownerPid) {
   _setmode(_fileno(stdin), _O_BINARY);
   InputPacket packet{};
   bool pressedKeys[256]{};
   bool extendedKeys[256]{};
   bool pressedButtons[3]{};
+  OwnWindowCaptionClick captionClick(ownerPid);
   while (std::fread(&packet, sizeof(packet), 1, stdin) == 1) {
     if (packet.type == 7) {
       POINT point{};
@@ -152,6 +193,8 @@ int runInputHelper() {
       SetCursorPos(packet.x, packet.y);
     } else if (packet.type == 2 || packet.type == 3) {
       SetCursorPos(packet.x, packet.y);
+      // Native caption commands preserve Electron's close/minimize lifecycle.
+      if (!pressedButtons[0] && captionClick.handle(packet)) continue;
       sendMouseButton(packet.button, packet.type == 2);
       if (packet.button < 3) pressedButtons[packet.button] = packet.type == 2;
     } else if (packet.type == 4) {
@@ -550,15 +593,30 @@ int runCursorVisibilityHelper(DWORD parentPid, bool dryRun) {
       std::fflush(stdout);
       HANDLE living[] = { parent, watchdog.hProcess };
       const HANDLE input = GetStdHandle(STD_INPUT_HANDLE);
+      bool viewerOwner = false, hostMoved = false, reportedPoint = false;
+      POINT lastHostPoint{};
+      ULONGLONG lastHostReport = 0;
       while (true) {
         const DWORD wake = MsgWaitForMultipleObjects(2, living, FALSE, 10, QS_RAWINPUT);
         if (wake != WAIT_TIMEOUT && wake != WAIT_OBJECT_0 + 2) break;
         // Raw device input distinguishes the host's mouse from Nodus SetCursorPos/SendInput.
         const bool localActivity = physicalMouse.take();
-        if (!dryRun && localActivity && cursor.isRemoteOwner()) {
-          std::puts("[CURSOR] Physical host mouse active");
+        if (!dryRun && localActivity) {
+          hostMoved = true;
+          if (viewerOwner) {
+            std::puts("[CURSOR] Physical host mouse active");
+            std::fflush(stdout);
+            if (cursor.isRemoteOwner() && !cursor.yieldToHost()) break;
+          }
+          viewerOwner = false;
+        }
+        POINT hostPoint{};
+        const ULONGLONG now = GetTickCount64();
+        if (!dryRun && hostMoved && !viewerOwner && now - lastHostReport >= 33 && GetCursorPos(&hostPoint)
+          && (!reportedPoint || hostPoint.x != lastHostPoint.x || hostPoint.y != lastHostPoint.y)) {
+          lastHostPoint = hostPoint; reportedPoint = true; lastHostReport = now;
+          std::puts("[CURSOR] Physical host pointer moved");
           std::fflush(stdout);
-          if (!cursor.yieldToHost()) break;
         }
         cursor.update();
         DWORD available = 0, count = 0;
@@ -572,7 +630,10 @@ int runCursorVisibilityHelper(DWORD parentPid, bool dryRun) {
           if (commands[i] == 'H') {
             if (!SetEvent(pulse)) { done = true; break; }
           }
-          if (commands[i] == 'M' && !cursor.hide()) { done = true; break; }
+          if (commands[i] == 'M' || commands[i] == 'V') {
+            viewerOwner = true; hostMoved = false; reportedPoint = false;
+            if (commands[i] == 'M' ? !cursor.hide() : !cursor.restore()) { done = true; break; }
+          }
           if (commands[i] == 'L' && dryRun && !cursor.restore()) { done = true; break; }
           if ((commands[i] == 'N' || commands[i] == 'P') && dryRun) {
             physicalMouse.simulateMovement(commands[i] == 'P' ? 8 : 1);
@@ -721,7 +782,8 @@ int wmain(int argc, wchar_t** argv) {
     return runCursorVisibilityHelper(std::wcstoul(argv[2], nullptr, 10), argc >= 4 && _wcsicmp(argv[3], L"--dry-run") == 0);
   if (argc >= 5 && _wcsicmp(argv[1], L"--cursor-restore-watchdog") == 0)
     return runCursorWatchdog(std::wcstoul(argv[2], nullptr, 10), std::wcstoul(argv[3], nullptr, 10), argv[4], argc >= 6 && _wcsicmp(argv[5], L"--dry-run") == 0);
-  if (argc >= 2 && _wcsicmp(argv[1], L"--input-helper") == 0) return runInputHelper();
+  if (argc >= 2 && _wcsicmp(argv[1], L"--input-helper") == 0)
+    return runInputHelper(argc >= 3 ? std::wcstoul(argv[2], nullptr, 10) : 0);
   if (argc >= 3 && _wcsicmp(argv[1], L"--input-lock-helper") == 0) return runInputLockHelper(std::wcstoul(argv[2], nullptr, 10));
   if (argc >= 3 && _wcsicmp(argv[1], L"--install") == 0) {
     SC_HANDLE manager = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CREATE_SERVICE);

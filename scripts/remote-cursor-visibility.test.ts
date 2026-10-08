@@ -130,6 +130,19 @@ test("physical host mouse ownership is forwarded once to the renderer", () => {
   expect(onHostMouseActivity).toHaveBeenCalledOnce();
 });
 
+test("host pointer updates are forwarded without flooding diagnostic logs", () => {
+  const { cursor, child, onHostMouseActivity, log } = fixture();
+  cursor.setActive(true, false);
+  cursor.remoteMouseActivity({ type: "mouseMove" });
+  expect(child.stdin.write).toHaveBeenLastCalledWith("V");
+  child.stdout.emit("data", Buffer.from("[CURSOR] Physical host pointer moved\n"));
+  expect(onHostMouseActivity).toHaveBeenCalledOnce();
+  expect(log).not.toHaveBeenCalledWith("[CURSOR] Physical host pointer moved");
+  cursor.setActive(false);
+  child.stdout.emit("data", Buffer.from("[CURSOR] Physical host pointer moved\n"));
+  expect(onHostMouseActivity).toHaveBeenCalledOnce();
+});
+
 function functionSource(file: string, name: string) {
   const source = ts.createSourceFile(file, readFileSync(file, "utf8"), ts.ScriptTarget.Latest, true, file.endsWith("tsx") ? ts.ScriptKind.TSX : ts.ScriptKind.JS);
   let text = "";
@@ -147,25 +160,25 @@ const functionHash = (file: string, name: string) => hash(functionSource(file, n
 test("ending one host session keeps hiding only while another controlled host is connected", () => {
   const setActive = vi.fn(async () => {});
   const peers = new Map([ ["a", { connectionState: "connected" }], ["b", { connectionState: "connected" }], ["viewer", { connectionState: "connected" }] ]);
-  const sessions = ["a", "b", "viewer"].map((id) => ({ session: { sessionId: id, role: id === "viewer" ? "viewer" : "host", permissions: ["mouse:control"] }, error: "" }));
+  const sessions = ["a", "b", "viewer"].map((id) => ({ session: { sessionId: id, role: id === "viewer" ? "viewer" : "host", permissions: ["screen:view", "mouse:control"] }, error: "" }));
   const source = ts.transpile(functionSource("apps/desktop/src/App.tsx", "syncHostCursorVisibility"), { target: ts.ScriptTarget.ES2022 });
   const sync = runInNewContext(`${source}; syncHostCursorVisibility`, {
     shouldHideHostCursor, sessionsRef: { current: sessions }, peersRef: { current: peers },
     nativeHostSessionsRef: { current: new Set<string>() }, settings: { allowRemoteControl: true }, window: { nodusDesktop: { setHostCursorActive: setActive } },
   });
   sync("a");
-  expect(setActive).toHaveBeenLastCalledWith(true);
+  expect(setActive).toHaveBeenLastCalledWith(true, true);
   peers.get("b")!.connectionState = "failed";
   sync("a");
-  expect(setActive).toHaveBeenLastCalledWith(false);
+  expect(setActive).toHaveBeenLastCalledWith(false, false);
 });
 
 test("WGC keeps the physical cursor visible to the host because it is excluded from video", () => {
   const setActive = vi.fn(async () => {}), sessionId = "wgc";
   const source = ts.transpile(functionSource("apps/desktop/src/App.tsx", "syncHostCursorVisibility"), { target: ts.ScriptTarget.ES2022 });
-  const sync = runInNewContext(`${source}; syncHostCursorVisibility`, { shouldHideHostCursor, sessionsRef: { current: [{ session: { sessionId, role: "host", permissions: ["mouse:control"] }, error: "" }] }, peersRef: { current: new Map([[sessionId, { connectionState: "connected" }]]) }, nativeHostSessionsRef: { current: new Set([sessionId]) }, settings: { allowRemoteControl: true }, window: { nodusDesktop: { setHostCursorActive: setActive } } });
+  const sync = runInNewContext(`${source}; syncHostCursorVisibility`, { shouldHideHostCursor, sessionsRef: { current: [{ session: { sessionId, role: "host", permissions: ["screen:view", "mouse:control"] }, error: "" }] }, peersRef: { current: new Map([[sessionId, { connectionState: "connected" }]]) }, nativeHostSessionsRef: { current: new Set([sessionId]) }, settings: { allowRemoteControl: true }, window: { nodusDesktop: { setHostCursorActive: setActive } } });
   sync();
-  expect(setActive).toHaveBeenCalledWith(false);
+  expect(setActive).toHaveBeenCalledWith(true, false);
 });
 
 test("Chromium acquisition requests native resolution and never less than 30 FPS", () => {
@@ -175,7 +188,7 @@ test("Chromium acquisition requests native resolution and never less than 30 FPS
   expect(source).toContain("resolutionForSource");
 });
 
-test("mouse injection and packet coordinates remain unchanged outside bounded movement scheduling", () => {
+test("ordinary mouse injection and packet coordinates remain unchanged outside scheduling and own captions", () => {
   const inputSource = functionSource("apps/desktop/electron/main.cjs", "applyRemoteInput").replace(/\r\n/g, "\n");
   expect(inputSource).toContain('helper.stdin.write(helper.nodusBinaryInput ? encodeRemoteInput(message) : `${JSON.stringify(message)}\\n`);\n    hostCursorVisibility?.remoteMouseActivity(message);');
   const baseline = inputSource
@@ -184,9 +197,12 @@ test("mouse injection and packet coordinates remain unchanged outside bounded mo
     .replace("    hostCursorVisibility?.remoteMouseActivity(message);\n", "");
   expect(hash(baseline)).toBe("04aa1af9f01261fd9e9f3a2b67dbca98a25c6fae6bdfec79120a9a79808fc03a");
   expect(functionHash("apps/desktop/electron/main.cjs", "encodeRemoteInput")).toBe("264100b5230a7b7313711e3d093c4a2c2fa12d89579db71999dd543b476a7200");
-  const nativeInput = readFileSync("native/service/main.cpp", "utf8").replace(/\r\n/g, "\n").match(/int runInputHelper\(\) \{[\s\S]*?\n\}/)![0];
-  // Exclude the read-only barrier and EOF cleanup bookkeeping, not the live injection paths.
+  const nativeInput = readFileSync("native/service/main.cpp", "utf8").replace(/\r\n/g, "\n").match(/int runInputHelper\(DWORD ownerPid\) \{[\s\S]*?\n\}/)![0];
+  // Own-caption routing has a native test; ordinary injection must retain its baseline.
   const baselineInput = nativeInput
+    .replace("int runInputHelper(DWORD ownerPid)", "int runInputHelper()")
+    .replace("  OwnWindowCaptionClick captionClick(ownerPid);\n", "")
+    .replace("      // Native caption commands preserve Electron's close/minimize lifecycle.\n      if (!pressedButtons[0] && captionClick.handle(packet)) continue;\n", "")
     .replace(/    if \(packet.type == 7\) \{[\s\S]*?      continue;\n    \}\n/, "")
     .replace("  bool extendedKeys[256]{};\n  bool pressedButtons[3]{};\n", "")
     .replace("      if (packet.button < 3) pressedButtons[packet.button] = packet.type == 2;\n", "")
@@ -214,7 +230,9 @@ test("host-only pointer fails closed on unsupported capture exclusion and never 
   expect(overlay).toContain("if (window) DestroyWindow(window)");
   expect(source).toMatch(/bool restore\(\) \{\s*pointer.hide\(\)/);
   expect(source).toContain("if (hidden && !dryRun) pointer.update()");
-  expect(source).toContain("localActivity && cursor.isRemoteOwner()");
+  expect(source).toContain("!dryRun && localActivity");
+  expect(source).toContain("now - lastHostReport >= 33");
+  expect(source).toContain("hostMoved && !viewerOwner");
   expect(source).toMatch(/bool yieldToHost\(\) \{\s*remoteOwner = false;\s*if \(!dryRun && pointer.prepare\(\)\) \{ pointer.update\(\); return true; \}/);
 });
 

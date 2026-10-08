@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { exportSettingsBackup, importSettingsBackup, loadSettings, saveSettings } from "../apps/desktop/src/core/storage";
+import { readFileSync } from "node:fs";
+import { exportSettingsBackup, hideDeviceFromCatalog, importSettingsBackup, loadFavorites, loadHiddenCatalogDevices, loadRecents, loadSettings, renameDevice, saveRecent, saveSettings, toggleFavorite, updateDevicePresence } from "../apps/desktop/src/core/storage";
 
 const values = new Map<string, string>();
 vi.stubGlobal("localStorage", {
@@ -10,7 +11,46 @@ vi.stubGlobal("localStorage", {
 
 beforeEach(() => values.clear());
 
+describe("device catalog", () => {
+  it("restores a removed device on reconnect without restoring other devices or losing metadata", () => {
+    const device = { nodusId: "123456789", deviceName: "Cliente", status: "online" as const, updatedAt: new Date().toISOString(), capabilities: [] };
+    saveRecent(device);
+    renameDevice(device.nodusId, "Suporte");
+    toggleFavorite(device.nodusId);
+    hideDeviceFromCatalog(device.nodusId);
+    hideDeviceFromCatalog("987654321");
+    updateDevicePresence(device.nodusId, device);
+    expect(loadHiddenCatalogDevices()).toContain(device.nodusId);
+
+    const visible = saveRecent(device).filter(item => !loadHiddenCatalogDevices().includes(item.nodusId));
+    expect(visible).toHaveLength(1);
+    expect(visible[0]).toMatchObject({ nodusId: device.nodusId, alias: "Suporte", favorite: true });
+    expect(loadHiddenCatalogDevices()).toEqual(["987654321"]);
+    expect(loadFavorites()).toEqual([device.nodusId]);
+    expect(loadRecents()).toEqual(visible);
+
+    hideDeviceFromCatalog(device.nodusId);
+    saveRecent(device);
+    expect(loadHiddenCatalogDevices()).toEqual(["987654321"]);
+    expect(loadRecents()).toHaveLength(1);
+  });
+});
+
 describe("settings backup", () => {
+  it("dark feudal Japan uses its own footer palette without changing the online indicator", () => {
+    const css = readFileSync("apps/desktop/src/styles.css", "utf8");
+    expect(css).toContain(':root[data-theme="japan-dark"] .workspace-footer { background: var(--theme-panel); border-color: var(--theme-line); color: var(--text-soft); }');
+    expect(css).toContain(':root[data-theme="japan-dark"] .workspace-footer svg { color: var(--theme-accent); }');
+    expect(css).not.toContain(':root[data-theme="japan-dark"] .footer-online');
+  });
+  it("preserves dark feudal Japan across save, reload and backup restore", () => {
+    saveSettings({ ...loadSettings(), theme: "japan-dark" });
+    expect(loadSettings().theme).toBe("japan-dark");
+    const backup = exportSettingsBackup();
+    saveSettings({ ...loadSettings(), theme: "dark" });
+    expect(importSettingsBackup(backup).settings.theme).toBe("japan-dark");
+    expect(loadSettings().theme).toBe("japan-dark");
+  });
   it("keeps session indicators enabled for old settings and persists the toggle in backups", () => {
     values.set("nodus.settings.v1", JSON.stringify({ theme: "dark" }));
     expect(loadSettings().showConnectionMetrics).toBe(true);

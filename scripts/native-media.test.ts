@@ -166,7 +166,7 @@ function hostFixture(native: boolean, fallback: boolean, ready = false, startupE
     nativeMediaListenersRef: ref(), nativeMediaStatsRef: ref(), nativeHostTimersRef: timers,
     nativeHostDisplaysRef: ref(), nativeHostSessionsRef: nativeSessions,
     captureSources: [{ id: "display", width: 1920, height: 1080 }], nativeVideoBitrate: () => 14000000,
-    logMediaDiagnostic: vi.fn(), fallbackHostNativeMedia: fallbackNative, sendReliableSignal: async () => {},
+    logMediaDiagnostic: vi.fn(), logConnectionPhase: vi.fn(), connectionTimingsRef: { current: new Map() }, fallbackHostNativeMedia: fallbackNative, sendReliableSignal: async () => {},
     settings: { preferredResolution: "1920x1080", maxFps: 60, allowRemoteControl: true },
     identity: { deviceName: "host", nodusId: "123456789" },
     performanceDiagnosticRef: { current: null }, iceWarmupRef: { current: null }, DESKTOP_VIDEO_POLICY,

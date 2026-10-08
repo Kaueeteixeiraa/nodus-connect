@@ -1,5 +1,5 @@
 const { app, BrowserWindow, Menu, Tray, clipboard, desktopCapturer, dialog, ipcMain, nativeImage, powerSaveBlocker, safeStorage, screen, session, shell } = require("electron");
-const { spawn, spawnSync } = require("node:child_process");
+const { spawn, spawnSync, execFile } = require("node:child_process");
 const crypto = require("node:crypto");
 const dgram = require("node:dgram");
 const fs = require("node:fs");
@@ -43,9 +43,21 @@ const inputLocks = new Map();
 let captureOptions = { sourceId: "", displayId: "", shareAudio: true };
 let powerSaveBlockerId = -1;
 let gpuInfoReady = false;
+let nativeCaptureStatusPromise;
+let nativeCaptureStatusExpires = 0;
+let gpuDiagnosticsPromise;
 let deviceIdentityStore;
 const nativeMedia = new Map();
 const logWriter = createLogWriter(() => path.join(app.getPath("userData"), "logs"));
+const startupMarks = new Set();
+
+function markStartup(phase, contents) {
+  const key = `${phase}:${contents?.id || 0}`;
+  if (startupMarks.has(key)) return;
+  startupMarks.add(key);
+  appendLog(JSON.stringify({ event: "startup", phase, at: new Date().toISOString(), processId: process.pid,
+    windowId: contents?.id || 0, mode: portableSupport ? "quicksupport" : "desktop", elapsedMs: Math.round(process.uptime() * 1000) }), "performance.log");
+}
 
 const isDev = process.env.NODUS_DESKTOP_DEV === "1";
 const devUrl = process.env.NODUS_DESKTOP_URL || "http://127.0.0.1:5173";
@@ -62,7 +74,13 @@ const hostCursorVisibility = process.platform === "win32"
       executable: nativeService,
       log: (message) => appendLog(message),
       onHostMouseActivity: () => {
-        if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.webContents.isDestroyed()) mainWindow.webContents.send("nodus:host-mouse-activity");
+        if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.webContents.isDestroyed()) {
+          const point = screen.getCursorScreenPoint();
+          const positions = screen.getAllDisplays().map(({ id, bounds }) => ({ displayId: String(id),
+            x: (point.x - bounds.x) / bounds.width, y: (point.y - bounds.y) / bounds.height,
+            visible: point.x >= bounds.x && point.x < bounds.x + bounds.width && point.y >= bounds.y && point.y < bounds.y + bounds.height }));
+          mainWindow.webContents.send("nodus:host-mouse-activity", positions);
+        }
       },
     })
   : null;
@@ -90,7 +108,7 @@ const performanceDiagnostic = getPerformanceDiagnostic();
 
 app.setName("Nodus Connect");
 app.setAppUserModelId("com.nodus.connect.desktop");
-app.on("gpu-info-update", () => { gpuInfoReady = true; });
+app.on("gpu-info-update", () => { gpuInfoReady = true; gpuDiagnosticsPromise = undefined; });
 if (userDataDir) app.setPath("userData", userDataDir);
 if (supportProfile) app.setPath("userData", path.join(app.getPath("appData"), "Nodus Connect", "QuickSupport", supportProfile.id));
 app.commandLine.appendSwitch("enable-zero-copy");
@@ -198,6 +216,7 @@ function createMainWindow() {
       backgroundThrottling: false,
     },
   });
+  markStartup("window-created", mainWindow.webContents);
 
   mainWindow.on("close", (event) => {
     if (isQuitting || !minimizeToTray) return;
@@ -250,6 +269,7 @@ function createMainWindow() {
   });
 
   mainWindow.once("ready-to-show", () => {
+    markStartup("ready-to-show", mainWindow.webContents);
     appendLog("ready-to-show");
     if (!startMinimized) mainWindow.show();
   });
@@ -325,7 +345,8 @@ function isAllowedAppUrl(url) {
 }
 
 function isMainAppSender(event) {
-  return event.sender === mainWindow?.webContents && isAllowedAppUrl(event.sender.getURL());
+  return Boolean(mainWindow && !mainWindow.isDestroyed() && !event.sender.isDestroyed()
+    && event.sender === mainWindow.webContents && isAllowedAppUrl(event.sender.getURL()));
 }
 
 function setRemoteControlActive(active) {
@@ -430,6 +451,7 @@ require("electron").ipcMain.on("nodus:tray-identity", (_event, identity) => {
 });
 
 function setupIpc() {
+  ipcMain.on("nodus:ui-ready", (event) => { if (isMainAppSender(event)) markStartup("ui-ready", event.sender); });
   ipcMain.handle("nodus:get-support-profile", () => supportProfile);
   ipcMain.handle("nodus:quit", (event) => { if (isMainAppSender(event)) quitApp(); });
   ipcMain.handle("nodus:generate-support-package", (event, input) => {
@@ -443,7 +465,7 @@ function setupIpc() {
   ipcMain.handle("nodus:get-server-info", () => getServerInfo());
   ipcMain.handle("nodus:get-app-info", () => ({ version: app.getVersion(), googleClientConfigured: Boolean(firebaseApiKey && firebaseAuthUrl) }));
   ipcMain.handle("nodus:set-theme-icon", (_event, theme, dataUrl) => {
-    if (!["dark", "japan", "sakura-night", "neo-tokyo", "cosmos", "arctic"].includes(theme)
+    if (!["dark", "japan", "japan-dark", "sakura-night", "neo-tokyo", "cosmos", "arctic"].includes(theme)
       || typeof dataUrl !== "string" || !dataUrl.startsWith("data:image/png;base64,") || dataUrl.length > 500_000) return false;
     try {
       const icon = nativeImage.createFromDataURL(dataUrl);
@@ -476,9 +498,9 @@ function setupIpc() {
     if (!sessionId || sessionId.length > 128) return { ok: false, error: "Sessão inválida." };
     return setHostInputLock(sessionId, Boolean(input?.mouse), Boolean(input?.keyboard));
   });
-  ipcMain.handle("nodus:set-host-cursor-active", (event, active) => {
-    if (event.sender !== mainWindow?.webContents) return;
-    hostCursorVisibility?.setActive(active === true);
+  ipcMain.handle("nodus:set-host-cursor-active", (event, active, hideOnRemote) => {
+    if (!isMainAppSender(event)) return;
+    hostCursorVisibility?.setActive(active === true, hideOnRemote !== false);
   });
   ipcMain.handle("nodus:set-remote-keyboard-capture", (event, active) => {
     const target = BrowserWindow.fromWebContents(event.sender);
@@ -847,29 +869,39 @@ function stopNativeMedia(sender, sessionId) {
 }
 
 function getNativeCaptureStatus() {
+  if (nativeCaptureStatusPromise && nativeCaptureStatusExpires > Date.now()) return nativeCaptureStatusPromise;
   const policy = getCaptureBackendPolicy();
-  if (!fs.existsSync(nativeCaptureProbe)) return { ...policy, available: false, supported: false, backend: "chromium-getdisplaymedia" };
-  try {
-    const result = require("node:child_process").execFileSync(nativeCaptureProbe, [], { encoding: "utf8", timeout: 5000, windowsHide: true });
-    const capabilities = JSON.parse(result);
-    const supported = capabilities.windowsGraphicsCapture === true;
-    return {
-      ...policy,
-      available: true,
-      supported,
-      nativeMediaExperimental: process.env.NODUS_WGC_EXPERIMENTAL === "1",
-      nativeMediaAvailable: fs.existsSync(nativeMediaExe) && fs.existsSync(path.join(gstreamerRoot, "lib", "gstreamer-1.0", "gstd3d11.dll")),
-      cursorSuppressionSupported: capabilities.cursorSuppressionSupported === true,
-      backend: "chromium-getdisplaymedia",
-      d3d11Hardware: capabilities.d3d11Hardware === true,
-      hardwareH264: capabilities.hardwareH264 === true,
-      hardwareH264Encoders: Number(capabilities.hardwareH264Encoders || 0),
-      adapter: String(capabilities.adapter || "").slice(0, 200),
-    };
-  } catch (error) {
-    appendLog(`native-capture-discovery-failed ${error.message}`);
-    return { ...policy, available: false, supported: false, backend: "chromium-getdisplaymedia" };
-  }
+  const fallback = { ...policy, available: false, supported: false, backend: "chromium-getdisplaymedia" };
+  nativeCaptureStatusExpires = Infinity;
+  nativeCaptureStatusPromise = new Promise((resolve) => {
+    if (!fs.existsSync(nativeCaptureProbe)) { nativeCaptureStatusExpires = Date.now() + 30_000; resolve(fallback); return; }
+    const started = performance.now();
+    execFile(nativeCaptureProbe, [], { encoding: "utf8", timeout: 5000, windowsHide: true, maxBuffer: 64 * 1024 }, (error, result) => {
+      try {
+        if (error) throw error;
+        const capabilities = JSON.parse(result);
+        appendLog(JSON.stringify({ event: "native-discovery", at: new Date().toISOString(), elapsedMs: Math.round(performance.now() - started), ok: true }), "performance.log");
+        resolve({
+          ...policy,
+          available: true,
+          supported: capabilities.windowsGraphicsCapture === true,
+          nativeMediaExperimental: process.env.NODUS_WGC_EXPERIMENTAL === "1",
+          nativeMediaAvailable: fs.existsSync(nativeMediaExe) && fs.existsSync(path.join(gstreamerRoot, "lib", "gstreamer-1.0", "gstd3d11.dll")),
+          cursorSuppressionSupported: capabilities.cursorSuppressionSupported === true,
+          backend: "chromium-getdisplaymedia",
+          d3d11Hardware: capabilities.d3d11Hardware === true,
+          hardwareH264: capabilities.hardwareH264 === true,
+          hardwareH264Encoders: Number(capabilities.hardwareH264Encoders || 0),
+          adapter: String(capabilities.adapter || "").slice(0, 200),
+        });
+      } catch (error) {
+        appendLog(`native-capture-discovery-failed ${error.message}`);
+        nativeCaptureStatusExpires = Date.now() + 30_000;
+        resolve(fallback);
+      }
+    });
+  });
+  return nativeCaptureStatusPromise;
 }
 
 function getCaptureBackendPolicy() {
@@ -877,7 +909,13 @@ function getCaptureBackendPolicy() {
 }
 
 async function getGpuDiagnostics() {
+  gpuDiagnosticsPromise ??= readGpuDiagnostics();
+  return gpuDiagnosticsPromise;
+}
+
+async function readGpuDiagnostics() {
   const info = await app.getGPUInfo("basic").catch(() => null);
+  if (!info) gpuDiagnosticsPromise = undefined;
   const devices = Array.isArray(info?.gpuDevice) ? info.gpuDevice : [];
   const device = devices.find((entry) => entry.active) || devices[0];
   const features = gpuInfoReady ? app.getGPUFeatureStatus() : {};
@@ -1237,7 +1275,7 @@ function setHostInputLock(sessionId, mouse, keyboard) {
 function ensureInputHelper() {
   if (inputHelper && !inputHelper.killed) return inputHelper;
   if (fs.existsSync(nativeService)) {
-    inputHelper = spawn(nativeService, ["--input-helper"], { windowsHide: true, stdio: ["pipe", performanceDiagnostic?.inputLatency ? "pipe" : "ignore", "ignore"] });
+    inputHelper = spawn(nativeService, ["--input-helper", String(process.pid)], { windowsHide: true, stdio: ["pipe", performanceDiagnostic?.inputLatency ? "pipe" : "ignore", "ignore"] });
     inputHelper.nodusBinaryInput = true;
     inputHelper.stdin.on("error", (error) => appendLog(`remote-input-pipe-error ${error.message}`));
     if (performanceDiagnostic?.inputLatency) observeInputProbes(inputHelper);

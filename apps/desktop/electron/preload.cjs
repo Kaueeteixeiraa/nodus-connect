@@ -26,6 +26,7 @@ contextBridge.exposeInMainWorld("nodusDesktop", {
   getAppInfo() {
     return ipcRenderer.invoke("nodus:get-app-info");
   },
+  markUiReady() { ipcRenderer.send("nodus:ui-ready"); },
   setThemeIcon(theme, dataUrl) {
     return ipcRenderer.invoke("nodus:set-theme-icon", theme, dataUrl);
   },
@@ -76,8 +77,8 @@ contextBridge.exposeInMainWorld("nodusDesktop", {
   setHostInputLock(input) {
     return ipcRenderer.invoke("nodus:set-host-input-lock", input);
   },
-  setHostCursorActive(active) {
-    return ipcRenderer.invoke("nodus:set-host-cursor-active", Boolean(active));
+  setHostCursorActive(active, hideOnRemote = true) {
+    return ipcRenderer.invoke("nodus:set-host-cursor-active", Boolean(active), hideOnRemote);
   },
   setRemoteKeyboardCapture(active) {
     return ipcRenderer.invoke("nodus:set-remote-keyboard-capture", Boolean(active));
@@ -161,7 +162,7 @@ contextBridge.exposeInMainWorld("nodusDesktop", {
     return () => ipcRenderer.removeListener("nodus:remote-key-input", listener);
   },
   onHostMouseActivity(callback) {
-    const listener = () => callback();
+    const listener = (_event, positions) => callback(positions);
     ipcRenderer.on("nodus:host-mouse-activity", listener);
     return () => ipcRenderer.removeListener("nodus:host-mouse-activity", listener);
   },
