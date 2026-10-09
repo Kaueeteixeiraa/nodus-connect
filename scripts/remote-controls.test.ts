@@ -1080,6 +1080,38 @@ test("free deadline closes at ten minutes during an API outage without extra req
   expect(lifecycle.has("limited")).toBe(false); expect(vi.getTimerCount()).toBe(0);
 });
 
+test("reconnecting after a free timeout creates a new reservation and a fresh ten-minute timer", async () => {
+  vi.useFakeTimers();
+  const lifecycle = new Map(), reserved = new Set(), endsAt = new Map(), rejected = vi.fn();
+  let sequence = 0;
+  const request = vi.fn(async (path: string, body?: { sessionId: string }) => {
+    if (path === "/license/policy") return { heartbeatSeconds: 120 };
+    if (path === "/license/sessions/reserve") return { sessionId: body!.sessionId };
+    if (path === "/license/sessions/end") return { ok: true };
+    if (!endsAt.has(body!.sessionId)) endsAt.set(body!.sessionId, Date.now() + 600_000);
+    return { status: "ESTABLISHED", endsAt: endsAt.get(body!.sessionId), serverTime: Date.now() };
+  });
+  const context = { exports: {}, licenseConfigured: () => true, lifecycle, reserved, prepared: new Map(), device: async () => ({ deviceId: "source" }), crypto: { randomUUID: () => `session-${++sequence}` }, LicenseError, setTimeout, request, Event, window: { dispatchEvent: vi.fn() } };
+  const reserve = uiFunction("reserveLicense", context, "apps/desktop/src/core/licensing.ts");
+  const establish = uiFunction("licenseEstablished", context, "apps/desktop/src/core/licensing.ts");
+  const end = uiFunction("licenseEnded", context, "apps/desktop/src/core/licensing.ts");
+  const first = await reserve({}, "987654321");
+  await establish(first, (code: string) => { rejected(code); end(first); });
+  await vi.advanceTimersByTimeAsync(600_000);
+  expect(rejected).toHaveBeenCalledExactlyOnceWith("FREE_SESSION_LIMIT_REACHED");
+  expect(lifecycle.has(first)).toBe(false); expect(reserved.has(first)).toBe(false);
+  const next = await reserve({}, "987654321");
+  expect(next).not.toBe(first);
+  await establish(next, rejected);
+  await vi.advanceTimersByTimeAsync(599_999);
+  expect(rejected).toHaveBeenCalledTimes(1);
+  expect(lifecycle.has(next)).toBe(true);
+  await vi.advanceTimersByTimeAsync(1);
+  expect(rejected).toHaveBeenCalledTimes(2);
+  expect(request.mock.calls.filter(([path]) => path === "/license/sessions/reserve")).toHaveLength(2);
+  expect(vi.getTimerCount()).toBe(0);
+});
+
 test.each(["renewal", "clock", "manual-end", "business"])("session deadline handles %s without resetting the free timer", async mode => {
   vi.useFakeTimers();
   const lifecycle = new Map(), reserved = new Set(["session"]), rejected = vi.fn();

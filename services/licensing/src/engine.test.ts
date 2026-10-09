@@ -283,6 +283,21 @@ describe("server licensing", () => {
     await expect(f.engine.lifecycle(f.host, "legacy", "heartbeat")).rejects.toMatchObject({ code: "SESSION_EXPIRED" });
     expect(f.store.data.get("license_sessions/legacy")).toMatchObject({ status: "ENDED" });
   });
+  test.each([true, false])("free sessions can immediately reconnect after the deadline with prior cleanup=%s", async cleaned => {
+    const f = await fixture(); await f.reserve("expired"); await f.establish("expired");
+    f.advance(FREE_SESSION_LIMIT_MS);
+    if (cleaned) await f.engine.lifecycle(f.actor, "expired", "end");
+    await f.reserve("reconnected"); await f.establish("reconnected");
+    const endsAt = f.time() + FREE_SESSION_LIMIT_MS;
+    await expect(f.engine.lifecycle(f.host, "expired", "heartbeat")).rejects.toMatchObject({ code: "SESSION_EXPIRED" });
+    await f.engine.lifecycle(f.actor, "expired", "end");
+    expect((await f.engine.info(f.actor, f.credentials))).toMatchObject({ allowed: true, trialUsed: 2, sessions: 1 });
+    expect((f.store.data.get("license_licenses/free-device-source") as License).slots).toMatchObject({ reconnected: { established: true, endsAt } });
+    f.advance(FREE_SESSION_LIMIT_MS - 1);
+    await expect(f.engine.lifecycle(f.actor, "reconnected", "heartbeat")).resolves.toMatchObject({ status: "ESTABLISHED", endsAt });
+    f.advance(1);
+    await expect(f.engine.lifecycle(f.actor, "reconnected", "heartbeat")).rejects.toMatchObject({ code: "SESSION_EXPIRED" });
+  });
   test("business initiators have no ten-minute limit even when the receiver has an exhausted free plan", async () => {
     const f = await fixture(); await f.business();
     f.store.data.set("deviceClaims/987654321", { ownerUid: f.host.uid, deviceId: "device-host", deviceClaim: "claim-host" });
