@@ -352,7 +352,7 @@ function uiFunction(name: string, context = {}, file = "apps/desktop/src/App.tsx
   visit(source);
   if (!node) throw new Error(`UI function missing: ${name}`);
   const code = ts.transpileModule(`${ts.isVariableDeclaration(node) ? "const " : ""}${node.getText(source)}`, { fileName: file.endsWith(".cjs") ? "fixture.ts" : file, compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.React } }).outputText;
-  for (const [key, value] of Object.entries({ payloadWrapper: "", payloadMetadata: undefined, logConnectionPhase: vi.fn(), connectionTimingsRef: { current: new Map() } })) {
+  for (const [key, value] of Object.entries({ payloadWrapper: "", payloadMetadata: undefined, logConnectionPhase: vi.fn(), connectionTimingsRef: { current: new Map() }, performance: { now: () => Date.now() }, clearTimeout })) {
     if (!(key in context)) Object.assign(context, { [key]: value });
   }
   return runInNewContext(`${code};${name}`, context);
@@ -1060,6 +1060,43 @@ test("legacy unreserved sessions do not disconnect or retry forever during accou
   expect(lifecycle.has("legacy")).toBe(false);
   expect(rejected).not.toHaveBeenCalled();
   expect(vi.getTimerCount()).toBe(0);
+});
+
+test("free deadline closes at ten minutes during an API outage without extra requests", async () => {
+  vi.useFakeTimers();
+  const lifecycle = new Map(), rejected = vi.fn(), started = Date.now();
+  let offline = false;
+  const request = vi.fn(async (path: string) => {
+    if (offline) throw new LicenseError("SERVER_UNAVAILABLE");
+    return path === "/license/policy" ? { heartbeatSeconds: 30 } : { status: "ESTABLISHED", endsAt: started + 600_000, serverTime: Date.now() };
+  });
+  const establish = uiFunction("licenseEstablished", { exports: {}, licenseConfigured: () => true, lifecycle, reserved: new Set(["limited"]), LicenseError, setTimeout, request, Event, window: { dispatchEvent: vi.fn() } }, "apps/desktop/src/core/licensing.ts");
+  await establish("limited", rejected); offline = true;
+  await vi.advanceTimersByTimeAsync(599_999); expect(rejected).not.toHaveBeenCalled();
+  const calls = request.mock.calls.length;
+  await vi.advanceTimersByTimeAsync(1);
+  expect(rejected).toHaveBeenCalledExactlyOnceWith("FREE_SESSION_LIMIT_REACHED");
+  expect(request).toHaveBeenCalledTimes(calls);
+  expect(lifecycle.has("limited")).toBe(false); expect(vi.getTimerCount()).toBe(0);
+});
+
+test.each(["renewal", "clock", "manual-end", "business"])("session deadline handles %s without resetting the free timer", async mode => {
+  vi.useFakeTimers();
+  const lifecycle = new Map(), reserved = new Set(["session"]), rejected = vi.fn();
+  let monotonic = 0, serverTime = 1_800_000_000_000;
+  const request = vi.fn(async (path: string) => path === "/license/policy" ? { heartbeatSeconds: 120 } : { status: "ESTABLISHED", endsAt: mode === "business" ? 0 : serverTime + 600_000, serverTime });
+  const context = { exports: {}, licenseConfigured: () => true, lifecycle, reserved, LicenseError, setTimeout, request, Event, performance: { now: () => monotonic }, window: { dispatchEvent: vi.fn() } };
+  const establish = uiFunction("licenseEstablished", context, "apps/desktop/src/core/licensing.ts");
+  await establish("session", rejected);
+  if (mode === "manual-end") {
+    uiFunction("licenseEnded", context, "apps/desktop/src/core/licensing.ts")("session");
+    expect(vi.getTimerCount()).toBe(0);
+  }
+  if (mode === "clock") vi.setSystemTime(Date.now() - 3_600_000);
+  for (let minute = 0; minute < 10; minute++) { monotonic += 60_000; await vi.advanceTimersByTimeAsync(60_000); }
+  expect(rejected).toHaveBeenCalledTimes(mode === "business" || mode === "manual-end" ? 0 : 1);
+  if (mode === "renewal" || mode === "clock") expect(rejected).toHaveBeenCalledWith("FREE_SESSION_LIMIT_REACHED");
+  vi.clearAllTimers();
 });
 
 test.each(["latest", "click", "stopped", "expired"])("native movement backpressure handles %s without an obsolete queue", async (mode) => {

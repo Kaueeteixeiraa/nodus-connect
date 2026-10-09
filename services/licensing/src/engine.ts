@@ -3,7 +3,7 @@ import support from "../../../apps/desktop/electron/quick-support.cjs";
 import desktopUpdates from "../../../apps/desktop/electron/desktop-update.cjs";
 import type { DesktopUpdatePolicy } from "../../../packages/licensing/src/index.js";
 import type { SupportDraft, SupportProfile } from "../../../packages/common/src/quick-support.js";
-import { LICENSE_DEFAULTS, LicenseError, effectiveStatus, licenseCode, type License, type LicenseAccessRequest, type LicenseDevice, type LicenseInfo, type LicensePolicy, type LicenseSession } from "../../../packages/licensing/src/index.js";
+import { FREE_SESSION_LIMIT_MS, LICENSE_DEFAULTS, LicenseError, effectiveStatus, licenseCode, type License, type LicenseAccessRequest, type LicenseDevice, type LicenseInfo, type LicensePolicy, type LicenseSession } from "../../../packages/licensing/src/index.js";
 import type { LicenseStore, LicenseTransaction } from "./store.js";
 import { matchesSecret, newDeviceToken, newLicenseKey, secretHash, signLease } from "./security.js";
 
@@ -15,7 +15,7 @@ type SupportSession = LicenseSession & { supportProfileId?: string };
 export function validId(value: unknown): string { if (typeof value !== "string" || !/^[a-zA-Z0-9_-]{1,128}$/.test(value)) throw new LicenseError("INVALID_INPUT"); return value; }
 export function text(value: unknown, max = 120): string { if (typeof value !== "string" || !value.trim() || value.length > max) throw new LicenseError("INVALID_INPUT"); return value.trim(); }
 export function requireAdmin(actor: Actor, sensitive = false): void { if (!actor.admin) throw new LicenseError("FORBIDDEN"); if (sensitive && !actor.recent) throw new LicenseError("REAUTH_REQUIRED"); }
-function activeSlots(license: License, now: number) { return Object.entries(license.slots).filter(([, slot]) => slot.established || slot.expiresAt > now); }
+function activeSlots(license: License, now: number) { return Object.entries(license.slots).filter(([, slot]) => (slot.endsAt === undefined || slot.endsAt > now) && (slot.established || slot.expiresAt > now)); }
 function requireCapacity(license: License, now: number, enforced = true) {
   const code = licenseCode(license, now); if (code !== "LICENSE_ACTIVE" && (enforced || code !== "TRIAL_LIMIT_REACHED")) throw new LicenseError(code);
   const slots = activeSlots(license, now);
@@ -289,7 +289,7 @@ export class LicenseEngine {
       }
       const existing = await tx.get<LicenseSession>(`license_sessions/${input.sessionId}`);
       if (existing) {
-        if (existing.requesterUid !== actor.uid || existing.deviceId !== device.id || existing.targetNodusId !== input.targetNodusId || existing.status === "ENDED" || (existing.status === "RESERVED" && existing.expiresAt <= now)) throw new LicenseError("SESSION_EXPIRED");
+        if (existing.requesterUid !== actor.uid || existing.deviceId !== device.id || existing.targetNodusId !== input.targetNodusId || existing.status === "ENDED" || (existing.endsAt !== undefined && existing.endsAt <= now) || (existing.status === "RESERVED" && existing.expiresAt <= now)) throw new LicenseError("SESSION_EXPIRED");
         return this.reservation(existing, now);
       }
       requireCapacity(license, now, policy.enforced);
@@ -311,13 +311,15 @@ export class LicenseEngine {
 
   async lifecycle(actor: Actor, id: string, action: "establish" | "heartbeat" | "end") {
     validId(id); const now = this.now();
-    return this.store.transaction(async tx => {
+    const result = await this.store.transaction(async tx => {
       const session = await tx.get<LicenseSession>(`license_sessions/${id}`);
       if (!session || ![session.requesterUid, session.targetUid].includes(actor.uid)) throw new LicenseError("FORBIDDEN");
       const license = await this.license(tx, session.licenseId); const policy = await this.readPolicy(tx);
       if (session.status === "ENDED") { if (action === "end") return { ok: true, consumed: session.consumed }; throw new LicenseError("SESSION_EXPIRED"); }
       const slot = license.slots[id];
-      if (action === "end") {
+      if (license.plan === "free" && session.status === "ESTABLISHED") session.endsAt ??= session.establishedAt + FREE_SESSION_LIMIT_MS;
+      const timeLimitReached = session.endsAt !== undefined && session.endsAt <= now;
+      if (action === "end" || timeLimitReached) {
         session.status = "ENDED"; session.endedAt = now;
         // Offline leases cannot be returned early: their signed permission may still be in use.
         if (!session.offline) delete license.slots[id];
@@ -334,19 +336,23 @@ export class LicenseEngine {
           session.connectedUids = [...new Set([...session.connectedUids, actor.uid])];
           if (session.connectedUids.length === 2 && session.status !== "ESTABLISHED") {
             session.status = "ESTABLISHED"; session.establishedAt = now; slot.established = true;
+            if (license.plan === "free") session.endsAt = now + FREE_SESSION_LIMIT_MS;
             if (license.plan === "free" && !session.consumed) { if (policy.enforced && license.trialUsed >= license.trialLimit) throw new LicenseError("TRIAL_LIMIT_REACHED"); license.trialUsed += 1; session.consumed = true; }
           }
         }
         if (session.status === "ESTABLISHED") {
           session.lastHeartbeatAt = now;
-          if (!session.offline) { session.expiresAt = now + policy.reservationSeconds * 1000; slot.expiresAt = session.expiresAt; }
+          if (session.endsAt !== undefined) slot.endsAt = session.endsAt;
+          if (!session.offline) { session.expiresAt = Math.min(now + policy.reservationSeconds * 1000, session.endsAt ?? Infinity); slot.expiresAt = session.expiresAt; }
         }
       }
       license.updatedAt = now;
       tx.set(`license_sessions/${id}`, session); tx.set(`license_licenses/${license.id}`, license);
-      tx.set(`license_session_grants/${id}`, { sessionId: id, requesterUid: session.requesterUid, targetUid: session.targetUid, requesterNodusId: session.requesterNodusId, targetNodusId: session.targetNodusId, status: session.status, expiresAt: session.expiresAt });
-      return { ok: true, consumed: session.consumed, status: session.status };
+      tx.set(`license_session_grants/${id}`, { sessionId: id, requesterUid: session.requesterUid, targetUid: session.targetUid, requesterNodusId: session.requesterNodusId, targetNodusId: session.targetNodusId, status: session.status, expiresAt: session.expiresAt, endsAt: session.endsAt ?? 0 });
+      return { ok: true, consumed: session.consumed, status: session.status, endsAt: session.endsAt ?? 0, serverTime: now };
     });
+    if (action !== "end" && result.status === "ENDED") throw new LicenseError("SESSION_EXPIRED");
+    return result;
   }
 
   async modify(actor: Actor, licenseId: string, patch: { status?: License["status"]; maxDevices?: number; maxConcurrentSessions?: number; expiresAt?: number }) {

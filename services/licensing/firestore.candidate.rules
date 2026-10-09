@@ -20,7 +20,8 @@ service cloud.firestore {
     }
     function activeGrant(sessionId) {
       let grant = get(/databases/$(database)/documents/license_session_grants/$(sessionId)).data;
-      return grant.status == 'ESTABLISHED' || (grant.status == 'RESERVED' && grant.expiresAt > request.time.toMillis());
+      return (!('endsAt' in grant) || grant.endsAt == 0 || grant.endsAt > request.time.toMillis())
+        && (grant.status == 'ESTABLISHED' || (grant.status == 'RESERVED' && grant.expiresAt > request.time.toMillis()));
     }
     function licensedRequest(requestId) {
       let data = request.resource.data;

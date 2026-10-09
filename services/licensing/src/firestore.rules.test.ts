@@ -78,6 +78,22 @@ describeRules("candidate Firestore licensing rules", () => {
     }
   });
 
+  test("free session deadlines deny signaling while unlimited business grants remain usable", async () => {
+    const sessionId = "timed"; await seed(true, sessionId);
+    const source = environment.authenticatedContext(requesterUid).firestore();
+    await environment.withSecurityRulesDisabled(async context => {
+      await context.firestore().doc(`sessions/${sessionId}`).set({ participantUids: [requesterUid, targetUid] });
+      await context.firestore().doc(`license_session_grants/${sessionId}`).update({ status: "ESTABLISHED", endsAt: Date.now() + 600_000 });
+    });
+    const signal = { sessionId, from: requesterId, to: targetId, type: "ice-candidate", payload: {}, seq: 1, createdAt: new Date().toISOString() };
+    const path = `sessions/${sessionId}/signals/${targetId}/items`;
+    await assertSucceeds(source.doc(`${path}/active`).set(signal));
+    await environment.withSecurityRulesDisabled(async context => context.firestore().doc(`license_session_grants/${sessionId}`).update({ endsAt: Date.now() - 1 }));
+    await assertFails(source.doc(`${path}/expired`).set(signal));
+    await environment.withSecurityRulesDisabled(async context => context.firestore().doc(`license_session_grants/${sessionId}`).update({ endsAt: 0 }));
+    await assertSucceeds(source.doc(`${path}/business`).set(signal));
+  });
+
   test("event listeners retain participant authorization and reject ended grants", async () => {
     const sessionId = "watched"; await seed(true, sessionId);
     await environment.withSecurityRulesDisabled(async context => {

@@ -10,7 +10,8 @@ type Credentials = { deviceId: string; deviceToken: string };
 let credentials: Credentials | null = null;
 let credentialPromise: Promise<Credentials> | null = null;
 const prepared = new Map<string, { sessionId: string; anchor: OfflineLeaseAnchor; deviceId: string }>();
-const lifecycle = new Map<string, { stopped: boolean; connected: boolean; enforced: boolean; timer?: ReturnType<typeof setTimeout> }>();
+type SessionLifecycle = { stopped: boolean; connected: boolean; enforced: boolean; timer?: ReturnType<typeof setTimeout>; limitTimer?: ReturnType<typeof setTimeout>; deadline?: number };
+const lifecycle = new Map<string, SessionLifecycle>();
 const reserved = new Set<string>();
 export function licenseConfigured() { return Boolean(base); }
 export function licenseFeedback(error: unknown): string { return error instanceof LicenseError ? LICENSE_MESSAGES[error.code] : LICENSE_MESSAGES.SERVER_UNAVAILABLE; }
@@ -76,8 +77,15 @@ export async function reserveLicense(identity: LocalIdentity, targetNodusId: str
 }
 export async function licenseEstablished(sessionId: string, onRejected?: (code: string) => void) {
   if (!licenseConfigured() || lifecycle.has(sessionId)) return;
-  const state = { stopped: false, connected: false, enforced: reserved.has(sessionId), timer: undefined as ReturnType<typeof setTimeout> | undefined };
+  const state: SessionLifecycle = { stopped: false, connected: false, enforced: reserved.has(sessionId) };
   lifecycle.set(sessionId, state);
+  function reject(code: string) {
+    if (state.stopped) return;
+    state.stopped = true;
+    clearTimeout(state.timer); clearTimeout(state.limitTimer);
+    onRejected?.(code);
+    lifecycle.delete(sessionId);
+  }
   async function publish() {
     let delay = 30_000;
     try {
@@ -85,17 +93,24 @@ export async function licenseEstablished(sessionId: string, onRejected?: (code: 
       if (state.stopped) return;
       if (Number.isSafeInteger(policy.heartbeatSeconds) && policy.heartbeatSeconds >= 5 && policy.heartbeatSeconds <= 120) delay = policy.heartbeatSeconds * 1000;
       const establishing = !state.connected;
-      const result = await request<{ status: string }>(`/license/sessions/${establishing ? "establish" : "heartbeat"}`, { sessionId });
+      const started = performance.now();
+      const result = await request<{ status: string; endsAt?: number; serverTime?: number }>(`/license/sessions/${establishing ? "establish" : "heartbeat"}`, { sessionId });
       if (state.stopped) return;
       state.enforced = true;
       state.connected = result.status === "ESTABLISHED";
+      if (Number.isSafeInteger(result.endsAt) && result.endsAt! > 0 && Number.isSafeInteger(result.serverTime)) {
+        const deadline = started + Math.max(0, result.endsAt! - result.serverTime!);
+        if (state.deadline === undefined || deadline < state.deadline) {
+          state.deadline = deadline;
+          clearTimeout(state.limitTimer);
+          state.limitTimer = setTimeout(() => reject("FREE_SESSION_LIMIT_REACHED"), Math.max(0, deadline - performance.now()));
+        }
+      }
       if (establishing) window.dispatchEvent(new Event("nodus:license-changed"));
     } catch (error) {
       if (!state.enforced && error instanceof LicenseError && error.code === "FORBIDDEN") { state.stopped = true; lifecycle.delete(sessionId); return; }
       if (!state.stopped && error instanceof LicenseError && ["DEVICE_REVOKED", "SESSION_EXPIRED"].includes(error.code)) {
-        state.stopped = true;
-        onRejected?.(error.code);
-        lifecycle.delete(sessionId);
+        reject(error.code);
       }
       // Temporary licensing outages do not interrupt existing video sessions.
     }
@@ -105,7 +120,7 @@ export async function licenseEstablished(sessionId: string, onRejected?: (code: 
 }
 export function licenseEnded(sessionId: string) {
   const state = lifecycle.get(sessionId);
-  if (state) { state.stopped = true; clearTimeout(state.timer); lifecycle.delete(sessionId); }
+  if (state) { state.stopped = true; clearTimeout(state.timer); clearTimeout(state.limitTimer); lifecycle.delete(sessionId); }
   const wasReserved = reserved.delete(sessionId);
   if (licenseConfigured() && (state?.enforced || wasReserved)) request("/license/sessions/end", { sessionId }).catch(() => undefined);
 }

@@ -104,7 +104,7 @@ export function createLicenseHandler(deps: HttpDependencies) {
           const session = await tx.get<LicenseSession>(`license_sessions/${id}`);
           const source = session?.requesterUid === actor.uid && input.from === session.requesterNodusId && input.to === session.targetNodusId;
           const target = session?.targetUid === actor.uid && input.from === session.targetNodusId && input.to === session.requesterNodusId;
-          if (!session || session.status === "ENDED" || (!source && !target) || (session.status === "RESERVED" && session.expiresAt <= Date.now()) || (input.kind === "request" && !source) || (input.kind === "accept" && !target) || !["request", "accept", "signal"].includes(String(input.kind))) throw new LicenseError("FORBIDDEN");
+          if (!session || session.status === "ENDED" || (!source && !target) || (session.endsAt !== undefined && session.endsAt <= Date.now()) || (session.status === "RESERVED" && session.expiresAt <= Date.now()) || (input.kind === "request" && !source) || (input.kind === "accept" && !target) || !["request", "accept", "signal"].includes(String(input.kind))) throw new LicenseError("FORBIDDEN");
           if (input.kind === "request") {
             if (session.status !== "RESERVED" || await tx.get(`license_transport_admissions/${id}`) || await tx.get(`sessionRequests/${id}`) || await tx.get(`sessions/${id}`)) throw new LicenseError("FORBIDDEN");
             tx.set(`license_transport_admissions/${id}`, { sessionId: id, transport: "relay", createdAt: Date.now() });

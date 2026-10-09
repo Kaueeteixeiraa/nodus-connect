@@ -1582,7 +1582,8 @@ export function App({ initialIdentity, supportProfile = null }: { initialIdentit
       syncHostCursorVisibility();
       if (peer.connectionState === "connected") licenseEstablished(sessionId, (code) => {
         logDiagnostic(`license-session-rejected id=${sessionId} code=${code}`);
-        endSession(sessionId, true);
+        endSession(sessionId, true, code === "FREE_SESSION_LIMIT_REACHED" ? code : undefined);
+        if (code === "FREE_SESSION_LIMIT_REACHED") setFeedback(licenseFeedback(new LicenseError("FREE_SESSION_LIMIT_REACHED")));
       }).catch(() => logDiagnostic(`license-lifecycle-pending id=${sessionId}`));
     };
     peer.oniceconnectionstatechange = () => {
@@ -2585,7 +2586,10 @@ export function App({ initialIdentity, supportProfile = null }: { initialIdentit
       }
       await peer.addIceCandidate(candidate).catch((error) => logIceEvent(signal.sessionId, sessionsRef.current.find((item) => item.session.sessionId === signal.sessionId)?.session.role ?? "viewer", "ice-candidate-add-failed", { type: iceSignalCandidate(candidate.candidate ?? "").type, reason: error instanceof Error ? error.name : "UNKNOWN" }));
     }
-    if (signal.type === "disconnect") endSession(signal.sessionId, false);
+    if (signal.type === "disconnect") {
+      endSession(signal.sessionId, false);
+      if ((signal.payload as { reason?: string })?.reason === "FREE_SESSION_LIMIT_REACHED") setFeedback(licenseFeedback(new LicenseError("FREE_SESSION_LIMIT_REACHED")));
+    }
   }
 
   async function handleNativeVideoSignal(signal: SignalMessage, payload: { sdp?: string; candidate?: string; sdpMLineIndex?: number }) {
@@ -2699,7 +2703,7 @@ export function App({ initialIdentity, supportProfile = null }: { initialIdentit
     if (sessionId) endSession(sessionId, true);
   }
 
-  function endSession(sessionId: string, notifyRemote: boolean) {
+  function endSession(sessionId: string, notifyRemote: boolean, reason?: "FREE_SESSION_LIMIT_REACHED") {
     logDiagnostic(`session-end id=${sessionId} notifyRemote=${notifyRemote}`);
     const current = sessionsRef.current.find((item) => item.session.sessionId === sessionId)?.session;
     if (current && notifyRemote) {
@@ -2713,7 +2717,7 @@ export function App({ initialIdentity, supportProfile = null }: { initialIdentit
         from: identity.nodusId,
         to: current.remoteNodusId,
         type: "disconnect",
-        payload: {},
+        payload: reason ? { reason } : {},
       }).catch(() => undefined);
     }
     cleanupSession(sessionId, true);
