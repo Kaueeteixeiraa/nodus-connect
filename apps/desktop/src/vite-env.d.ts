@@ -9,8 +9,9 @@ interface Window {
     generateSupportPackage(input: { token: string; template: { version: string; sha256: string } | null }): Promise<{ canceled?: boolean; path?: string }>;
     quit(): Promise<void>;
     saveIdentity(identity: unknown): Promise<unknown>;
-    getLicenseCredentials(): Promise<{ deviceId: string; deviceToken: string } | null>;
-    saveLicenseCredentials(credentials: { deviceId: string; deviceToken: string }): Promise<boolean>;
+    getLicenseIdentity(): Promise<import("../../../packages/licensing/src/index").NodusDeviceIdentity>;
+    getLicenseCredentials(): Promise<{ deviceId: string; deviceToken: string; identityVersion?: number } | null>;
+    saveLicenseCredentials(credentials: { deviceId: string; deviceToken: string; identityVersion?: number }): Promise<boolean>;
     getServerInfo(): Promise<{ port: number; urls: string[] }>;
     getAppInfo(): Promise<{ version: string; googleClientConfigured?: boolean }>;
     markUiReady?(): void;

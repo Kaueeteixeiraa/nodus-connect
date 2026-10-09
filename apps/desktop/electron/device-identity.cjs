@@ -155,4 +155,27 @@ function normalizeName(value, fallback) {
   return String(value || "").trim().slice(0, 120) || fallback;
 }
 
-module.exports = { createDeviceIdentityStore };
+function normalizeHardware(value) {
+  const normalized = String(value || "").normalize("NFKC").trim().toUpperCase().replace(/[\s-]+/g, "");
+  if (normalized.length < 5 || normalized.length > 128 || !/^[A-Z0-9_.]+$/.test(normalized)
+    || /^(0+|F+|1+|UNKNOWN|NONE|NULL|DEFAULTSTRING|SYSTEMSERIALNUMBER|BASEBOARDSERIALNUMBER|CHASSISSERIALNUMBER|TOBEFILLEDBYOEM|NOTSPECIFIED|NOTAPPLICABLE|NOTAVAILABLE|INVALID|SERIALNUMBER|123456789|0123456789)$/.test(normalized.replace(/[._]/g, ""))) return "";
+  return normalized;
+}
+
+function hardwareIdentity(signals) {
+  const anchors = {}, system = normalizeHardware(signals?.system), board = normalizeHardware(signals?.board), bios = normalizeHardware(signals?.bios);
+  const values = { system: /^[A-F0-9]{32}$/.test(system) ? system : "", board: board ? `${normalizeHardware(signals?.boardMaker)}:${board}` : "", bios: bios && bios !== board ? bios : "" };
+  for (const [kind, value] of Object.entries(values)) if (value) anchors[kind] = crypto.createHash("sha256").update(`nodus-license-hardware-v1:${kind}:${value}`).digest("hex");
+  return { version: 1, anchors, virtual: /VMWARE|VIRTUAL|KVM|QEMU|XEN|PARALLELS|BOCHS/i.test(String(signals?.manufacturer || "")) };
+}
+
+function collectHardwareIdentity(run = require("node:child_process").execFile) {
+  if (process.platform !== "win32") return Promise.resolve(hardwareIdentity({}));
+  const script = "$ErrorActionPreference='Stop'; $p=Get-CimInstance Win32_ComputerSystemProduct; $b=Get-CimInstance Win32_BaseBoard; $s=Get-CimInstance Win32_BIOS; $c=Get-CimInstance Win32_ComputerSystem; @{system=$p.UUID;board=$b.SerialNumber;boardMaker=$b.Manufacturer;bios=$s.SerialNumber;manufacturer=($c.Manufacturer+' '+$c.Model)} | ConvertTo-Json -Compress";
+  const executable = path.join(process.env.SystemRoot || "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
+  return new Promise(resolve => run(executable, ["-NoProfile", "-NonInteractive", "-Command", script], { windowsHide: true, timeout: 6000, maxBuffer: 4096, encoding: "utf8" }, (error, output) => {
+    try { resolve(hardwareIdentity(error ? {} : JSON.parse(output.replace(/^\uFEFF/, "")))); } catch { resolve(hardwareIdentity({})); }
+  }));
+}
+
+module.exports = { createDeviceIdentityStore, normalizeHardware, hardwareIdentity, collectHardwareIdentity };

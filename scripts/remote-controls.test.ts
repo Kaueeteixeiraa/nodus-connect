@@ -352,7 +352,7 @@ function uiFunction(name: string, context = {}, file = "apps/desktop/src/App.tsx
   visit(source);
   if (!node) throw new Error(`UI function missing: ${name}`);
   const code = ts.transpileModule(`${ts.isVariableDeclaration(node) ? "const " : ""}${node.getText(source)}`, { fileName: file.endsWith(".cjs") ? "fixture.ts" : file, compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.React } }).outputText;
-  for (const [key, value] of Object.entries({ payloadWrapper: "", payloadMetadata: undefined, logConnectionPhase: vi.fn(), connectionTimingsRef: { current: new Map() }, performance: { now: () => Date.now() }, clearTimeout })) {
+  for (const [key, value] of Object.entries({ payloadWrapper: "", payloadMetadata: undefined, logConnectionPhase: vi.fn(), connectionTimingsRef: { current: new Map() }, performance: { now: () => Date.now() }, clearTimeout, offlineReserved: new Set() })) {
     if (!(key in context)) Object.assign(context, { [key]: value });
   }
   return runInNewContext(`${code};${name}`, context);
@@ -998,11 +998,21 @@ test("licensing authentication stalls expire instead of keeping the panel loadin
   const result = expect(request("/license/check", {})).rejects.toMatchObject({ code: "SERVER_UNAVAILABLE" });
   await vi.advanceTimersByTimeAsync(8000); await result; expect(fetch).not.toHaveBeenCalled();
 });
+test("anonymous credential recovery retries once with native credentials, never on a quota denial", async () => {
+  const identity = { deviceId: "device" }, device = vi.fn(async (_identity, force) => ({ deviceId: "device", deviceToken: force ? "renewed" : "old" }));
+  const request = vi.fn().mockRejectedValueOnce(new LicenseError("UNAUTHORIZED")).mockResolvedValueOnce({ trialUsed: 85 });
+  const call = uiFunction("deviceRequest", { device, request, LicenseError }, "apps/desktop/src/core/licensing.ts");
+  expect(await call(identity, "/license/check")).toEqual({ trialUsed: 85 });
+  expect(device).toHaveBeenLastCalledWith(identity, true); expect(request).toHaveBeenCalledTimes(2);
+  request.mockRejectedValueOnce(new LicenseError("TRIAL_LIMIT_REACHED")); device.mockClear();
+  await expect(call(identity, "/license/check")).rejects.toMatchObject({ code: "TRIAL_LIMIT_REACHED" });
+  expect(device).toHaveBeenCalledTimes(1);
+});
 
 test("new outgoing sessions reserve accounting even before enforcement is activated", async () => {
   const reserved = new Set(), request = vi.fn(async (path: string) => path === "/license/policy" ? { enforced: false } : { sessionId: "session" });
   const reserve = uiFunction("reserveLicense", { exports: {}, licenseConfigured: () => true, prepared: new Map(), reserved,
-    checkLicense: async () => ({ code: "LICENSE_ACTIVE" }), device: async () => ({ deviceId: "source" }), request, crypto: { randomUUID: () => "session" }, LicenseError }, "apps/desktop/src/core/licensing.ts");
+    checkLicense: async () => ({ code: "LICENSE_ACTIVE" }), deviceRequest: async (_identity: unknown, path: string, body: object) => request(path, body), device: async () => ({ deviceId: "source" }), request, crypto: { randomUUID: () => "session" }, LicenseError }, "apps/desktop/src/core/licensing.ts");
   await expect(reserve({}, "987654321")).resolves.toBe("session");
   expect(request).toHaveBeenCalledWith("/license/sessions/reserve", expect.objectContaining({ sessionId: "session", targetNodusId: "987654321" }));
   expect(reserved.has("session")).toBe(true);
@@ -1080,6 +1090,33 @@ test("free deadline closes at ten minutes during an API outage without extra req
   expect(lifecycle.has("limited")).toBe(false); expect(vi.getTimerCount()).toBe(0);
 });
 
+test.each(["RESERVED", "ESTABLISHED"])("event-driven %s session sends one ACK, no policy polling or heartbeats during video", async status => {
+  vi.useFakeTimers(); const lifecycle = new Map(), rejected = vi.fn(), started = Date.now();
+  const request = vi.fn(async () => ({ status, eventDriven: true, endsAt: started + 600_000, serverTime: started }));
+  const establish = uiFunction("licenseEstablished", { exports: {}, licenseConfigured: () => true, lifecycle, reserved: new Set(["session"]), LicenseError, setTimeout, request, Event, window: { dispatchEvent: vi.fn() } }, "apps/desktop/src/core/licensing.ts");
+  await establish("session", rejected);
+  await vi.advanceTimersByTimeAsync(599_999); expect(request).toHaveBeenCalledExactlyOnceWith("/license/sessions/establish", { sessionId: "session" });
+  expect(rejected).not.toHaveBeenCalled(); await vi.advanceTimersByTimeAsync(1);
+  expect(rejected).toHaveBeenCalledExactlyOnceWith("FREE_SESSION_LIMIT_REACHED"); expect(vi.getTimerCount()).toBe(0);
+});
+
+test.each([false, true])("initial accounting outage has bounded online confirmation without invalidating a paid offline lease (offline: %s)", async offline => {
+  vi.useFakeTimers();
+  const lifecycle = new Map(), rejected = vi.fn(), request = vi.fn(async () => { throw new LicenseError("SERVER_UNAVAILABLE"); });
+  const context = { exports: {}, licenseConfigured: () => true, lifecycle, reserved: new Set(["session"]), offlineReserved: new Set(offline ? ["session"] : []), LicenseError, setTimeout, request };
+  await uiFunction("licenseEstablished", context, "apps/desktop/src/core/licensing.ts")("session", rejected);
+  await vi.advanceTimersByTimeAsync(120_000);
+  if (offline) { expect(rejected).not.toHaveBeenCalled(); expect(lifecycle.has("session")).toBe(true); }
+  else { expect(rejected).toHaveBeenCalledExactlyOnceWith("SERVER_UNAVAILABLE"); expect(lifecycle.has("session")).toBe(false); expect(vi.getTimerCount()).toBe(0); }
+  uiFunction("licenseEnded", context, "apps/desktop/src/core/licensing.ts")("session");
+  expect(vi.getTimerCount()).toBe(0);
+});
+
+test("license settings have event-driven refresh without a continuous polling interval", () => {
+  const source = readFileSync("apps/desktop/src/LicensePanel.tsx", "utf8");
+  expect(source).not.toContain("setInterval"); expect(source).toContain('"nodus:license-changed"');
+});
+
 test("reconnecting after a free timeout creates a new reservation and a fresh ten-minute timer", async () => {
   vi.useFakeTimers();
   const lifecycle = new Map(), reserved = new Set(), endsAt = new Map(), rejected = vi.fn();
@@ -1092,6 +1129,7 @@ test("reconnecting after a free timeout creates a new reservation and a fresh te
     return { status: "ESTABLISHED", endsAt: endsAt.get(body!.sessionId), serverTime: Date.now() };
   });
   const context = { exports: {}, licenseConfigured: () => true, lifecycle, reserved, prepared: new Map(), device: async () => ({ deviceId: "source" }), crypto: { randomUUID: () => `session-${++sequence}` }, LicenseError, setTimeout, request, Event, window: { dispatchEvent: vi.fn() } };
+  Object.assign(context, { deviceRequest: uiFunction("deviceRequest", context, "apps/desktop/src/core/licensing.ts") });
   const reserve = uiFunction("reserveLicense", context, "apps/desktop/src/core/licensing.ts");
   const establish = uiFunction("licenseEstablished", context, "apps/desktop/src/core/licensing.ts");
   const end = uiFunction("licenseEnded", context, "apps/desktop/src/core/licensing.ts");

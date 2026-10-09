@@ -734,8 +734,7 @@ export function App({ initialIdentity, supportProfile = null }: { initialIdentit
     const watch = firebaseConfigured() ? subscribeCloudAccessBlock(identity.nodusId, stopOutgoing) : null;
     const refresh = () => checkLicense(identity).then(info => { if (info.code === "DEVICE_REVOKED") stopOutgoing(); }).catch(() => undefined);
     refresh();
-    const timer = window.setInterval(refresh, 60_000);
-    return () => { disposed = true; window.clearInterval(timer); watch?.close(); };
+    return () => { disposed = true; watch?.close(); };
   }, [identity, serviceState]);
 
   useEffect(() => {

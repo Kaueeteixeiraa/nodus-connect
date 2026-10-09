@@ -17,6 +17,7 @@ contextBridge.exposeInMainWorld("nodusDesktop", {
   getLicenseCredentials() {
     return ipcRenderer.invoke("nodus:get-license-credentials");
   },
+  getLicenseIdentity() { return ipcRenderer.invoke("nodus:get-license-identity"); },
   saveLicenseCredentials(credentials) {
     return ipcRenderer.invoke("nodus:save-license-credentials", credentials);
   },

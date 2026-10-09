@@ -4,7 +4,7 @@ import path from "node:path";
 import { createRequire } from "node:module";
 import { afterEach, describe, expect, it } from "vitest";
 
-const { createDeviceIdentityStore } = createRequire(import.meta.url)("../apps/desktop/electron/device-identity.cjs");
+const { createDeviceIdentityStore, normalizeHardware, hardwareIdentity, collectHardwareIdentity } = createRequire(import.meta.url)("../apps/desktop/electron/device-identity.cjs");
 const directories: string[] = [];
 
 afterEach(() => directories.splice(0).forEach((directory) => fs.rmSync(directory, { recursive: true, force: true })));
@@ -16,6 +16,29 @@ function fixture() {
 }
 
 describe("native device identity", () => {
+  it("uses hardware independently of installation, disk, remote ID and Windows account", () => {
+    const signals = { system: "c4927a20-b74c-4f36-bfd4-3a38d13205dc", board: "BOARD-ABCDE", boardMaker: "Example", bios: "BIOS-ABCDE", manufacturer: "Physical PC" };
+    const first = hardwareIdentity(signals);
+    expect(hardwareIdentity({ ...signals, disk: "REPLACED", machineGuid: "NEW", nodusId: "987654321", user: "NEW" })).toEqual(first);
+    expect(hardwareIdentity({ ...signals, system: signals.system.toUpperCase(), board: " board-abcde " })).toEqual(first);
+    expect(first.anchors).toEqual({ system: expect.stringMatching(/^[a-f0-9]{64}$/), board: expect.stringMatching(/^[a-f0-9]{64}$/), bios: expect.stringMatching(/^[a-f0-9]{64}$/) });
+    expect(JSON.stringify(first)).not.toContain("ABCDE");
+  });
+  it.each(["", "Default String", "To be filled by O.E.M.", "00000000-0000-0000-0000-000000000000", "FFFFFFFF-FFFF-FFFF-FFFF-FFFFFFFFFFFF", "System Serial Number", "123456789", "unknown"])("rejects generic hardware %s", value => {
+    expect(normalizeHardware(value)).toBe("");
+    expect(hardwareIdentity({ system: value, board: value, bios: value }).anchors).toEqual({});
+  });
+  it("flags virtual systems and does not count a repeated board/BIOS serial twice", () => {
+    const result = hardwareIdentity({ board: "BOARD-ABCDE", bios: "BOARD-ABCDE", manufacturer: "Microsoft Corporation Virtual Machine" });
+    expect(result.virtual).toBe(true); expect(Object.keys(result.anchors)).toEqual(["board"]);
+  });
+  it("bounds failed collection asynchronously without generating a fake hardware identifier", async () => {
+    const result = await collectHardwareIdentity((_file: string, _args: unknown, options: any, done: Function) => {
+      expect(options.windowsHide).toBe(true); expect(options.timeout).toBe(6000);
+      done(new Error("WMI_UNAVAILABLE"), "");
+    });
+    expect(result).toEqual({ version: 1, anchors: {}, virtual: false });
+  });
   it("migrates the legacy cache once and remains stable after restart, logout and cache clearing", () => {
     const { directory, store } = fixture();
     const legacy = { nodusId: "123 456 789", deviceName: "PC-Teste", deviceNameConfirmed: true, createdAt: "2026-01-01T00:00:00.000Z" };

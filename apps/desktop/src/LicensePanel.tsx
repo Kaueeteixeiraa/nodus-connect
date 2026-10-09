@@ -19,10 +19,9 @@ export default function LicensePanel({ identity }: { identity: LocalIdentity }) 
       finally { pending = false; }
     };
     void refresh();
-    const timer = window.setInterval(refresh, 60_000);
     window.addEventListener("nodus:license-changed", refresh);
     window.addEventListener("focus", refresh);
-    return () => { active = false; window.clearInterval(timer); window.removeEventListener("nodus:license-changed", refresh); window.removeEventListener("focus", refresh); };
+    return () => { active = false; window.removeEventListener("nodus:license-changed", refresh); window.removeEventListener("focus", refresh); };
   }, [identity]);
   async function run(name: NonNullable<typeof busy>, action: () => Promise<LicenseInfo | void>) {
     if (running.current) return; running.current = true; setBusy(name); setFeedback("");
@@ -33,7 +32,7 @@ export default function LicensePanel({ identity }: { identity: LocalIdentity }) 
     <header><ShieldCheck aria-hidden="true" /><h2 id="license-heading">Conta e Licença</h2></header>
     {!licenseConfigured() ? <p>Licenciamento ainda não configurado. O funcionamento atual do Nodus foi preservado.</p> : <>
       {info && <dl><dt>Plano</dt><dd>{info.plan === "business" ? "Nodus Business" : "Nodus Free"}</dd><dt>Status</dt><dd>{info.status}</dd>
-        {info.plan === "free" ? <><dt>Acessos</dt><dd>{info.trialUsed} / {info.trialLimit}<progress aria-label="Acessos gratuitos utilizados" max={info.trialLimit} value={info.trialUsed} />{remaining} conexões restantes</dd><dt>Tempo por sessão</dt><dd>Até 10 minutos</dd></> : <><dt>Licenciado para</dt><dd>{info.organization}</dd><dt>Dispositivos</dt><dd>{info.devices} / {info.maxDevices}</dd><dt>Sessões</dt><dd>{info.sessions} / {info.maxConcurrentSessions}</dd><dt>Renovação</dt><dd>{new Date(info.expiresAt).toLocaleDateString()}</dd><dt>Chave</dt><dd translate="no">{info.keyMasked}</dd></>}
+        {info.plan === "free" ? <><dt>Acessos</dt><dd>Plano gratuito — {info.trialUsed} de {info.trialLimit} acessos utilizados<progress aria-label="Acessos gratuitos utilizados" max={Math.max(1, info.trialLimit)} value={info.trialUsed} />{remaining} conexões restantes</dd><dt>Tempo por sessão</dt><dd>Até 10 minutos</dd></> : <><dt>Licenciado para</dt><dd>{info.organization}</dd><dt>Dispositivos</dt><dd>{info.devices} / {info.maxDevices}</dd><dt>Sessões</dt><dd>{info.sessions} / {info.maxConcurrentSessions}</dd><dt>Renovação</dt><dd>{new Date(info.expiresAt).toLocaleDateString()}</dd><dt>Chave</dt><dd translate="no">{info.keyMasked}</dd></>}
       </dl>}
       {info && (!info.allowed || (info.plan === "free" && remaining <= 50)) && <p role="status">{info.allowed ? `${remaining} conexões gratuitas restantes.` : LICENSE_MESSAGES[info.code]}</p>}
       {info?.plan === "free" && remaining === 0 && <p role="status">O período de teste foi concluído. Solicite mais acessos ou adquira uma licença. Você pode continuar recebendo acesso remoto.</p>}

@@ -7,7 +7,8 @@ const http = require("node:http");
 const os = require("node:os");
 const path = require("node:path");
 const { pathToFileURL } = require("node:url");
-const { createDeviceIdentityStore } = require("./device-identity.cjs");
+const { createDeviceIdentityStore, collectHardwareIdentity } = require("./device-identity.cjs");
+let licenseIdentityPromise;
 const { createLogWriter } = require("./log-writer.cjs");
 const { RemoteCursorVisibility } = require("./remote-cursor-visibility.cjs");
 const { RemoteWindowsKeys } = require("./remote-windows-keys.cjs");
@@ -465,6 +466,10 @@ function setupIpc() {
     return generateSupportPackage(input);
   });
   ipcMain.handle("nodus:get-identity", (_event, legacyIdentity) => identityStore().loadOrCreate(legacyIdentity));
+  ipcMain.handle("nodus:get-license-identity", (event) => {
+    if (!mainWindow || event.sender !== mainWindow.webContents || event.senderFrame !== event.sender.mainFrame) throw new Error("FORBIDDEN");
+    return licenseIdentityPromise ??= collectHardwareIdentity();
+  });
   ipcMain.handle("nodus:save-identity", (_event, identity) => identityStore().updateMutable(identity));
   ipcMain.handle("nodus:get-license-credentials", (event) => licenseCredentials(event));
   ipcMain.handle("nodus:save-license-credentials", (event, value) => licenseCredentials(event, value));
@@ -1033,10 +1038,10 @@ function licenseCredentials(event, value) {
     if (value === undefined) {
       if (!fs.existsSync(filename) || fs.statSync(filename).size > 4096) return null;
       const saved = JSON.parse(safeStorage.decryptString(fs.readFileSync(filename)));
-      return valid(saved) ? { deviceId: saved.deviceId, deviceToken: saved.deviceToken } : null;
+      return valid(saved) ? { deviceId: saved.deviceId, deviceToken: saved.deviceToken, identityVersion: saved.identityVersion === 1 ? 1 : 0 } : null;
     }
     if (!valid(value)) return false;
-    fs.writeFileSync(`${filename}.tmp`, safeStorage.encryptString(JSON.stringify({ deviceId: value.deviceId, deviceToken: value.deviceToken })), { mode: 0o600 });
+    fs.writeFileSync(`${filename}.tmp`, safeStorage.encryptString(JSON.stringify({ deviceId: value.deviceId, deviceToken: value.deviceToken, identityVersion: value.identityVersion === 1 ? 1 : 0 })), { mode: 0o600 });
     fs.renameSync(`${filename}.tmp`, filename);
     return true;
   } catch { return value === undefined ? null : false; }

@@ -86,12 +86,12 @@ test("probe errors preserve the fallback and can recover after a bounded negativ
 test("online reserve uses one authoritative operation and rejects a mismatched reservation", async () => {
   const reserved = new Set();
   const request = vi.fn(async () => ({ sessionId: "session" }));
-  const { reserveLicense } = functions("apps/desktop/src/core/licensing.ts", ["reserveLicense"], {
+  const { reserveLicense } = functions("apps/desktop/src/core/licensing.ts", ["reserveLicense", "deviceRequest"], {
     licenseConfigured: () => true, prepared: new Map(), reserved, crypto: { randomUUID: () => "session" }, request,
     device: async () => ({ deviceId: "device", deviceToken: "token" }), LicenseError,
   });
   await expect(reserveLicense({ deviceId: "device" }, "123456789", "profile", "abc")).resolves.toBe("session");
-  expect(request).toHaveBeenCalledExactlyOnceWith("/license/sessions/reserve", { deviceId: "device", deviceToken: "token", sessionId: "session", targetNodusId: "123456789", supportProfileId: "profile", supportPassword: "abc" });
+  expect(request).toHaveBeenCalledExactlyOnceWith("/license/sessions/reserve", { deviceId: "device", deviceToken: "token", sessionId: "session", targetNodusId: "123456789", supportProfileId: "profile", supportPassword: "abc", eventDriven: true });
   request.mockResolvedValueOnce({ sessionId: "wrong" });
   await expect(reserveLicense({ deviceId: "device" }, "123456789")).rejects.toMatchObject({ code: "SERVER_UNAVAILABLE" });
   request.mockRejectedValueOnce(new LicenseError("TRIAL_LIMIT_REACHED"));
