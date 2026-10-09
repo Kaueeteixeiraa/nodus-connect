@@ -117,6 +117,13 @@ td button + button { margin-left: 8px; }
 .payment-action { margin-bottom: 16px; }
 .confirm-dialog { width: min(420px, calc(100vw - 32px)); padding: 22px; border: 1px solid var(--line); border-radius: 8px; color: #f5f8ff; background: var(--surface); box-shadow: 0 20px 70px #0008; }
 .confirm-dialog::backdrop { background: #0009; }
+.device-dialog { width: min(680px, calc(100vw - 32px)); max-height: calc(100dvh - 32px); overflow-y: auto; }
+.device-dialog .company-summary { margin-top: 16px; font-size: 13px; }
+.device-dialog .company-summary dd { overflow-wrap: anywhere; }
+.device-dialog form { border-top: 1px solid var(--line); margin-top: 18px; padding-top: 4px; }
+.device-dialog h3 { font-size: 14px; margin: 16px 0 10px; }
+.device-dialog label:has(input[type="checkbox"]) { display: flex; align-items: center; gap: 8px; }
+.device-dialog input[type="checkbox"] { width: 16px; min-height: 16px; padding: 0; flex-shrink: 0; }
 .confirm-dialog h2 { margin: 0 0 12px; font-size: 18px; }
 .confirm-dialog p { color: var(--muted); overflow-wrap: anywhere; line-height: 1.6; }
 .dialog-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 20px; }

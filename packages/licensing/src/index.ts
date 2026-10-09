@@ -3,7 +3,7 @@ export const FREE_SESSION_LIMIT_MS = 10 * 60_000;
 export type LicenseStatus = "TRIAL" | "ACTIVE" | "PAST_DUE" | "GRACE_PERIOD" | "SUSPENDED" | "CANCELED" | "EXPIRED";
 export type LicenseCode = "LICENSE_ACTIVE" | "LICENSE_EXPIRED" | "LICENSE_SUSPENDED" | "PAYMENT_OVERDUE" | "DEVICE_LIMIT_REACHED" | "CONCURRENT_LIMIT_REACHED" | "LICENSE_REVOKED" | "DEVICE_REVOKED" | "INVALID_LICENSE" | "SERVER_UNAVAILABLE" | "TRIAL_LIMIT_REACHED" | "INVALID_INPUT" | "UNAUTHORIZED" | "FORBIDDEN" | "REAUTH_REQUIRED" | "SESSION_EXPIRED" | "FREE_SESSION_LIMIT_REACHED" | "SESSION_RECONCILIATION_REQUIRED" | "ROLLOUT_NOT_READY" | "DEVICE_REVIEW_REQUIRED";
 export class LicenseError extends Error { constructor(public readonly code: LicenseCode) { super(code); } }
-export type LicensePolicy = { enforced: boolean; identityEnabled?: boolean; allowNewIdentities?: boolean } & { -readonly [K in keyof typeof LICENSE_DEFAULTS]: number };
+export type LicensePolicy = { enforced: boolean; identityEnabled?: boolean; identityEnrollmentEnabled?: boolean; allowNewIdentities?: boolean } & { -readonly [K in keyof typeof LICENSE_DEFAULTS]: number };
 export interface NodusDeviceIdentity { version: 1; anchors: Partial<Record<"system" | "board" | "bios", string>>; virtual: boolean; }
 export interface DeviceLicenseIdentity { id: string; freeLicenseId: string; version: 1; status: "ACTIVE" | "BLOCKED"; anchors: string[]; createdAt: number; schemaVersion: 1; }
 export interface IdentityReview { deviceId: string; uid: string; candidates: string[]; anchors: string[]; reason: string; status: "PENDING" | "RESOLVED"; createdAt: number; }

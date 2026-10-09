@@ -770,7 +770,45 @@ void WINAPI serviceMain(DWORD argc, LPWSTR* argv) {
   CloseHandle(stopEvent);
 }
 
+int identityRecovery(bool write, const wchar_t* scope) {
+  const std::wstring name(scope);
+  if (name != L"Desktop" && (name.rfind(L"QuickSupport-", 0) != 0 || name.size() <= 13 || name.size() > 141
+    || name.find_first_not_of(L"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-") != std::wstring::npos)) return 1;
+  constexpr auto keyPath = L"Software\\Nodus Connect\\Identity";
+  std::wstring encrypted;
+  if (write) {
+    _setmode(_fileno(stdin), _O_BINARY);
+    char buffer[8193]{};
+    const size_t size = std::fread(buffer, 1, sizeof(buffer), stdin);
+    if (!size || size == sizeof(buffer) || std::ferror(stdin)) return 1;
+    encrypted.assign(buffer, buffer + size);
+  } else {
+    wchar_t buffer[8193]{};
+    DWORD size = sizeof(buffer);
+    const LSTATUS result = RegGetValueW(HKEY_CURRENT_USER, keyPath, scope, RRF_RT_REG_SZ, nullptr, buffer, &size);
+    if (result == ERROR_FILE_NOT_FOUND || result == ERROR_PATH_NOT_FOUND) { std::puts("null"); return 0; }
+    if (result != ERROR_SUCCESS) return 1;
+    encrypted = buffer;
+  }
+  if (encrypted.empty() || encrypted.size() > 8192
+    || encrypted.find_first_not_of(L"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=") != std::wstring::npos) return 1;
+  if (!write) {
+    std::string output;
+    output.reserve(encrypted.size());
+    for (wchar_t character : encrypted) output.push_back(static_cast<char>(character));
+    std::printf("\"%s\"\n", output.c_str());
+    return 0;
+  }
+  HKEY key;
+  if (RegCreateKeyExW(HKEY_CURRENT_USER, keyPath, 0, nullptr, 0, KEY_SET_VALUE, nullptr, &key, nullptr) != ERROR_SUCCESS) return 1;
+  const LSTATUS result = RegSetValueExW(key, scope, 0, REG_SZ, reinterpret_cast<const BYTE*>(encrypted.c_str()), static_cast<DWORD>((encrypted.size() + 1) * sizeof(wchar_t)));
+  RegCloseKey(key);
+  return result == ERROR_SUCCESS ? 0 : 1;
+}
+
 int wmain(int argc, wchar_t** argv) {
+  if (argc == 3 && _wcsicmp(argv[1], L"--identity-recovery-read") == 0) return identityRecovery(false, argv[2]);
+  if (argc == 3 && _wcsicmp(argv[1], L"--identity-recovery-write") == 0) return identityRecovery(true, argv[2]);
   if (argc >= 2 && _wcsicmp(argv[1], L"--cursor-overlay-probe") == 0) {
     HostOnlyPointer pointer;
     return pointer.prepare() ? 0 : 1;

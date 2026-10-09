@@ -7,12 +7,16 @@ service cloud.firestore {
     }
     function licensingEnabled() {
       return exists(/databases/$(database)/documents/license_policy/current)
-        && get(/databases/$(database)/documents/license_policy/current).data.enforced == true;
+        && (get(/databases/$(database)/documents/license_policy/current).data.enforced == true
+          || ('identityEnabled' in get(/databases/$(database)/documents/license_policy/current).data
+            && get(/databases/$(database)/documents/license_policy/current).data.identityEnabled == true));
     }
     function initiatorAllowed(nodusId, uid) {
       return get(/databases/$(database)/documents/devices/$(nodusId)).data.ownerUid == uid
         && (!exists(/databases/$(database)/documents/license_access_blocks/$(nodusId))
-          || get(/databases/$(database)/documents/license_access_blocks/$(nodusId)).data.blocked != true);
+          || get(/databases/$(database)/documents/license_access_blocks/$(nodusId)).data.blocked != true)
+        && (!exists(/databases/$(database)/documents/license_identity_bindings/$(nodusId))
+          || get(/databases/$(database)/documents/license_device_identities/$(get(/databases/$(database)/documents/license_identity_bindings/$(nodusId)).data.deviceIdentityId)).data.status == 'ACTIVE');
     }
     function readyGrant(sessionId) {
       let grant = get(/databases/$(database)/documents/license_session_grants/$(sessionId)).data;

@@ -31,6 +31,14 @@ function createDeviceIdentityStore(directory, options = {}) {
       return publicIdentity(recovered);
     }
 
+    const recovered = options.recovery?.load();
+    if (recovered) {
+      if (!validBaseIdentity(recovered) || !validDeviceId(recovered.deviceId) || !validSecret(recovered.deviceSecret)) throw new Error("INVALID_IDENTITY_RECOVERY");
+      const identity = completeIdentity(recovered);
+      persist(identity);
+      return publicIdentity(identity);
+    }
+
     const migrated = validBaseIdentity(legacyIdentity) ? legacyIdentity : null;
     const identity = completeIdentity(migrated);
     persist(identity);
@@ -51,6 +59,7 @@ function createDeviceIdentityStore(directory, options = {}) {
   function upgrade(identity, persistUpgrade = true) {
     const complete = completeIdentity(identity);
     if (persistUpgrade && JSON.stringify(complete) !== JSON.stringify(identity)) persist(complete);
+    else options.recovery?.save(complete);
     return publicIdentity(complete);
   }
 
@@ -81,6 +90,7 @@ function createDeviceIdentityStore(directory, options = {}) {
     io.mkdirSync(directory, { recursive: true });
     atomicWrite(backupPath, identity);
     atomicWrite(primaryPath, identity);
+    options.recovery?.save(identity);
   }
 
   function readIdentity(file) {
@@ -111,6 +121,40 @@ function createDeviceIdentityStore(directory, options = {}) {
   }
 
   return { loadOrCreate, updateMutable, paths: { primaryPath, backupPath } };
+}
+
+function createWindowsIdentityRecovery(safeStorage, scope, executable, execute = require("node:child_process").spawnSync) {
+  if (!/^(Desktop|QuickSupport-[A-Za-z0-9_-]{1,128})$/.test(scope)) throw new Error("INVALID_IDENTITY_SCOPE");
+  let saved;
+  function run(operation, input) {
+    const result = execute(executable, [`--identity-recovery-${operation}`, scope], { windowsHide: true, timeout: 3000, maxBuffer: 16384, encoding: "utf8", input });
+    if (result.error || result.status !== 0) throw new Error("IDENTITY_RECOVERY_UNAVAILABLE");
+    return result.stdout.replace(/^\uFEFF/, "").trim();
+  }
+  function requireEncryption() {
+    if (!safeStorage.isEncryptionAvailable()) throw new Error("IDENTITY_ENCRYPTION_UNAVAILABLE");
+  }
+  return {
+    load() {
+      const output = run("read");
+      const encrypted = JSON.parse(output);
+      if (encrypted === null) return null;
+      if (typeof encrypted !== "string" || encrypted.length > 8192 || !/^[A-Za-z0-9+/]+={0,2}$/.test(encrypted)) throw new Error("INVALID_IDENTITY_RECOVERY");
+      requireEncryption();
+      saved = safeStorage.decryptString(Buffer.from(encrypted, "base64"));
+      return JSON.parse(saved);
+    },
+    save(identity) {
+      const value = JSON.stringify(identity);
+      if (value === saved) return;
+      requireEncryption();
+      const encrypted = safeStorage.encryptString(value).toString("base64");
+      if (encrypted.length > 8192) throw new Error("INVALID_IDENTITY_RECOVERY");
+      // Only the encrypted payload goes through stdin, never command arguments.
+      run("write", encrypted);
+      saved = value;
+    },
+  };
 }
 
 function publicIdentity(identity) {
@@ -178,4 +222,4 @@ function collectHardwareIdentity(run = require("node:child_process").execFile) {
   }));
 }
 
-module.exports = { createDeviceIdentityStore, normalizeHardware, hardwareIdentity, collectHardwareIdentity };
+module.exports = { createDeviceIdentityStore, createWindowsIdentityRecovery, normalizeHardware, hardwareIdentity, collectHardwareIdentity };

@@ -36,8 +36,9 @@ async function device(identity: LocalIdentity, force = false) {
     const saved = await window.nodusDesktop?.getLicenseCredentials();
     if (!force && saved?.deviceId === identity.deviceId && saved.identityVersion === 1) return credentials = saved;
     const policy = await request<LicensePolicy>("/license/policy", undefined, false);
-    if (!force && saved?.deviceId === identity.deviceId && !policy.identityEnabled) return credentials = saved;
-    const licenseIdentity = policy.identityEnabled ? await window.nodusDesktop?.getLicenseIdentity() : undefined;
+    const collectIdentity = policy.identityEnabled || policy.identityEnrollmentEnabled;
+    if (!force && saved?.deviceId === identity.deviceId && !collectIdentity) return credentials = saved;
+    const licenseIdentity = collectIdentity ? await window.nodusDesktop?.getLicenseIdentity() : undefined;
     const enrolled = await request<Credentials>("/license/enroll", { deviceId: identity.deviceId, nodusId: identity.nodusId.replace(/\D/g, ""), deviceName: identity.deviceName, deviceClaim: identity.deviceClaim, ...(saved?.deviceId === identity.deviceId ? { previousDeviceToken: saved.deviceToken } : {}), ...(licenseIdentity ? { licenseIdentity } : {}) });
     if (enrolled.deviceId !== identity.deviceId || !/^[A-Za-z0-9_-]{40,128}$/.test(enrolled.deviceToken)) throw new LicenseError("SERVER_UNAVAILABLE");
     if (!await window.nodusDesktop?.saveLicenseCredentials(enrolled)) throw new LicenseError("SERVER_UNAVAILABLE");

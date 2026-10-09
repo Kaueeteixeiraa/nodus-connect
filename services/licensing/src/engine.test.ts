@@ -2,7 +2,7 @@ import { generateKeyPairSync, createHmac, randomUUID } from "node:crypto";
 import { createServer } from "node:http";
 import { once } from "node:events";
 import { describe, expect, test, vi } from "vitest";
-import { FREE_SESSION_LIMIT_MS, LICENSE_DEFAULTS, LicenseError, effectiveStatus, type License } from "../../../packages/licensing/src/index";
+import { FREE_SESSION_LIMIT_MS, LICENSE_DEFAULTS, LicenseError, effectiveStatus, type License, type LicenseDevice, type NodusDeviceIdentity } from "../../../packages/licensing/src/index";
 import { LicenseEngine, type Actor } from "./engine";
 import type { LicenseStore, LicenseTransaction } from "./store";
 import { signLease, verifyLease } from "./security";
@@ -19,10 +19,11 @@ import type { SupportDraft } from "../../../packages/common/src/quick-support";
 // Only tests use this store; production always uses Firestore transactions.
 export class TestStore implements LicenseStore {
   data = new Map<string, object>(); private tail: Promise<unknown> = Promise.resolve();
+  reads = 0; writes = 0;
   async transaction<T>(operation: (tx: LicenseTransaction) => Promise<T>, options?: { readOnly: boolean }): Promise<T> {
     const run = this.tail.then(async () => {
       const next = new Map([...this.data].map(([key, value]) => [key, structuredClone(value)]));
-      const result = await operation({ async get<T>(key: string) { return (structuredClone(next.get(key)) as T) ?? null; }, set(key, value) { if (options?.readOnly) throw new Error("READ_ONLY_TRANSACTION"); next.set(key, structuredClone(value)); } });
+      const result = await operation({ get: async <T>(key: string) => { this.reads++; return (structuredClone(next.get(key)) as T) ?? null; }, set: (key, value) => { if (options?.readOnly) throw new Error("READ_ONLY_TRANSACTION"); this.writes++; next.set(key, structuredClone(value)); } });
       this.data = next; return result;
     }); this.tail = run.catch(() => undefined); return run;
   }
@@ -43,6 +44,224 @@ async function fixture() {
   const business = async () => { const created = await engine.createBusiness(admin, { name: "Example", email: "owner@example.test" }); await engine.payment(admin, { licenseId: created.licenseId, paymentId: "initial-payment", amountCents: 20000 }); await engine.activate(actor, credentials, created.key); return created; };
   return { store, engine, actor, host, credentials, reserve, establish, business, time: () => time, advance: (ms: number) => time += ms };
 }
+describe("hardware licensing identity", () => {
+  const hardware: NodusDeviceIdentity = { version: 1, anchors: { system: "a".repeat(64), board: "b".repeat(64), bios: "c".repeat(64) }, virtual: false };
+  async function migrate(f: Awaited<ReturnType<typeof fixture>>, input = hardware) {
+    f.store.data.set("license_policy/current", { ...LICENSE_DEFAULTS, enforced: true, identityEnabled: true });
+    Object.assign(f.credentials, await f.engine.enroll(f.actor, { deviceId: "device-source", nodusId: "123456789", deviceName: "Source", deviceClaim: "claim-source", licenseIdentity: input }));
+    return f.store.data.get("license_devices/device-source") as LicenseDevice;
+  }
+  async function reinstall(f: Awaited<ReturnType<typeof fixture>>, input = hardware, id = "reinstall", nodusId = "111222333") {
+    const actor = { uid: `anonymous-${id}` };
+    f.store.data.set(`deviceClaims/${nodusId}`, { ownerUid: actor.uid, deviceId: id, deviceClaim: `claim-${id}` });
+    f.store.data.set(`devices/${nodusId}`, { ownerUid: actor.uid, nodusId });
+    const credentials = await f.engine.enroll(actor, { deviceId: id, nodusId, deviceName: "Reinstalled", deviceClaim: `claim-${id}`, licenseIdentity: input });
+    return { actor, credentials, device: f.store.data.get(`license_devices/${id}`) as LicenseDevice };
+  }
+  test("preparation links the existing quota and a reinstall without enabling global hardware enforcement", async () => {
+    const f = await fixture(); (f.store.data.get("license_licenses/free-device-source") as License).trialUsed = 85;
+    f.store.data.set("license_policy/current", { ...LICENSE_DEFAULTS, enforced: true, identityEnrollmentEnabled: true });
+    Object.assign(f.credentials, await f.engine.enroll(f.actor, { deviceId: "device-source", nodusId: "123456789", deviceName: "Source", deviceClaim: "claim-source", licenseIdentity: hardware }));
+    expect(f.credentials.identityVersion).toBe(1);
+    expect(await f.engine.policy()).toMatchObject({ identityEnabled: false, identityEnrollmentEnabled: true });
+    const installed = await reinstall(f);
+    expect(await f.engine.info(installed.actor, installed.credentials)).toMatchObject({ allowed: true, trialUsed: 85, trialLimit: 200 });
+    expect(installed.credentials.identityVersion).toBe(1);
+  });
+  test("preparation preserves legacy admissions and retries inconclusive proof on a later process", async () => {
+    const f = await fixture();
+    f.store.data.set("license_policy/current", { ...LICENSE_DEFAULTS, enforced: true, identityEnrollmentEnabled: true });
+    Object.assign(f.credentials, await f.engine.enroll(f.actor, { deviceId: "device-source", nodusId: "123456789", deviceName: "Source", deviceClaim: "claim-source" }));
+    expect(f.credentials.identityVersion).toBe(0);
+    expect(await f.engine.info(f.actor, f.credentials)).toMatchObject({ allowed: true, trialLimit: 200 });
+    const installed = await reinstall(f);
+    expect(installed.credentials.identityVersion).toBe(0);
+    expect(await f.engine.info(installed.actor, installed.credentials)).toMatchObject({ allowed: true, trialLimit: 200 });
+    (f.store.data.get("license_policy/current") as any).identityEnabled = true;
+    expect(await f.engine.info(installed.actor, installed.credentials)).toMatchObject({ allowed: false, code: "DEVICE_REVIEW_REQUIRED", trialLimit: 200 });
+  });
+  test("legacy enrollment preserves its actual 85 accesses; reinstall, anonymous UID, remote ID and QuickSupport do not reset them", async () => {
+    const f = await fixture(); (f.store.data.get("license_licenses/free-device-source") as License).trialUsed = 85;
+    const original = await migrate(f);
+    const a = await reinstall(f), b = await reinstall(f, hardware, "quick-support", "222333444");
+    expect(a.device.deviceIdentityId).toBe(original.deviceIdentityId);
+    expect(b.device.deviceIdentityId).toBe(original.deviceIdentityId);
+    expect(await f.engine.info(a.actor, a.credentials)).toMatchObject({ trialUsed: 85, trialLimit: 200, allowed: true });
+    expect(await f.engine.info(b.actor, b.credentials)).toMatchObject({ trialUsed: 85, trialLimit: 200 });
+    const stored = JSON.stringify([...f.store.data.entries()].filter(([path]) => path.startsWith("license_identity") || path.startsWith("license_device_identities")));
+    expect(stored).not.toContain("a".repeat(64));
+  });
+  test("first installation is granted 200 only when the migration policy explicitly permits new machines", async () => {
+    const f = await fixture(); await migrate(f);
+    const different: NodusDeviceIdentity = { ...hardware, anchors: { system: "d".repeat(64), board: "e".repeat(64) } };
+    const pending = await reinstall(f, different);
+    expect(await f.engine.info(pending.actor, pending.credentials)).toMatchObject({ allowed: false, code: "DEVICE_REVIEW_REQUIRED", trialLimit: 0 });
+    (f.store.data.get("license_policy/current") as any).allowNewIdentities = true;
+    const fresh = await reinstall(f, different, "new-machine", "222333444");
+    expect(await f.engine.info(fresh.actor, fresh.credentials)).toMatchObject({ allowed: true, trialUsed: 0, trialLimit: 200 });
+  });
+  test("SSD replacement and one changed hardware anchor recover by two exact independent matches", async () => {
+    const f = await fixture(); await migrate(f);
+    const installed = await reinstall(f, { ...hardware, anchors: { ...hardware.anchors, bios: "d".repeat(64) } });
+    expect(installed.device.identityReview).toBe(false);
+    expect(await f.engine.info(installed.actor, installed.credentials)).toMatchObject({ allowed: true, trialLimit: 200 });
+  });
+  test.each(["generic", "virtual", "partial", "missing"])("%s identification requires review, never a fresh automatic quota", async mode => {
+    const f = await fixture(); await migrate(f);
+    (f.store.data.get("license_policy/current") as any).allowNewIdentities = true;
+    const input = mode === "virtual" ? { ...hardware, virtual: true } : { ...hardware, anchors: mode === "partial" ? { system: hardware.anchors.system, board: "d".repeat(64) } : {} };
+    const installed = await reinstall(f, input);
+    expect(await f.engine.info(installed.actor, installed.credentials)).toMatchObject({ code: "DEVICE_REVIEW_REQUIRED", trialLimit: 0 });
+    await expect(f.engine.reserve(installed.actor, installed.credentials, { sessionId: "forbidden", targetNodusId: "987654321" })).rejects.toMatchObject({ code: "DEVICE_REVIEW_REQUIRED" });
+  });
+  test("mixed anchors from two registered computers require review even with two exact matches", async () => {
+    const f = await fixture(); await migrate(f);
+    (f.store.data.get("license_policy/current") as any).allowNewIdentities = true;
+    const other = { ...hardware, anchors: { system: "d".repeat(64), board: "e".repeat(64), bios: "1".repeat(64) } };
+    await reinstall(f, other, "other-computer", "222333444");
+    const ambiguous = await reinstall(f, { ...hardware, anchors: { system: hardware.anchors.system, board: hardware.anchors.board, bios: other.anchors.bios } });
+    expect(await f.engine.info(ambiguous.actor, ambiguous.credentials)).toMatchObject({ code: "DEVICE_REVIEW_REQUIRED", trialLimit: 0 });
+    expect(f.store.data.get("license_identity_reviews/reinstall")).toMatchObject({ status: "PENDING", reason: "CONFLICT" });
+  });
+  test("exceeding the bounded anchor history persists an administrative review instead of stranding the user", async () => {
+    const f = await fixture(); const device = await migrate(f);
+    const row = f.store.data.get(`license_device_identities/${device.deviceIdentityId}`) as { anchors: string[] };
+    row.anchors.push(...Array.from({ length: 9 }, (_, index) => `historical-${index}`));
+    const input = { ...hardware, anchors: { ...hardware.anchors, bios: "d".repeat(64) } };
+    Object.assign(f.credentials, await f.engine.enroll(f.actor, { deviceId: "device-source", nodusId: "123456789", deviceName: "Source", deviceClaim: "claim-source", licenseIdentity: input }));
+    expect(f.store.data.get("license_identity_reviews/device-source")).toMatchObject({ status: "PENDING", reason: "CONFLICT" });
+    expect(await f.engine.info(f.actor, f.credentials)).toMatchObject({ code: "DEVICE_REVIEW_REQUIRED", trialUsed: 0 });
+  });
+  test("simulated cloning shares the original counter rather than obtaining 200 extra accesses", async () => {
+    const f = await fixture(); await migrate(f); (f.store.data.get("license_licenses/free-device-source") as License).trialUsed = 200;
+    const installed = await reinstall(f);
+    expect(await f.engine.info(installed.actor, installed.credentials)).toMatchObject({ code: "TRIAL_LIMIT_REACHED", trialUsed: 200 });
+    await expect(f.engine.reserve(installed.actor, installed.credentials, { sessionId: "201", targetNodusId: "987654321" })).rejects.toMatchObject({ code: "TRIAL_LIMIT_REACHED" });
+  });
+  test("two installations race for the same final access using one canonical license transaction", async () => {
+    const f = await fixture(); await migrate(f); const installed = await reinstall(f);
+    (f.store.data.get("license_licenses/free-device-source") as License).trialUsed = 199;
+    const results = await Promise.allSettled([f.reserve("original-last"), f.engine.reserve(installed.actor, installed.credentials, { sessionId: "reinstalled-last", targetNodusId: "987654321" })]);
+    expect(results.filter(result => result.status === "fulfilled")).toHaveLength(1);
+    await f.establish("original-last");
+    expect((await f.engine.info(installed.actor, installed.credentials)).trialUsed).toBe(200);
+  });
+  test("two known legacy installations merge measured usage once, without resetting or double adding", async () => {
+    const f = await fixture(); await migrate(f);
+    const policy = f.store.data.get("license_policy/current"); f.store.data.set("license_policy/current", { ...LICENSE_DEFAULTS, enforced: true });
+    const second = await reinstall(f, hardware, "legacy-second");
+    (f.store.data.get("license_licenses/free-legacy-second") as License).trialUsed = 17;
+    (f.store.data.get("license_licenses/free-device-source") as License).trialUsed = 85;
+    f.store.data.set("license_policy/current", policy!);
+    Object.assign(second.credentials, await f.engine.enroll(second.actor, { deviceId: "legacy-second", nodusId: "111222333", deviceName: "Legacy", deviceClaim: "claim-legacy-second", licenseIdentity: hardware }));
+    expect((await f.engine.info(second.actor, second.credentials)).trialUsed).toBe(102);
+    Object.assign(second.credentials, await f.engine.enroll(second.actor, { deviceId: "legacy-second", nodusId: "111222333", deviceName: "Legacy", deviceClaim: "claim-legacy-second", licenseIdentity: hardware }));
+    expect((await f.engine.info(second.actor, second.credentials)).trialUsed).toBe(102);
+  });
+  test("administrative blocking survives another remote ID and blocks existing aliases", async () => {
+    const f = await fixture(); await migrate(f); const installed = await reinstall(f);
+    await f.engine.deviceStatus(admin, f.credentials.deviceId, "BLOCKED");
+    expect((await f.engine.info(installed.actor, installed.credentials)).code).toBe("DEVICE_REVOKED");
+    await expect(reinstall(f, hardware, "fresh-blocked", "222333444")).rejects.toMatchObject({ code: "DEVICE_REVOKED" });
+    await f.engine.deviceStatus(admin, f.credentials.deviceId, "ACTIVE");
+    expect((await f.engine.info(installed.actor, installed.credentials)).allowed).toBe(true);
+  });
+  test("unresolved hardware never blocks an existing paid license, and activation/cancellation preserve the original free history", async () => {
+    const f = await fixture(); (f.store.data.get("license_licenses/free-device-source") as License).trialUsed = 200;
+    const company = await f.business(); await migrate(f, { ...hardware, anchors: {} });
+    expect(await f.engine.info(f.actor, f.credentials)).toMatchObject({ allowed: true, plan: "business" });
+    f.advance(33 * 86400000); expect((await f.engine.info(f.actor, f.credentials)).allowed).toBe(false);
+    await f.engine.payment(admin, { licenseId: company.licenseId, paymentId: "renewal", amountCents: 20000 });
+    expect((await f.engine.info(f.actor, f.credentials)).allowed).toBe(true);
+    await f.engine.assignDeviceLicense(admin, "device-source", "free-device-source", "Subscription canceled by owner");
+    expect(await f.engine.info(f.actor, f.credentials)).toMatchObject({ trialUsed: 200, plan: "free", allowed: false });
+  });
+  test("hardware alone does not transfer a paid entitlement or bypass company device limits", async () => {
+    const f = await fixture(); await migrate(f); await f.business();
+    const installed = await reinstall(f);
+    expect((await f.engine.info(installed.actor, installed.credentials)).plan).toBe("free");
+  });
+  test("the paid key can restore the same physical machine without taking another company device slot", async () => {
+    const f = await fixture(); await migrate(f); const company = await f.business();
+    (f.store.data.get(`license_licenses/${company.licenseId}`) as License).maxDevices = 1;
+    const installed = await reinstall(f); await f.engine.activate(installed.actor, installed.credentials, company.key);
+    expect(await f.engine.info(installed.actor, installed.credentials)).toMatchObject({ plan: "business", devices: 1 });
+  });
+  test("a new anonymous UID cannot take an existing paid credential without the previous protected token", async () => {
+    const f = await fixture(); await f.business(); const actor = { uid: "new-anonymous-user" };
+    f.store.data.set("deviceClaims/123456789", { ownerUid: actor.uid, deviceId: "device-source", deviceClaim: "claim-source" });
+    const input = { deviceId: "device-source", nodusId: "123456789", deviceName: "Source", deviceClaim: "claim-source" };
+    await expect(f.engine.enroll(actor, input)).rejects.toMatchObject({ code: "UNAUTHORIZED" });
+    const credentials = await f.engine.enroll(actor, { ...input, previousDeviceToken: f.credentials.deviceToken });
+    expect(await f.engine.info(actor, credentials)).toMatchObject({ plan: "business", allowed: true });
+  });
+  test("an administrator can recover a legacy record without hardware using its actual prior history", async () => {
+    const f = await fixture(); (f.store.data.get("license_licenses/free-device-source") as License).trialUsed = 85;
+    f.store.data.set("license_policy/current", { ...LICENSE_DEFAULTS, enforced: true, identityEnabled: true });
+    const installed = await reinstall(f);
+    expect((await f.engine.info(installed.actor, installed.credentials)).code).toBe("DEVICE_REVIEW_REQUIRED");
+    await f.engine.reviewIdentity(admin, installed.credentials.deviceId, "device-source", false, "Verified old license history before hardware migration");
+    expect(await f.engine.info(installed.actor, installed.credentials)).toMatchObject({ trialUsed: 85, allowed: true });
+  });
+  test("exceptions require a justification and cannot be granted directly by a desktop client", async () => {
+    const f = await fixture(); await migrate(f);
+    await expect(f.engine.grantAccesses(f.actor, "free-device-source", "exception", "Support exception")).rejects.toMatchObject({ code: "FORBIDDEN" });
+    await expect(f.engine.grantAccesses(admin, "free-device-source", "exception")).rejects.toMatchObject({ code: "INVALID_INPUT" });
+    await f.engine.grantAccesses(admin, "free-device-source", "exception", "Approved extra sessions after support review");
+    expect((await f.engine.info(f.actor, f.credentials)).trialLimit).toBe(400);
+  });
+  test("only a recently authenticated admin can recover a partial identity, with justification and audit", async () => {
+    const f = await fixture(); await migrate(f); (f.store.data.get("license_licenses/free-device-source") as License).trialUsed = 85;
+    const installed = await reinstall(f, { ...hardware, anchors: { system: hardware.anchors.system } });
+    await expect(f.engine.reviewIdentity(f.actor, installed.credentials.deviceId, "device-source", false, "Recover machine")).rejects.toMatchObject({ code: "FORBIDDEN" });
+    await expect(f.engine.reviewIdentity({ ...admin, recent: false }, installed.credentials.deviceId, "device-source", false, "Recover machine")).rejects.toMatchObject({ code: "REAUTH_REQUIRED" });
+    await expect(f.engine.reviewIdentity(admin, installed.credentials.deviceId, "device-source", false, "")).rejects.toMatchObject({ code: "INVALID_INPUT" });
+    await f.engine.reviewIdentity(admin, installed.credentials.deviceId, "device-source", false, "Confirmed replaced motherboard");
+    expect(await f.engine.info(installed.actor, installed.credentials)).toMatchObject({ trialUsed: 85, allowed: true });
+    expect([...f.store.data.values()].some((row: any) => row.action === "DEVICE_IDENTITY_REVIEWED" && row.after.reason)).toBe(true);
+    expect(await f.engine.reviewIdentity(admin, installed.credentials.deviceId, "device-source", false, "Retry")).toMatchObject({ duplicate: true });
+  });
+  test.each([{ version: 2, anchors: {}, virtual: false }, { version: 1, anchors: { mac: "a".repeat(64) }, virtual: false }, { version: 1, anchors: { system: "invalid" }, virtual: false }])("rejects malformed proofs without modifying licensing", async proof => {
+    const f = await fixture(); await migrate(f); const before = f.store.data.size;
+    await expect(f.engine.enroll(f.actor, { deviceId: "device-source", nodusId: "123456789", deviceName: "Source", deviceClaim: "claim-source", licenseIdentity: proof as any })).rejects.toMatchObject({ code: "INVALID_INPUT" });
+    expect(f.store.data.size).toBe(before);
+  });
+  test("business sessions keep existing renewal and concurrency rules and allow audited reconciliation", async () => {
+    const f = await fixture(); const business = await f.business();
+    (f.store.data.get(`license_licenses/${business.licenseId}`) as License).maxConcurrentSessions = 1;
+    await f.engine.reserve(f.actor, f.credentials, { sessionId: "event-session", targetNodusId: "987654321", eventDriven: true });
+    expect(await f.engine.lifecycle(f.actor, "event-session", "establish")).toMatchObject({ eventDriven: false });
+    await f.establish("event-session");
+    await expect(f.reserve("extra")).rejects.toMatchObject({ code: "CONCURRENT_LIMIT_REACHED" });
+    f.advance(3600000);
+    await expect(f.reserve("stale-slot")).rejects.toMatchObject({ code: "SESSION_RECONCILIATION_REQUIRED" });
+    await expect(f.engine.releaseSession(f.actor, "event-session", "Owner verified closed app")).rejects.toMatchObject({ code: "FORBIDDEN" });
+    await f.engine.releaseSession(admin, "event-session", "Owner verified closed app");
+    await f.reserve("after-release");
+  });
+  test("event-driven free establishment returns a conservative timer to the first participant and consumes only after the second", async () => {
+    const f = await fixture(); await migrate(f);
+    await f.engine.reserve(f.actor, f.credentials, { sessionId: "event-session", targetNodusId: "987654321", eventDriven: true });
+    expect(await f.engine.lifecycle(f.actor, "event-session", "establish")).toMatchObject({ eventDriven: true, status: "RESERVED", endsAt: f.time() + FREE_SESSION_LIMIT_MS });
+    expect((await f.engine.info(f.actor, f.credentials)).trialUsed).toBe(0);
+    await f.engine.lifecycle(f.host, "event-session", "establish");
+    expect((await f.engine.info(f.actor, f.credentials)).trialUsed).toBe(1);
+    f.advance(FREE_SESSION_LIMIT_MS); await expect(f.engine.lifecycle(f.actor, "event-session", "establish")).rejects.toMatchObject({ code: "SESSION_EXPIRED" });
+  });
+  test("measures database operations for a ten-minute session, excluding transport and enrollment", async () => {
+    for (const eventDriven of [false, true]) {
+      const f = await fixture(); if (eventDriven) await migrate(f);
+      f.store.reads = 0; f.store.writes = 0; const started = performance.now();
+      await f.engine.reserve(f.actor, f.credentials, { sessionId: "measured", targetNodusId: "987654321", eventDriven });
+      await f.establish("measured");
+      if (!eventDriven) for (let i = 0; i < 19; i++) { f.advance(30000); for (const actor of [f.actor, f.host]) { await f.engine.policy(); await f.engine.lifecycle(actor, "measured", "heartbeat"); } }
+      await f.engine.lifecycle(f.actor, "measured", "end");
+      console.info(JSON.stringify({ event: "LICENSE_COST_LAB", eventDriven, reads: f.store.reads, writes: f.store.writes, localEngineMs: Number((performance.now() - started).toFixed(3)) }));
+      if (eventDriven) { expect(f.store.reads).toBeLessThan(24); expect(f.store.writes).toBe(13); }
+    }
+  });
+});
+
 describe("desktop update distribution", () => {
   const version = "1.1.16";
   const release = { tag_name: `v${version}`, assets: [{ name: `Nodus-Connect-Setup-${version}.exe`, browser_download_url: `https://github.com/Kaueeteixeiraa/nodus-connect/releases/download/v${version}/Nodus-Connect-Setup-${version}.exe`, digest: `sha256:${"a".repeat(64)}`, size: 100 }] };
@@ -347,6 +566,19 @@ async function httpFixture() {
   return { ...f, base, post, providers, notifyAccessRequest, close: () => new Promise<void>((resolve, reject) => { server.closeAllConnections(); server.close(error => error ? reject(error) : resolve()); }) };
 }
 describe("licensing HTTP and relay enforcement", () => {
+  test("measures complete licensing HTTP mutations including rate limits and both peer cleanups", async () => {
+    const f = await httpFixture();
+    try {
+      f.store.data.set("license_policy/current", { ...LICENSE_DEFAULTS, enforced: true, identityEnabled: true });
+      Object.assign(f.credentials, await f.engine.enroll(f.actor, { deviceId: "device-source", nodusId: "123456789", deviceName: "Source", deviceClaim: "claim-source", licenseIdentity: { version: 1, anchors: { system: "a".repeat(64), board: "b".repeat(64) }, virtual: false } }));
+      f.store.reads = 0; f.store.writes = 0;
+      expect((await f.post("/license/sessions/reserve", { ...f.credentials, sessionId: "cost-http", targetNodusId: "987654321", eventDriven: true })).status).toBe(200);
+      for (const token of ["source-token", "host-token"]) expect((await f.post("/license/sessions/establish", { sessionId: "cost-http" }, token)).status).toBe(200);
+      for (const token of ["source-token", "host-token"]) expect((await f.post("/license/sessions/end", { sessionId: "cost-http" }, token)).status).toBe(200);
+      console.info(JSON.stringify({ event: "LICENSE_HTTP_COST_LAB", reads: f.store.reads, writes: f.store.writes, calls: 5 }));
+      expect(f.store.reads).toBe(27); expect(f.store.writes).toBe(18);
+    } finally { await f.close(); }
+  });
   test("public startup update checks coalesce reads and bypass authentication and writes", async () => {
     const f = await httpFixture();
     try {

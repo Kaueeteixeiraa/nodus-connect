@@ -1,5 +1,5 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { LicenseError, type LicenseAccessRequest, type LicenseSession } from "../../../packages/licensing/src/index.js";
+import { LicenseError, type LicenseAccessRequest, type LicenseSession, type NodusDeviceIdentity } from "../../../packages/licensing/src/index.js";
 import { LicenseEngine, requireAdmin, text, validId, type Actor, type DeviceCredentials } from "./engine.js";
 import type { LicenseStore } from "./store.js";
 import type { PaymentProvider } from "./payments.js";
@@ -61,9 +61,9 @@ export function createLicenseHandler(deps: HttpDependencies) {
         if (count > 180) throw new LicenseError("FORBIDDEN"); tx.set(key, { minute, count });
       });
       const input = request.method === "POST" ? await body(request) : {};
-      if (path.startsWith("/admin/")) { requireAdmin(actor, request.method !== "GET" && path !== "/admin/details"); return send(200, await deps.admin(actor, `${request.method} ${path}`, input)); }
+      if (path.startsWith("/admin/")) { requireAdmin(actor, request.method !== "GET" && !["/admin/details", "/admin/device-details"].includes(path)); return send(200, await deps.admin(actor, `${request.method} ${path}`, input)); }
       if (request.method !== "POST") return send(404, { code: "INVALID_INPUT" });
-      if (path === "/license/enroll") return send(200, await deps.engine.enroll(actor, { deviceId: validId(input.deviceId), nodusId: text(input.nodusId, 9), deviceName: text(input.deviceName), deviceClaim: text(input.deviceClaim, 128) }));
+      if (path === "/license/enroll") return send(200, await deps.engine.enroll(actor, { deviceId: validId(input.deviceId), nodusId: text(input.nodusId, 9), deviceName: text(input.deviceName), deviceClaim: text(input.deviceClaim, 128), licenseIdentity: input.licenseIdentity as NodusDeviceIdentity | undefined, previousDeviceToken: typeof input.previousDeviceToken === "string" ? input.previousDeviceToken : undefined }));
       if (path === "/license/check") return send(200, await deps.engine.info(actor, credentials(input)));
       if (path === "/license/support/profiles") return send(200, await deps.engine.createSupportProfile(actor, credentials(input), input.profile as SupportDraft));
       if (path === "/license/support/admit") return send(200, await deps.engine.supportAdmission(actor, { profileId: validId(input.profileId), sessionId: validId(input.sessionId), targetNodusId: text(input.targetNodusId, 9), requesterNodusId: text(input.requesterNodusId, 9) }));
@@ -81,7 +81,7 @@ export function createLicenseHandler(deps: HttpDependencies) {
         }
         return send(200, { requestId: result.request.id, duplicate: result.duplicate, notificationStatus });
       }
-      if (path === "/license/sessions/reserve") return send(200, await deps.engine.reserve(actor, credentials(input), { sessionId: validId(input.sessionId), targetNodusId: text(input.targetNodusId, 9), offline: input.offline === true, supportProfileId: input.supportProfileId ? validId(input.supportProfileId) : undefined, supportPassword: typeof input.supportPassword === "string" ? input.supportPassword : undefined }));
+      if (path === "/license/sessions/reserve") return send(200, await deps.engine.reserve(actor, credentials(input), { sessionId: validId(input.sessionId), targetNodusId: text(input.targetNodusId, 9), offline: input.offline === true, supportProfileId: input.supportProfileId ? validId(input.supportProfileId) : undefined, supportPassword: typeof input.supportPassword === "string" ? input.supportPassword : undefined, eventDriven: input.eventDriven === true }));
       const lifecycle = path.match(/^\/license\/sessions\/(establish|heartbeat|end)$/);
       if (lifecycle) return send(200, await deps.engine.lifecycle(actor, validId(input.sessionId), lifecycle[1] as "establish" | "heartbeat" | "end"));
       if (path === "/license/transport/identity") {
@@ -97,6 +97,8 @@ export function createLicenseHandler(deps: HttpDependencies) {
           if (device?.ownerUid !== actor.uid) throw new LicenseError("FORBIDDEN");
           const block = await tx.get<{ blocked: boolean }>(`license_access_blocks/${from}`);
           if (block?.blocked) throw new LicenseError("DEVICE_REVOKED");
+          const binding = await tx.get<{ deviceIdentityId: string }>(`license_identity_bindings/${from}`);
+          if (binding && (await tx.get<{ status: string }>(`license_device_identities/${binding.deviceIdentityId}`))?.status !== "ACTIVE") throw new LicenseError("DEVICE_REVOKED");
         });
         const policy = await deps.engine.policy(); if (!policy.enforced) return send(200, { allowed: true, enforced: false });
         await deps.store.transaction(async tx => {

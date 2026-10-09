@@ -6,6 +6,8 @@ import type { SupportDraft, SupportProfile } from "../../../packages/common/src/
 import { FREE_SESSION_LIMIT_MS, LICENSE_DEFAULTS, LicenseError, effectiveStatus, licenseCode, type License, type LicenseAccessRequest, type LicenseDevice, type LicenseInfo, type LicensePolicy, type LicenseSession } from "../../../packages/licensing/src/index.js";
 import type { LicenseStore, LicenseTransaction } from "./store.js";
 import { matchesSecret, newDeviceToken, newLicenseKey, secretHash, signLease } from "./security.js";
+import { resolveDeviceIdentity } from "./device-identity.js";
+import type { DeviceLicenseIdentity, IdentityReview, NodusDeviceIdentity } from "../../../packages/licensing/src/index.js";
 
 export interface Actor { uid: string; admin?: boolean; recent?: boolean; ip?: string; }
 export interface DeviceCredentials { deviceId: string; deviceToken: string; }
@@ -16,6 +18,7 @@ export function validId(value: unknown): string { if (typeof value !== "string" 
 export function text(value: unknown, max = 120): string { if (typeof value !== "string" || !value.trim() || value.length > max) throw new LicenseError("INVALID_INPUT"); return value.trim(); }
 export function requireAdmin(actor: Actor, sensitive = false): void { if (!actor.admin) throw new LicenseError("FORBIDDEN"); if (sensitive && !actor.recent) throw new LicenseError("REAUTH_REQUIRED"); }
 function activeSlots(license: License, now: number) { return Object.entries(license.slots).filter(([, slot]) => (slot.endsAt === undefined || slot.endsAt > now) && (slot.established || slot.expiresAt > now)); }
+function licensedDeviceKey(license: License, device: LicenseDevice) { return license.plan === "business" ? device.deviceIdentityId ?? device.id : device.id; }
 function requireCapacity(license: License, now: number, enforced = true) {
   const code = licenseCode(license, now); if (code !== "LICENSE_ACTIVE" && (enforced || code !== "TRIAL_LIMIT_REACHED")) throw new LicenseError(code);
   const slots = activeSlots(license, now);
@@ -99,7 +102,7 @@ export class LicenseEngine {
   async policy(): Promise<LicensePolicy> { return this.store.transaction(tx => this.readPolicy(tx)); }
   private async readPolicy(tx: LicenseTransaction): Promise<LicensePolicy> {
     const stored = await tx.get<Partial<LicensePolicy>>("license_policy/current");
-    const policy: LicensePolicy = { ...LICENSE_DEFAULTS, enforced: stored?.enforced === true };
+    const policy: LicensePolicy = { ...LICENSE_DEFAULTS, enforced: stored?.enforced === true || stored?.identityEnabled === true, identityEnabled: stored?.identityEnabled === true, identityEnrollmentEnabled: stored?.identityEnrollmentEnabled === true, allowNewIdentities: stored?.allowNewIdentities === true };
     for (const key of Object.keys(LICENSE_DEFAULTS) as Array<keyof typeof LICENSE_DEFAULTS>) {
       const value = stored?.[key]; if (value !== undefined && Number.isSafeInteger(value) && value > 0 && value <= (key === "businessPriceCents" ? 100_000_000 : 1000)) policy[key] = value;
     }
@@ -108,11 +111,24 @@ export class LicenseEngine {
   private async device(tx: LicenseTransaction, actor: Actor, credentials: DeviceCredentials): Promise<LicenseDevice> {
     const device = await tx.get<LicenseDevice>(`license_devices/${validId(credentials.deviceId)}`);
     if (!device || device.uid !== actor.uid || typeof credentials.deviceToken !== "string" || !matchesSecret(credentials.deviceToken, device.tokenHash, this.pepper)) throw new LicenseError("UNAUTHORIZED");
+    if (device.deviceIdentityId) {
+      const identity = await tx.get<DeviceLicenseIdentity>(`license_device_identities/${device.deviceIdentityId}`);
+      if (!identity || identity.status !== "ACTIVE") device.status = "BLOCKED";
+      if (identity && device.licenseId.startsWith("free-")) device.licenseId = identity.freeLicenseId;
+    }
     return device;
   }
   private async license(tx: LicenseTransaction, id: string): Promise<License> { const license = await tx.get<License>(`license_licenses/${validId(id)}`); if (!license) throw new LicenseError("INVALID_LICENSE"); return license; }
+  private assignLicense(tx: LicenseTransaction, device: LicenseDevice, license: License, previous: License, now: number, removePrevious = false) {
+    const key = licensedDeviceKey(license, device);
+    if (activeSlots(previous, now).some(([, slot]) => slot.deviceId === device.id)) throw new LicenseError("CONCURRENT_LIMIT_REACHED");
+    if (license.plan === "business" && !license.deviceIds.includes(key) && license.deviceIds.length >= license.maxDevices) throw new LicenseError("DEVICE_LIMIT_REACHED");
+    if (removePrevious) tx.set(`license_licenses/${previous.id}`, { ...previous, deviceIds: previous.deviceIds.filter(id => id !== licensedDeviceKey(previous, device)), updatedAt: now });
+    tx.set(`license_licenses/${license.id}`, { ...license, deviceIds: [...new Set([...license.deviceIds, key])], updatedAt: now });
+    tx.set(`license_devices/${device.id}`, { ...device, licenseId: license.id, activatedAt: now });
+  }
 
-  async enroll(actor: Actor, input: { deviceId: string; nodusId: string; deviceName: string; deviceClaim: string }) {
+  async enroll(actor: Actor, input: { deviceId: string; nodusId: string; deviceName: string; deviceClaim: string; licenseIdentity?: NodusDeviceIdentity; previousDeviceToken?: string }) {
     validId(input.deviceId); if (!/^\d{9}$/.test(input.nodusId)) throw new LicenseError("INVALID_INPUT"); text(input.deviceName); text(input.deviceClaim, 128);
     const deviceToken = newDeviceToken(); const now = this.now();
     return this.store.transaction(async tx => {
@@ -120,12 +136,19 @@ export class LicenseEngine {
       if (!claim || claim.ownerUid !== actor.uid || claim.deviceId !== input.deviceId || claim.deviceClaim !== input.deviceClaim) throw new LicenseError("FORBIDDEN");
       const existing = await tx.get<LicenseDevice>(`license_devices/${input.deviceId}`);
       if (existing && (!matchesSecret(input.deviceClaim, existing.claimHash, this.pepper) || existing.nodusId !== input.nodusId)) throw new LicenseError("FORBIDDEN");
+      if (existing && !existing.licenseId.startsWith("free-") && existing.uid !== actor.uid && (typeof input.previousDeviceToken !== "string" || !matchesSecret(input.previousDeviceToken, existing.tokenHash, this.pepper))) throw new LicenseError("UNAUTHORIZED");
       if (existing && existing.status !== "ACTIVE") throw new LicenseError("DEVICE_REVOKED");
-      const policy = await this.readPolicy(tx); const id = existing?.licenseId ?? `free-${input.deviceId}`;
+      const policy = await this.readPolicy(tx);
+      const recognition = await resolveDeviceIdentity(tx, input.licenseIdentity, { id: input.deviceId, uid: actor.uid }, existing, policy, this.pepper, now);
+      const freeLicenseId = recognition.identity?.freeLicenseId ?? existing?.freeLicenseId ?? `free-${input.deviceId}`;
+      const id = existing && !existing.licenseId.startsWith("free-") ? existing.licenseId : freeLicenseId;
       const oldLicense = await tx.get<License>(`license_licenses/${id}`);
-      if (!oldLicense) tx.set(`license_licenses/${id}`, { id, organizationId: "", plan: "free", status: "TRIAL", maxDevices: 1, maxConcurrentSessions: policy.freeAccessLimit, trialLimit: policy.freeAccessLimit, trialUsed: 0, expiresAt: 0, graceUntil: 0, deviceIds: [input.deviceId], slots: {}, keyLast4: "", keyHash: "", keyRevoked: false, createdAt: now, updatedAt: now } satisfies License);
-      tx.set(`license_devices/${input.deviceId}`, { id: input.deviceId, licenseId: id, uid: actor.uid, nodusId: input.nodusId, deviceName: input.deviceName.trim(), claimHash: secretHash(input.deviceClaim, this.pepper), tokenHash: secretHash(deviceToken, this.pepper), status: "ACTIVE", activatedAt: existing?.activatedAt ?? now, lastSeenAt: now } satisfies LicenseDevice);
-      return { deviceId: input.deviceId, deviceToken };
+      if (oldLicense?.plan === "business" && recognition.identity && oldLicense.deviceIds.includes(input.deviceId)) tx.set(`license_licenses/${id}`, { ...oldLicense, deviceIds: [...new Set(oldLicense.deviceIds.map(value => value === input.deviceId ? recognition.identity!.id : value))] });
+      if (!oldLicense) tx.set(`license_licenses/${id}`, { id, organizationId: "", plan: "free", status: "TRIAL", maxDevices: 1, maxConcurrentSessions: policy.freeAccessLimit, trialLimit: policy.identityEnabled && recognition.review ? 0 : policy.freeAccessLimit, trialUsed: 0, expiresAt: 0, graceUntil: 0, deviceIds: [input.deviceId], slots: {}, keyLast4: "", keyHash: "", keyRevoked: false, createdAt: now, updatedAt: now } satisfies License);
+      tx.set(`license_devices/${input.deviceId}`, { ...existing, id: input.deviceId, licenseId: id, uid: actor.uid, nodusId: input.nodusId, deviceName: input.deviceName.trim(), claimHash: secretHash(input.deviceClaim, this.pepper), tokenHash: secretHash(deviceToken, this.pepper), status: "ACTIVE", activatedAt: existing?.activatedAt ?? now, lastSeenAt: existing?.lastSeenAt ?? now,
+        freeLicenseId, ...(recognition.identity ? { deviceIdentityId: recognition.identity.id } : {}), identityReview: recognition.review } satisfies LicenseDevice);
+      if (recognition.identity) tx.set(`license_identity_bindings/${input.nodusId}`, { deviceIdentityId: recognition.identity.id });
+      return { deviceId: input.deviceId, deviceToken, identityVersion: recognition.identity && !recognition.review ? 1 : 0 };
     });
   }
 
@@ -133,7 +156,7 @@ export class LicenseEngine {
     return this.store.transaction(async tx => {
       const device = await this.device(tx, actor, credentials); const license = await this.license(tx, device.licenseId); const policy = await this.readPolicy(tx);
       const organization = license.organizationId ? await tx.get<{ name: string }>(`license_organizations/${license.organizationId}`) : null;
-      const now = this.now(); const code = device.status !== "ACTIVE" ? "DEVICE_REVOKED" : licenseCode(license, now);
+      const now = this.now(); const code = device.status !== "ACTIVE" || license.plan === "business" && !license.deviceIds.includes(licensedDeviceKey(license, device)) ? "DEVICE_REVOKED" : license.plan === "free" && policy.identityEnabled && (!device.deviceIdentityId || device.identityReview) ? "DEVICE_REVIEW_REQUIRED" : licenseCode(license, now);
       return { allowed: code === "LICENSE_ACTIVE", code, enforced: policy.enforced, plan: license.plan, status: effectiveStatus(license, now), organization: organization?.name ?? "", trialUsed: license.trialUsed, trialLimit: license.trialLimit, devices: license.deviceIds.length, maxDevices: license.maxDevices, sessions: activeSlots(license, now).length, maxConcurrentSessions: license.maxConcurrentSessions, expiresAt: license.expiresAt, keyMasked: license.keyLast4 ? `NODUS-••••-••••-${license.keyLast4}` : "", serverTime: now };
     }, { readOnly: true });
   }
@@ -169,7 +192,7 @@ export class LicenseEngine {
     });
   }
 
-  async grantAccesses(actor: Actor, licenseId: string, operationId: string) {
+  async grantAccesses(actor: Actor, licenseId: string, operationId: string, reason?: string) {
     requireAdmin(actor, true); validId(operationId); const now = this.now();
     return this.store.transaction(async tx => {
       const operationPath = `license_admin_operations/${operationId}`;
@@ -179,10 +202,12 @@ export class LicenseEngine {
         return { ok: true, duplicate: true, trialLimit: previous.trialLimit };
       }
       const license = await this.license(tx, licenseId); if (license.plan !== "free") throw new LicenseError("FORBIDDEN");
+      const policy = await this.readPolicy(tx);
+      if (policy.identityEnabled || reason !== undefined) text(reason, 500);
       const trialLimit = license.trialLimit + LICENSE_DEFAULTS.freeAccessLimit;
       tx.set(`license_licenses/${license.id}`, { ...license, trialLimit, updatedAt: now });
       tx.set(operationPath, { uid: actor.uid, licenseId, trialLimit });
-      audit(tx, actor, "ACCESS_INCREASE_GRANTED", license.id, { trialLimit: license.trialLimit }, { amount: LICENSE_DEFAULTS.freeAccessLimit, trialLimit }, now);
+      audit(tx, actor, "ACCESS_INCREASE_GRANTED", license.id, { trialLimit: license.trialLimit }, { amount: LICENSE_DEFAULTS.freeAccessLimit, trialLimit, reason: reason?.trim() ?? "Legacy administrative authorization" }, now);
       return { ok: true, duplicate: false, trialLimit };
     });
   }
@@ -201,6 +226,77 @@ export class LicenseEngine {
     });
   }
 
+  async reviewIdentity(actor: Actor, deviceId: string, targetDeviceId: string | undefined, confirmNew: boolean, reason: string) {
+    requireAdmin(actor, true); validId(deviceId); text(reason, 500); const now = this.now();
+    return this.store.transaction(async tx => {
+      const device = await tx.get<LicenseDevice>(`license_devices/${deviceId}`);
+      const review = await tx.get<IdentityReview>(`license_identity_reviews/${deviceId}`);
+      if (!device || !review) throw new LicenseError("INVALID_INPUT");
+      if (review.status === "RESOLVED") return { ok: true, duplicate: true };
+      const target = targetDeviceId ? await tx.get<LicenseDevice>(`license_devices/${validId(targetDeviceId)}`) : null;
+      let identity = target?.deviceIdentityId ? await tx.get<DeviceLicenseIdentity>(`license_device_identities/${target.deviceIdentityId}`) : null;
+      if (target && !identity) {
+        identity = { id: `hw-${randomUUID()}`, freeLicenseId: target.freeLicenseId ?? `free-${target.id}`, version: 1, status: target.status === "ACTIVE" ? "ACTIVE" : "BLOCKED", anchors: [], createdAt: target.activatedAt, schemaVersion: 1 };
+        tx.set(`license_devices/${target.id}`, { ...target, deviceIdentityId: identity.id, freeLicenseId: identity.freeLicenseId });
+        tx.set(`license_identity_bindings/${target.nodusId}`, { deviceIdentityId: identity.id });
+        const paid = await this.license(tx, target.licenseId);
+        if (paid.plan === "business") tx.set(`license_licenses/${paid.id}`, { ...paid, deviceIds: [...new Set(paid.deviceIds.map(id => id === target.id ? identity!.id : id))] });
+      }
+      if (targetDeviceId && !target || !identity && !confirmNew) throw new LicenseError("INVALID_INPUT");
+      const oldFreeId = device.freeLicenseId ?? `free-${device.id}`;
+      const old = await tx.get<License>(`license_licenses/${oldFreeId}`);
+      if (!identity) identity = { id: `hw-${randomUUID()}`, freeLicenseId: oldFreeId, version: 1, status: "ACTIVE", anchors: [], createdAt: device.activatedAt, schemaVersion: 1 };
+      const current = await tx.get<License>(`license_licenses/${identity.freeLicenseId}`);
+      if (!old || !current || old.plan !== "free" || current.plan !== "free") throw new LicenseError("INVALID_LICENSE");
+      if (Object.values(old.slots).some(slot => slot.established || slot.expiresAt > now)) throw new LicenseError("CONCURRENT_LIMIT_REACHED");
+      const marker = await tx.get(`license_identity_migrations/${oldFreeId}`);
+      if (oldFreeId !== current.id && !marker) {
+        tx.set(`license_licenses/${current.id}`, { ...current, trialUsed: current.trialUsed + old.trialUsed, trialLimit: Math.max(current.trialLimit, old.trialLimit), updatedAt: now });
+        tx.set(`license_identity_migrations/${oldFreeId}`, { deviceIdentityId: identity.id, freeLicenseId: current.id, used: old.trialUsed, createdAt: now });
+      } else if (confirmNew && oldFreeId === current.id && current.trialLimit === 0) {
+        tx.set(`license_licenses/${current.id}`, { ...current, trialLimit: LICENSE_DEFAULTS.freeAccessLimit, updatedAt: now });
+      }
+      const anchors = [...new Set([...identity.anchors, ...review.anchors])];
+      if (anchors.length > 12) throw new LicenseError("INVALID_INPUT");
+      for (const anchor of review.anchors) {
+        const index = await tx.get<{ ids: string[] }>(`license_identity_anchors/${anchor}`);
+        const ids = [...new Set([...(index?.ids ?? []), identity.id])];
+        if (ids.length > 8) throw new LicenseError("INVALID_INPUT");
+        tx.set(`license_identity_anchors/${anchor}`, { ids });
+      }
+      tx.set(`license_device_identities/${identity.id}`, { ...identity, anchors });
+      if (!device.licenseId.startsWith("free-")) {
+        const paid = await this.license(tx, device.licenseId);
+        tx.set(`license_licenses/${paid.id}`, { ...paid, deviceIds: [...new Set(paid.deviceIds.map(id => id === device.id ? identity!.id : id))] });
+      }
+      tx.set(`license_devices/${device.id}`, { ...device, deviceIdentityId: identity.id, freeLicenseId: identity.freeLicenseId, identityReview: false, licenseId: device.licenseId.startsWith("free-") ? identity.freeLicenseId : device.licenseId });
+      tx.set(`license_identity_bindings/${device.nodusId}`, { deviceIdentityId: identity.id });
+      tx.set(`license_identity_reviews/${device.id}`, { ...review, status: "RESOLVED", resolvedAt: now });
+      audit(tx, actor, "DEVICE_IDENTITY_REVIEWED", identity.freeLicenseId, { deviceId, previousFreeLicenseId: oldFreeId }, { deviceId, deviceIdentityId: identity.id, confirmNew, reason: reason.trim() }, now);
+      return { ok: true, duplicate: false };
+    });
+  }
+
+  async assignDeviceLicense(actor: Actor, deviceId: string, licenseId: string, reason: string) {
+    requireAdmin(actor, true); text(reason, 500); const now = this.now();
+    return this.store.transaction(async tx => {
+      const device = await tx.get<LicenseDevice>(`license_devices/${validId(deviceId)}`);
+      if (!device || device.status !== "ACTIVE") throw new LicenseError("DEVICE_REVOKED");
+      const license = await this.license(tx, licenseId), previous = await this.license(tx, device.licenseId);
+      if (license.id === previous.id) return { ok: true };
+      if (license.plan === "free" && license.id !== device.freeLicenseId) throw new LicenseError("FORBIDDEN");
+      if (license.plan === "business" && (licenseCode(license, now) !== "LICENSE_ACTIVE" || license.keyRevoked)) throw new LicenseError("INVALID_LICENSE");
+      this.assignLicense(tx, device, license, previous, now, true);
+      audit(tx, actor, "DEVICE_LICENSE_ASSIGNED", license.id, { deviceId, licenseId: previous.id }, { deviceId, licenseId, reason: reason.trim() }, now);
+      return { ok: true };
+    });
+  }
+
+  async releaseSession(actor: Actor, sessionId: string, reason: string) {
+    requireAdmin(actor, true); validId(sessionId); text(reason, 500);
+    return this.lifecycle(actor, sessionId, "end", reason);
+  }
+
   async activate(actor: Actor, credentials: DeviceCredentials, keyInput: string) {
     const key = text(keyInput, 128).toUpperCase(); const now = this.now();
     return this.store.transaction(async tx => {
@@ -211,10 +307,7 @@ export class LicenseEngine {
       const code = licenseCode(license, now); if (code !== "LICENSE_ACTIVE") throw new LicenseError(code);
       if (previous.id === license.id) return { ok: true };
       if (previous.plan === "business" && previous.id !== license.id) throw new LicenseError("FORBIDDEN");
-      if (activeSlots(previous, now).some(([, slot]) => slot.deviceId === device.id)) throw new LicenseError("CONCURRENT_LIMIT_REACHED");
-      if (!license.deviceIds.includes(device.id) && license.deviceIds.length >= license.maxDevices) throw new LicenseError("DEVICE_LIMIT_REACHED");
-      license.deviceIds = [...new Set([...license.deviceIds, device.id])]; license.updatedAt = now;
-      tx.set(`license_licenses/${license.id}`, license); tx.set(`license_devices/${device.id}`, { ...device, licenseId: license.id, activatedAt: now, lastSeenAt: now });
+      this.assignLicense(tx, device, license, previous, now);
       audit(tx, actor, "DEVICE_ACTIVATED", license.id, null, { deviceId: device.id }, now);
       return { ok: true };
     });
@@ -273,13 +366,15 @@ export class LicenseEngine {
     }, { readOnly: true });
   }
 
-  async reserve(actor: Actor, credentials: DeviceCredentials, input: { sessionId: string; targetNodusId: string; offline?: boolean; supportProfileId?: string; supportPassword?: string }) {
+  async reserve(actor: Actor, credentials: DeviceCredentials, input: { sessionId: string; targetNodusId: string; offline?: boolean; supportProfileId?: string; supportPassword?: string; eventDriven?: boolean }) {
     validId(input.sessionId); if (!/^\d{9}$/.test(input.targetNodusId)) throw new LicenseError("INVALID_INPUT"); const now = this.now();
     const supportProfileId = input.supportProfileId ? await this.supportAuthentication(actor, credentials, input.targetNodusId, input.supportPassword) : undefined;
     if (input.supportProfileId && input.supportProfileId !== supportProfileId) throw new LicenseError("FORBIDDEN");
     return this.store.transaction(async tx => {
       const device = await this.device(tx, actor, credentials); if (device.status !== "ACTIVE") throw new LicenseError("DEVICE_REVOKED");
       const license = await this.license(tx, device.licenseId), policy = await this.readPolicy(tx);
+      if (license.plan === "free" && policy.identityEnabled && (!device.deviceIdentityId || device.identityReview)) throw new LicenseError("DEVICE_REVIEW_REQUIRED");
+      if (license.plan === "business" && !license.deviceIds.includes(licensedDeviceKey(license, device))) throw new LicenseError("DEVICE_REVOKED");
       const target = await tx.get<{ ownerUid: string; nodusId: string; supportProfileId?: string }>(`devices/${input.targetNodusId}`);
       if (!target?.ownerUid || target.ownerUid === actor.uid || input.targetNodusId === device.nodusId) throw new LicenseError("INVALID_INPUT");
       if (target.supportProfileId !== supportProfileId || supportProfileId && input.offline) throw new LicenseError("FORBIDDEN");
@@ -298,6 +393,8 @@ export class LicenseEngine {
       if (expiresAt <= now) throw new LicenseError("LICENSE_EXPIRED");
       license.slots = Object.fromEntries(activeSlots(license, now)); license.slots[input.sessionId] = { deviceId: device.id, expiresAt, established: false, offline };
       const session: LicenseSession = { id: input.sessionId, licenseId: license.id, deviceId: device.id, requesterUid: actor.uid, targetUid: target.ownerUid, requesterNodusId: device.nodusId, targetNodusId: input.targetNodusId, status: "RESERVED", connectedUids: [], consumed: false, createdAt: now, establishedAt: 0, lastHeartbeatAt: now, endedAt: 0, expiresAt, offline };
+      if (input.eventDriven === true && license.plan === "free") session.eventDriven = true;
+      tx.set(`license_devices/${device.id}`, { ...device, lastAuthorizedAccessAt: now });
       if (supportProfileId) (session as SupportSession).supportProfileId = supportProfileId;
       tx.set(`license_licenses/${license.id}`, license); tx.set(`license_sessions/${session.id}`, session);
       tx.set(`license_session_grants/${session.id}`, { sessionId: session.id, requesterUid: session.requesterUid, targetUid: session.targetUid, requesterNodusId: session.requesterNodusId, targetNodusId: session.targetNodusId, status: "RESERVED", expiresAt });
@@ -305,15 +402,16 @@ export class LicenseEngine {
     });
   }
   private reservation(session: LicenseSession, now: number) {
-    const lease = signLease({ iss: "nodus-license", aud: "nodus-session", sessionId: session.id, deviceId: session.deviceId, requesterUid: session.requesterUid, targetUid: session.targetUid, requesterNodusId: session.requesterNodusId, targetNodusId: session.targetNodusId, iat: now, exp: session.expiresAt }, this.signingKey);
+    const lease = signLease({ iss: "nodus-license", aud: "nodus-session", sessionId: session.id, deviceId: session.deviceId, requesterUid: session.requesterUid, targetUid: session.targetUid, requesterNodusId: session.requesterNodusId, targetNodusId: session.targetNodusId, iat: now, exp: session.offline ? session.expiresAt : Math.min(session.expiresAt, now + 120_000) }, this.signingKey);
     return { sessionId: session.id, lease, expiresAt: session.expiresAt, offline: session.offline, serverTime: now };
   }
 
-  async lifecycle(actor: Actor, id: string, action: "establish" | "heartbeat" | "end") {
+  async lifecycle(actor: Actor, id: string, action: "establish" | "heartbeat" | "end", adminReason?: string) {
     validId(id); const now = this.now();
+    if (adminReason !== undefined) { requireAdmin(actor, true); text(adminReason, 500); if (action !== "end") throw new LicenseError("FORBIDDEN"); }
     const result = await this.store.transaction(async tx => {
       const session = await tx.get<LicenseSession>(`license_sessions/${id}`);
-      if (!session || ![session.requesterUid, session.targetUid].includes(actor.uid)) throw new LicenseError("FORBIDDEN");
+      if (!session || adminReason === undefined && ![session.requesterUid, session.targetUid].includes(actor.uid)) throw new LicenseError("FORBIDDEN");
       const license = await this.license(tx, session.licenseId); const policy = await this.readPolicy(tx);
       if (session.status === "ENDED") { if (action === "end") return { ok: true, consumed: session.consumed }; throw new LicenseError("SESSION_EXPIRED"); }
       const slot = license.slots[id];
@@ -327,6 +425,7 @@ export class LicenseEngine {
       } else {
         const requester = await tx.get<LicenseDevice>(`license_devices/${session.deviceId}`);
         if (!requester || requester.status !== "ACTIVE") throw new LicenseError("DEVICE_REVOKED");
+        if (requester.deviceIdentityId && (await tx.get<DeviceLicenseIdentity>(`license_device_identities/${requester.deviceIdentityId}`))?.status !== "ACTIVE") throw new LicenseError("DEVICE_REVOKED");
         if ((session as SupportSession).supportProfileId) {
           const stored = await tx.get<{ revoked: boolean }>(`license_support_profiles/${(session as SupportSession).supportProfileId}`);
           if (!stored || stored.revoked || license.keyRevoked || licenseCode(license, now) !== "LICENSE_ACTIVE") throw new LicenseError("SESSION_EXPIRED");
@@ -343,13 +442,14 @@ export class LicenseEngine {
         if (session.status === "ESTABLISHED") {
           session.lastHeartbeatAt = now;
           if (session.endsAt !== undefined) slot.endsAt = session.endsAt;
-          if (!session.offline) { session.expiresAt = Math.min(now + policy.reservationSeconds * 1000, session.endsAt ?? Infinity); slot.expiresAt = session.expiresAt; }
+          if (!session.offline) { session.expiresAt = session.eventDriven ? session.endsAt ?? Number.MAX_SAFE_INTEGER : Math.min(now + policy.reservationSeconds * 1000, session.endsAt ?? Infinity); slot.expiresAt = session.expiresAt; }
         }
       }
       license.updatedAt = now;
+      if (adminReason !== undefined) audit(tx, actor, "SESSION_ADMIN_RELEASED", license.id, { sessionId: id }, { sessionId: id, reason: adminReason.trim() }, now);
       tx.set(`license_sessions/${id}`, session); tx.set(`license_licenses/${license.id}`, license);
       tx.set(`license_session_grants/${id}`, { sessionId: id, requesterUid: session.requesterUid, targetUid: session.targetUid, requesterNodusId: session.requesterNodusId, targetNodusId: session.targetNodusId, status: session.status, expiresAt: session.expiresAt, endsAt: session.endsAt ?? 0 });
-      return { ok: true, consumed: session.consumed, status: session.status, endsAt: session.endsAt ?? 0, serverTime: now };
+      return { ok: true, consumed: session.consumed, status: session.status, endsAt: session.endsAt ?? (session.eventDriven && license.plan === "free" && action === "establish" ? now + FREE_SESSION_LIMIT_MS : 0), serverTime: now, eventDriven: session.eventDriven === true };
     });
     if (action !== "end" && result.status === "ENDED") throw new LicenseError("SESSION_EXPIRED");
     return result;
@@ -376,10 +476,15 @@ export class LicenseEngine {
     requireAdmin(actor, true); if (!["ACTIVE", "REVOKED", "BLOCKED"].includes(status)) throw new LicenseError("INVALID_INPUT");
     return this.store.transaction(async tx => {
       const device = await tx.get<LicenseDevice>(`license_devices/${validId(deviceId)}`); if (!device) throw new LicenseError("INVALID_INPUT"); const license = await this.license(tx, device.licenseId);
-      if (status === "ACTIVE" && !license.deviceIds.includes(device.id) && license.deviceIds.length >= license.maxDevices) throw new LicenseError("DEVICE_LIMIT_REACHED");
-      license.deviceIds = status === "ACTIVE" ? [...new Set([...license.deviceIds, device.id])] : license.deviceIds.filter(id => id !== device.id);
+      const deviceKey = licensedDeviceKey(license, device);
+      if (status === "ACTIVE" && !license.deviceIds.includes(deviceKey) && license.deviceIds.length >= license.maxDevices) throw new LicenseError("DEVICE_LIMIT_REACHED");
+      license.deviceIds = status === "ACTIVE" ? [...new Set([...license.deviceIds, deviceKey])] : license.deviceIds.filter(id => id !== deviceKey);
       tx.set(`license_devices/${device.id}`, { ...device, status }); tx.set(`license_licenses/${license.id}`, license);
       tx.set(`license_access_blocks/${device.nodusId}`, { uid: device.uid, deviceId: device.id, blocked: status !== "ACTIVE", updatedAt: this.now() });
+      if (device.deviceIdentityId) {
+        const identity = await tx.get<DeviceLicenseIdentity>(`license_device_identities/${device.deviceIdentityId}`);
+        if (identity) tx.set(`license_device_identities/${identity.id}`, { ...identity, status: status === "ACTIVE" ? "ACTIVE" : "BLOCKED" });
+      }
       audit(tx, actor, "DEVICE_STATUS_CHANGED", license.id, { deviceId, status: device.status }, { deviceId, status }, this.now()); return { ok: true };
     });
   }

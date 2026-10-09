@@ -1,6 +1,12 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { afterAll, beforeAll, beforeEach, describe, test } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, test } from "vitest";
+import { generateKeyPairSync } from "node:crypto";
+import { initializeApp, deleteApp } from "firebase-admin/app";
+import { getFirestore } from "firebase-admin/firestore";
+import { LicenseEngine } from "./engine";
+import { firestoreLicenseStore } from "./firestore-store";
+import { LICENSE_DEFAULTS } from "../../../packages/licensing/src/index";
 import { assertFails, assertSucceeds, initializeTestEnvironment, type RulesTestEnvironment } from "@firebase/rules-unit-testing";
 
 const projectId = "demo-nodus-licensing";
@@ -26,6 +32,41 @@ describeRules("candidate Firestore licensing rules", () => {
   });
   beforeEach(() => environment.clearFirestore());
   afterAll(() => environment?.cleanup());
+
+  test("real Firestore transactions preserve a reinstalled device and serialize its last free access", async () => {
+    const app = initializeApp({ projectId }, "identity-transaction-test");
+    try {
+      const db = getFirestore(app);
+      const keys = generateKeyPairSync("ed25519", { privateKeyEncoding: { type: "pkcs8", format: "pem" }, publicKeyEncoding: { type: "spki", format: "pem" } });
+      const engine = new LicenseEngine(firestoreLicenseStore(db), "emulator-only-pepper".repeat(3), keys.privateKey);
+      await db.doc("license_policy/current").set({ ...LICENSE_DEFAULTS, enforced: true });
+      for (const [nodusId, uid, deviceId] of [[requesterId, requesterUid, "original"], ["111222333", "reinstalled-user", "reinstalled"]]) {
+        await db.doc(`deviceClaims/${nodusId}`).set({ ownerUid: uid, deviceId, deviceClaim: `claim-${deviceId}` });
+        await db.doc(`devices/${nodusId}`).set({ ownerUid: uid, nodusId });
+      }
+      await db.doc(`devices/${targetId}`).set({ ownerUid: targetUid, nodusId: targetId });
+      const originalInput = { deviceId: "original", nodusId: requesterId, deviceName: "Original", deviceClaim: "claim-original" };
+      await engine.enroll({ uid: requesterUid }, originalInput);
+      await db.doc("license_licenses/free-original").update({ trialUsed: 199 });
+      await db.doc("license_policy/current").update({ identityEnabled: true, allowNewIdentities: false });
+      const licenseIdentity = { version: 1 as const, anchors: { system: "a".repeat(64), board: "b".repeat(64) }, virtual: false };
+      const original = await engine.enroll({ uid: requesterUid }, { ...originalInput, licenseIdentity });
+      const restored = await engine.enroll({ uid: "reinstalled-user" }, { deviceId: "reinstalled", nodusId: "111222333", deviceName: "Restored", deviceClaim: "claim-reinstalled", licenseIdentity });
+      expect(await engine.info({ uid: "reinstalled-user" }, restored)).toMatchObject({ trialUsed: 199, trialLimit: 200 });
+      const attempts = await Promise.allSettled([
+        engine.reserve({ uid: requesterUid }, original, { sessionId: "last-original", targetNodusId: targetId, eventDriven: true }),
+        engine.reserve({ uid: "reinstalled-user" }, restored, { sessionId: "last-restored", targetNodusId: targetId, eventDriven: true }),
+      ]);
+      expect(attempts.filter(attempt => attempt.status === "fulfilled")).toHaveLength(1);
+      const index = attempts.findIndex(attempt => attempt.status === "fulfilled"), session = index ? "last-restored" : "last-original";
+      const actor = { uid: index ? "reinstalled-user" : requesterUid };
+      await engine.lifecycle(actor, session, "establish");
+      await engine.lifecycle({ uid: targetUid }, session, "establish");
+      await engine.lifecycle(actor, session, "establish");
+      expect(await engine.info({ uid: requesterUid }, original)).toMatchObject({ trialUsed: 200, allowed: false, code: "TRIAL_LIMIT_REACHED" });
+      await expect(engine.reserve({ uid: "reinstalled-user" }, restored, { sessionId: "access-201", targetNodusId: targetId })).rejects.toMatchObject({ code: "TRIAL_LIMIT_REACHED" });
+    } finally { await deleteApp(app); }
+  }, 30_000);
 
   test("rollout disabled preserves the existing request path", async () => {
     await seed(false);
@@ -73,9 +114,29 @@ describeRules("candidate Firestore licensing rules", () => {
 
   test("desktop clients cannot alter licenses, payments, roles or policy", async () => {
     const db = environment.authenticatedContext(requesterUid).firestore();
-    for (const [collection, id] of [["license_licenses", "license"], ["license_payments", "payment"], ["license_admins", requesterUid], ["license_policy", "current"]]) {
+    for (const [collection, id] of [["license_licenses", "license"], ["license_payments", "payment"], ["license_admins", requesterUid], ["license_policy", "current"], ["license_device_identities", "hardware"], ["license_identity_anchors", "anchor"], ["license_identity_bindings", requesterId], ["license_identity_reviews", "device"], ["license_identity_migrations", "legacy"]]) {
       await assertFails(db.doc(`${collection}/${id}`).set({ status: "ACTIVE", role: "SUPER_ADMIN", enforced: false }));
     }
+  });
+
+  test("hardware rollout requires a server grant even if the old quota switch is off", async () => {
+    await seed(false);
+    await environment.withSecurityRulesDisabled(async context => context.firestore().doc("license_policy/current").update({ identityEnabled: true }));
+    const source = environment.authenticatedContext(requesterUid).firestore();
+    await assertFails(source.doc("sessionRequests/unreserved").set(request("unreserved")));
+    await environment.withSecurityRulesDisabled(async context => context.firestore().doc("license_session_grants/reserved").set({ ...request("reserved"), status: "RESERVED", expiresAt: Date.now() + 120_000 }));
+    await assertSucceeds(source.doc("sessionRequests/reserved").set(request("reserved")));
+  });
+
+  test("a physical block follows the trusted binding without blocking incoming support", async () => {
+    await seed(false);
+    await environment.withSecurityRulesDisabled(async context => {
+      await context.firestore().doc(`license_identity_bindings/${requesterId}`).set({ deviceIdentityId: "physical" });
+      await context.firestore().doc("license_device_identities/physical").set({ status: "BLOCKED" });
+    });
+    const source = environment.authenticatedContext(requesterUid).firestore(), host = environment.authenticatedContext(targetUid).firestore();
+    await assertFails(source.doc("sessionRequests/outgoing").set(request("outgoing")));
+    await assertSucceeds(host.doc("sessionRequests/incoming").set({ ...request("incoming"), requesterUid: targetUid, targetUid: requesterUid, requesterNodusId: targetId, targetNodusId: requesterId }));
   });
 
   test("free session deadlines deny signaling while unlimited business grants remain usable", async () => {

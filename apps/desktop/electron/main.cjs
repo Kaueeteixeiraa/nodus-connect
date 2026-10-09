@@ -7,7 +7,7 @@ const http = require("node:http");
 const os = require("node:os");
 const path = require("node:path");
 const { pathToFileURL } = require("node:url");
-const { createDeviceIdentityStore, collectHardwareIdentity } = require("./device-identity.cjs");
+const { createDeviceIdentityStore, createWindowsIdentityRecovery, collectHardwareIdentity } = require("./device-identity.cjs");
 let licenseIdentityPromise;
 const { createLogWriter } = require("./log-writer.cjs");
 const { RemoteCursorVisibility } = require("./remote-cursor-visibility.cjs");
@@ -1026,7 +1026,10 @@ function getServerInfo() {
 }
 
 function identityStore() {
-  deviceIdentityStore ??= createDeviceIdentityStore(app.getPath("userData"));
+  deviceIdentityStore ??= createDeviceIdentityStore(app.getPath("userData"), {
+    recovery: app.isPackaged && process.platform === "win32" && !userDataDir && !isDev
+      ? createWindowsIdentityRecovery(safeStorage, supportProfile ? `QuickSupport-${supportProfile.id}` : "Desktop", nativeService) : undefined,
+  });
   return deviceIdentityStore;
 }
 

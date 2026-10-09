@@ -15,7 +15,8 @@ const provider = new GoogleAuthProvider(); provider.setCustomParameters({ prompt
 type Organization = { id: string; name: string; email: string; licenseId: string; license: Omit<License, "keyHash"> };
 type Details = { devices: { id: string; deviceName: string; nodusId: string; status: string }[]; payments: { paymentId: string; amountCents: number; paidAt: number; status: string }[]; audits: { action: string; adminUserId: string; timestamp: number }[] };
 type Dashboard = { active: number; suspended: number; trials: number; devices: number; online: number; pendingRequests: number; organizations: number; mrrCents: number };
-type PublicDevice = Omit<LicenseDevice, "claimHash" | "tokenHash"> & { online: boolean };
+type PublicDevice = Omit<LicenseDevice, "claimHash" | "tokenHash"> & { online: boolean; plan?: "free" | "business"; licenseStatus?: string; trialUsed?: number; trialLimit?: number; firstRegisteredAt?: number };
+type DeviceDetails = { review: { status: string; reason: string; createdAt: number } | null; sessions: { id: string; status: string; establishedAt: number; expiresAt: number }[]; audits: { action: string; timestamp: number; adminUserId: string }[] };
 const ADMIN_VIEWS = [{ id: "dashboard", label: "Visão geral", icon: LayoutDashboard }, { id: "access", label: "Solicitações", icon: KeyRound }, { id: "devices", label: "Dispositivos", icon: Laptop }, { id: "organizations", label: "Empresas", icon: Building2 }, { id: "updates", label: "Atualizações", icon: Download }] as const;
 type AdminView = typeof ADMIN_VIEWS[number]["id"];
 const money = (value: number) => new Intl.NumberFormat("pt-BR", { style: "currency", currency: "BRL" }).format(value / 100);
@@ -36,10 +37,11 @@ function Pagination({ total, page, onPage }: { total: number; page: number; onPa
   const pages = Math.max(1, Math.ceil(total / PAGE_SIZE)), current = Math.min(page, pages);
   return <div className="pagination"><span>{total ? `${(current - 1) * PAGE_SIZE + 1}–${Math.min(current * PAGE_SIZE, total)} de ${total}` : "0 registros"}</span><div><button className="icon-button" title="Página anterior" aria-label="Página anterior" disabled={current === 1} onClick={() => onPage(current - 1)}><ChevronLeft size={16} /></button><span>Página {current} de {pages}</span><button className="icon-button" title="Próxima página" aria-label="Próxima página" disabled={current === pages} onClick={() => onPage(current + 1)}><ChevronRight size={16} /></button></div></div>;
 }
-function ConfirmDialog({ title, message, onConfirm, onCancel }: { title: string; message: string; onConfirm: () => void; onCancel: () => void }) {
+function ConfirmDialog({ title, message, requiresReason, onConfirm, onCancel }: { title: string; message: string; requiresReason?: boolean; onConfirm: (reason?: string) => void; onCancel: () => void }) {
   const ref = useRef<HTMLDialogElement>(null);
+  const [reason, setReason] = useState("");
   useEffect(() => { ref.current?.showModal(); }, []);
-  return <dialog ref={ref} className="confirm-dialog" aria-labelledby="confirm-title" aria-describedby="confirm-message" onCancel={onCancel}><h2 id="confirm-title">{title}</h2><p id="confirm-message">{message}</p><div className="dialog-actions"><button autoFocus onClick={onCancel}>Cancelar</button><button className="primary" onClick={onConfirm}><Check size={16} />Confirmar</button></div></dialog>;
+  return <dialog ref={ref} className="confirm-dialog" aria-labelledby="confirm-title" aria-describedby="confirm-message" onCancel={onCancel}><h2 id="confirm-title">{title}</h2><p id="confirm-message">{message}</p>{requiresReason && <label>Justificativa<input maxLength={500} value={reason} onChange={event => setReason(event.target.value)} /></label>}<div className="dialog-actions"><button autoFocus onClick={onCancel}>Cancelar</button><button className="primary" disabled={requiresReason && !reason.trim()} onClick={() => onConfirm(requiresReason ? reason : undefined)}><Check size={16} />Confirmar</button></div></dialog>;
 }
 async function api<T>(path: string, body?: object): Promise<T> {
   const user = auth?.currentUser; if (!user) throw new Error("Entre com uma conta autorizada.");
@@ -59,6 +61,20 @@ async function recentLogin() {
   const result = await user.getIdTokenResult();
   if (Date.now() - new Date(result.authTime).getTime() > 240_000) { await reauthenticateWithPopup(user, provider); await user.getIdToken(true); }
 }
+function DeviceDialog({ device, details, devices, organizations, busy, onClose, onAction }: { device: PublicDevice; details: DeviceDetails; devices: PublicDevice[]; organizations: Organization[]; busy: boolean; onClose(): void; onAction(path: string, body: object): void }) {
+  const ref = useRef<HTMLDialogElement>(null), [reason, setReason] = useState(""), [target, setTarget] = useState(""), [licenseId, setLicenseId] = useState(""), [closedSessions, setClosedSessions] = useState<string[]>([]);
+  useEffect(() => { ref.current?.showModal(); }, []);
+  const justified = reason.trim().length > 0;
+  return <dialog ref={ref} className="confirm-dialog device-dialog" aria-labelledby="device-heading" onCancel={event => { if (busy) event.preventDefault(); else onClose(); }}>
+    <div className="section-heading"><h2 id="device-heading">{device.deviceName}</h2><button className="icon-button" title="Fechar detalhes" aria-label="Fechar detalhes" disabled={busy} onClick={onClose}><X size={16} /></button></div>
+    <dl className="company-summary"><div><dt>Registro administrativo</dt><dd>{device.deviceIdentityId ?? device.id}</dd></div><div><dt>Plano</dt><dd>{device.plan === "business" ? "Nodus Business" : "Gratuito"}</dd></div><div><dt>Acessos gratuitos</dt><dd>{device.trialUsed ?? 0} / {device.trialLimit ?? 200}</dd></div><div><dt>Licença</dt><dd><Status value={device.licenseStatus ?? "TRIAL"} /></dd></div><div><dt>Primeiro registro</dt><dd>{date(device.firstRegisteredAt ?? device.activatedAt)}</dd></div><div><dt>Último acesso autorizado</dt><dd>{device.lastAuthorizedAccessAt ? date(device.lastAuthorizedAccessAt) : "Ainda não registrado"}</dd></div></dl>
+    <label>Justificativa<input maxLength={500} value={reason} onChange={event => setReason(event.target.value)} /></label>
+    {details.review?.status === "PENDING" && <form onSubmit={event => { event.preventDefault(); onAction("/admin/device-identity", { deviceId: device.id, targetDeviceId: target || undefined, confirmNew: !target, reason }); }}><h3>Revisão do computador</h3><label>Associar registro<select value={target} onChange={event => setTarget(event.target.value)}><option value="">Confirmar computador novo</option>{devices.filter(item => item.id !== device.id).map(item => <option key={item.id} value={item.id}>{item.deviceName} · {item.nodusId}</option>)}</select></label><button type="submit" disabled={busy || !justified}><ShieldCheck size={16} />Concluir revisão</button></form>}
+    <form onSubmit={event => { event.preventDefault(); onAction("/admin/device-license", { deviceId: device.id, licenseId, reason }); }}><h3>Vinculação da licença</h3><label>Plano<select value={licenseId} onChange={event => setLicenseId(event.target.value)}><option value="">Selecionar licença</option>{device.freeLicenseId && <option value={device.freeLicenseId}>Gratuito · histórico preservado</option>}{organizations.map(item => <option key={item.licenseId} value={item.licenseId}>{item.name} · {statusLabels[item.license.status]}</option>)}</select></label><button type="submit" disabled={busy || !justified || !licenseId}><KeyRound size={16} />Aplicar licença</button></form>
+    {!!details.sessions.length && <><h3>Sessões reservadas</h3>{details.sessions.map(session => <div key={session.id}><span className="muted">{session.establishedAt ? date(session.establishedAt) : "Aguardando conexão"}</span><div className="section-heading"><label><input type="checkbox" checked={closedSessions.includes(session.id)} onChange={event => setClosedSessions(previous => event.target.checked ? [...previous, session.id] : previous.filter(id => id !== session.id))} />Confirmei que esta sessão já foi encerrada</label><button disabled={busy || !justified || !closedSessions.includes(session.id)} onClick={() => onAction("/admin/release-session", { sessionId: session.id, reason })}><X size={15} />Liberar slot</button></div></div>)}</>}
+    <h3>Histórico administrativo</h3><div className="table-scroll"><table><thead><tr><th>Ação</th><th>Data</th></tr></thead><tbody>{details.audits.slice(0, 10).map((entry, index) => <tr key={`${entry.timestamp}-${index}`}><td>{entry.action}</td><td>{date(entry.timestamp)}</td></tr>)}</tbody></table>{!details.audits.length && <p className="empty-state">Nenhuma alteração registrada.</p>}</div>
+  </dialog>;
+}
 function Admin() {
   const [user, setUser] = useState<User | null>(null), [verified, setVerified] = useState(false), [busy, setBusy] = useState(false), [feedback, setFeedback] = useState("");
   const [view, setView] = useState<AdminView>(new URLSearchParams(location.search).has("request") ? "access" : "dashboard"), [tab, setTab] = useState<"license" | "devices" | "payments" | "audit">("license");
@@ -66,8 +82,9 @@ function Admin() {
   const [accessRequests, setAccessRequests] = useState<LicenseAccessRequest[]>([]), [devices, setDevices] = useState<PublicDevice[]>([]);
   const [create, setCreate] = useState(false), [name, setName] = useState(""), [email, setEmail] = useState(""), [secret, setSecret] = useState("");
   const [query, setQuery] = useState(""), [filter, setFilter] = useState("all"), [page, setPage] = useState(1), [updatedAt, setUpdatedAt] = useState(0);
-  const [confirmation, setConfirmation] = useState<{ title: string; message: string; action: () => Promise<void> } | null>(null);
+  const [confirmation, setConfirmation] = useState<{ title: string; message: string; action: (reason?: string) => Promise<void>; requiresReason?: boolean } | null>(null);
   const [refreshing, setRefreshing] = useState(false);
+  const [selectedDevice, setSelectedDevice] = useState<PublicDevice | null>(null), [deviceDetails, setDeviceDetails] = useState<DeviceDetails | null>(null);
   const [desktopUpdate, setDesktopUpdate] = useState<DesktopUpdatePolicy | null>(null), [updateVersion, setUpdateVersion] = useState("");
   const [updateVersions, setUpdateVersions] = useState<string[]>([]);
   const paymentAttempts = useRef(new Map<string, string>());
@@ -81,7 +98,7 @@ function Admin() {
   function pageRows<T>(rows: T[]): T[] { const current = Math.min(page, Math.max(1, Math.ceil(rows.length / PAGE_SIZE))); return rows.slice((current - 1) * PAGE_SIZE, current * PAGE_SIZE); }
   function updateQuery(value: string) { setQuery(value); setPage(1); }
   function updateFilter(value: string) { setFilter(value); setPage(1); }
-  function confirmAction(title: string, message: string, action: () => Promise<void>) { setConfirmation({ title, message, action }); }
+  function confirmAction(title: string, message: string, action: (reason?: string) => Promise<void>, requiresReason = false) { setConfirmation({ title, message, action, requiresReason }); }
   async function copy(value: string) { await navigator.clipboard.writeText(value); setFeedback("Copiado para a área de transferência."); }
   async function reload(only: typeof view = view, summaryOnly = false) {
     const uid = auth?.currentUser?.uid;
@@ -104,6 +121,7 @@ function Admin() {
       const current = ++revision;
       setUser(next); setVerified(false); setSecret(""); setDetails(null); setOrganizations([]); setDashboard(null); setSelected(""); setDevices([]); setAccessRequests([]); setConfirmation(null); setUpdatedAt(0);
       setDesktopUpdate(null); setUpdateVersion(""); setUpdateVersions([]);
+      setSelectedDevice(null); setDeviceDetails(null);
       if (next) reload().catch(error => { if (current === revision) setFeedback(error.message); });
     });
     return () => { revision++; stop(); };
@@ -122,10 +140,10 @@ function Admin() {
       setFeedback("Alteração registrada e sincronizada.");
     } catch { setFeedback("Alteração registrada. Use Atualizar para confirmar os dados."); }
   }
-  async function grant(licenseId: string) {
+  async function grant(licenseId: string, reason?: string) {
     const operationId = grantAttempts.current.get(licenseId) ?? crypto.randomUUID();
     grantAttempts.current.set(licenseId, operationId);
-    await mutate("/admin/free-accesses", { licenseId, operationId });
+    await mutate("/admin/free-accesses", { licenseId, operationId, reason });
     grantAttempts.current.delete(licenseId);
   }
   function navigate(next: AdminView) { if (busy || next === view && !selected) return; setView(next); setSelected(""); setDetails(null); setCreate(false); updateQuery(""); updateFilter("all"); run(() => reload(next)); }
@@ -135,6 +153,10 @@ function Admin() {
     setPage(1);
     setView("organizations"); setSelected(item.licenseId); setTab("license"); setCreate(false);
     setDetails(null); setDetails(await api<Details>("/admin/details", { licenseId: item.licenseId }));
+  }
+  async function openDevice(device: PublicDevice) {
+    const [details, companies] = await Promise.all([api<DeviceDetails>("/admin/device-details", { deviceId: device.id }), organizations.length ? Promise.resolve(organizations) : api<Organization[]>("/admin/organizations")]);
+    setOrganizations(companies); setDeviceDetails(details); setSelectedDevice(device);
   }
   async function createCompany() {
     const result = await api<{ key: string; licenseId: string }>("/admin/organizations", { name, email });
@@ -149,7 +171,7 @@ function Admin() {
   }
   function devicesTable(compact = false) {
     const rows = compact ? devices.slice(0, 3) : pageRows(filteredDevices);
-    return <><div className="table-scroll"><table><thead><tr><th>Dispositivo</th><th>Nodus ID</th><th>Conexão</th>{!compact && <><th>Permissão</th><th>Último uso</th><th className="actions-heading">Ações</th></>}</tr></thead><tbody>{rows.map(device => <tr key={device.id}><td><div className="cell-label"><span className="row-icon"><Laptop size={17} /></span><span><strong>{device.deviceName}</strong>{!compact && <small>{device.licenseId.startsWith("free-") ? "Licença gratuita" : "Nodus Business"}</small>}</span></div></td><td className="nodus-id"><span>{device.nodusId.replace(/(\d{3})(?=\d)/g, "$1 ")}</span>{!compact && <button className="icon-button" title="Copiar Nodus ID" aria-label={`Copiar ID de ${device.deviceName}`} disabled={busy} onClick={() => run(() => copy(device.nodusId))}><Copy size={14} /></button>}</td><td><Status value={device.online ? "Online" : "Offline"} /></td>{!compact && <><td><Status value={device.status} /></td><td className="date-cell">{date(device.lastSeenAt)}</td><td><div className="row-actions"><button className={device.status === "ACTIVE" ? "danger" : ""} disabled={busy} onClick={() => confirmAction(device.status === "ACTIVE" ? "Bloquear acessos" : "Liberar acessos", `${device.status === "ACTIVE" ? "Bloquear" : "Liberar"} os acessos de ${device.deviceName}?`, () => mutate("/admin/device", { deviceId: device.id, status: device.status === "ACTIVE" ? "BLOCKED" : "ACTIVE" }))}>{device.status === "ACTIVE" ? <Ban size={15} /> : <Check size={15} />}{device.status === "ACTIVE" ? "Bloquear" : "Liberar"}</button>{device.licenseId.startsWith("free-") && <button disabled={busy} onClick={() => confirmAction("Liberar mais acessos", `Adicionar 200 acessos à licença de ${device.deviceName}?`, () => grant(device.licenseId))}><Plus size={15} />200 acessos</button>}</div></td></>}</tr>)}</tbody></table>{!rows.length && <p className="empty-state">{query || filter !== "all" ? "Nenhum dispositivo corresponde aos filtros." : "Nenhum dispositivo registrado."}</p>}</div>{!compact && <Pagination total={filteredDevices.length} page={page} onPage={setPage} />}</>;
+    return <><div className="table-scroll"><table><thead><tr><th>Dispositivo</th><th>Nodus ID</th><th>Conexão</th>{!compact && <><th>Acessos</th><th>Permissão</th><th>Último uso</th><th className="actions-heading">Ações</th></>}</tr></thead><tbody>{rows.map(device => <tr key={device.id}><td><div className="cell-label"><span className="row-icon"><Laptop size={17} /></span><span><strong>{device.deviceName}</strong>{!compact && <small>{device.licenseId.startsWith("free-") ? "Licença gratuita" : "Nodus Business"}{device.identityReview ? " · Revisão pendente" : ""}</small>}</span></div></td><td className="nodus-id"><span>{device.nodusId.replace(/(\d{3})(?=\d)/g, "$1 ")}</span>{!compact && <button className="icon-button" title="Copiar Nodus ID" aria-label={`Copiar ID de ${device.deviceName}`} disabled={busy} onClick={() => run(() => copy(device.nodusId))}><Copy size={14} /></button>}</td><td><Status value={device.online ? "Online" : "Offline"} /></td>{!compact && <><td>{device.trialUsed ?? 0} / {device.trialLimit ?? 200}</td><td><Status value={device.status} /></td><td className="date-cell">{date(device.lastSeenAt)}</td><td><div className="row-actions"><button className="icon-button" disabled={busy} title={`Detalhes de ${device.deviceName}`} aria-label={`Detalhes de ${device.deviceName}`} onClick={() => run(() => openDevice(device))}><ArrowRight size={16} /></button><button className={device.status === "ACTIVE" ? "danger" : ""} disabled={busy} onClick={() => confirmAction(device.status === "ACTIVE" ? "Bloquear acessos" : "Liberar acessos", `${device.status === "ACTIVE" ? "Bloquear" : "Liberar"} os acessos de ${device.deviceName}?`, () => mutate("/admin/device", { deviceId: device.id, status: device.status === "ACTIVE" ? "BLOCKED" : "ACTIVE" }))}>{device.status === "ACTIVE" ? <Ban size={15} /> : <Check size={15} />}{device.status === "ACTIVE" ? "Bloquear" : "Liberar"}</button>{device.licenseId.startsWith("free-") && <button disabled={busy || device.identityReview} onClick={() => confirmAction("Liberar mais acessos", `Adicionar 200 acessos à licença de ${device.deviceName}?`, (reason) => grant(device.licenseId, reason), true)}><Plus size={15} />200 acessos</button>}</div></td></>}</tr>)}</tbody></table>{!rows.length && <p className="empty-state">{query || filter !== "all" ? "Nenhum dispositivo corresponde aos filtros." : "Nenhum dispositivo registrado."}</p>}</div>{!compact && <Pagination total={filteredDevices.length} page={page} onPage={setPage} />}</>;
   }
   function organizationsTable(compact = false) {
     const rows = compact ? organizations.slice(0, 3) : pageRows(filteredOrganizations);
@@ -192,7 +214,8 @@ function Admin() {
         </>}
       </main>
     </>}
-    {confirmation && <ConfirmDialog title={confirmation.title} message={confirmation.message} onCancel={() => setConfirmation(null)} onConfirm={() => { const action = confirmation.action; setConfirmation(null); run(action, true); }} />}
+    {confirmation && <ConfirmDialog title={confirmation.title} message={confirmation.message} requiresReason={confirmation.requiresReason} onCancel={() => setConfirmation(null)} onConfirm={reason => { const action = confirmation.action; setConfirmation(null); run(() => action(reason), true); }} />}
+    {selectedDevice && deviceDetails && <DeviceDialog device={selectedDevice} details={deviceDetails} devices={devices} organizations={organizations} busy={busy} onClose={() => { setSelectedDevice(null); setDeviceDetails(null); }} onAction={(path, body) => run(async () => { await mutate(path, body); setSelectedDevice(null); setDeviceDetails(null); }, true)} />}
   </div>;
 }
 createRoot(document.getElementById("root")!).render(<Admin />);

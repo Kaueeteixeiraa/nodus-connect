@@ -2,9 +2,9 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { createRequire } from "node:module";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
-const { createDeviceIdentityStore, normalizeHardware, hardwareIdentity, collectHardwareIdentity } = createRequire(import.meta.url)("../apps/desktop/electron/device-identity.cjs");
+const { createDeviceIdentityStore, createWindowsIdentityRecovery, normalizeHardware, hardwareIdentity, collectHardwareIdentity } = createRequire(import.meta.url)("../apps/desktop/electron/device-identity.cjs");
 const directories: string[] = [];
 
 afterEach(() => directories.splice(0).forEach((directory) => fs.rmSync(directory, { recursive: true, force: true })));
@@ -15,7 +15,116 @@ function fixture() {
   return { directory, store: createDeviceIdentityStore(directory) };
 }
 
+function registryFixture() {
+  const values = new Map<string, string>();
+  const safeStorage = {
+    isEncryptionAvailable: vi.fn(() => true),
+    encryptString: vi.fn((value: string) => Buffer.from(`protected:${value}`)),
+    decryptString: vi.fn((value: Buffer) => {
+      const text = value.toString();
+      if (!text.startsWith("protected:")) throw new Error("DECRYPT_FAILED");
+      return text.slice(10);
+    }),
+  };
+  const execute = vi.fn((_file: string, args: string[], options: { input?: string }) => {
+    const scope = args[1];
+    if (options.input) values.set(scope, options.input);
+    return { status: 0, stdout: options.input ? "" : JSON.stringify(values.get(scope) ?? null) };
+  });
+  const recovery = (scope = "Desktop") => createWindowsIdentityRecovery(safeStorage, scope, "nodus-service.exe", execute);
+  return { values, safeStorage, execute, recovery };
+}
+
 describe("native device identity", () => {
+  it("restores the same ID and device claim after all application data is deleted", () => {
+    const { directory } = fixture(), registry = registryFixture();
+    const original = createDeviceIdentityStore(directory, { recovery: registry.recovery() }).loadOrCreate(null);
+    fs.rmSync(directory, { recursive: true, force: true });
+    const recovered = createDeviceIdentityStore(directory, { recovery: registry.recovery() }).loadOrCreate(null);
+    expect(recovered).toEqual(original);
+    expect(JSON.parse(fs.readFileSync(path.join(directory, "identity.json"), "utf8")).deviceSecret).toBeTruthy();
+  });
+  it("backs up the existing ID without replacing it during an upgrade", () => {
+    const { directory, store } = fixture(), registry = registryFixture();
+    const original = store.loadOrCreate(null);
+    expect(createDeviceIdentityStore(directory, { recovery: registry.recovery() }).loadOrCreate(null)).toEqual(original);
+    fs.rmSync(directory, { recursive: true, force: true });
+    expect(createDeviceIdentityStore(directory, { recovery: registry.recovery() }).loadOrCreate(null)).toEqual(original);
+  });
+  it("recovers both corrupted native files from the protected copy", () => {
+    const { directory } = fixture(), registry = registryFixture();
+    const store = createDeviceIdentityStore(directory, { recovery: registry.recovery() });
+    const original = store.loadOrCreate(null);
+    fs.writeFileSync(store.paths.primaryPath, "{invalid");
+    fs.writeFileSync(store.paths.backupPath, "{invalid");
+    expect(createDeviceIdentityStore(directory, { recovery: registry.recovery() }).loadOrCreate(null)).toEqual(original);
+  });
+  it("restores a renamed device and never replaces its ID with an old renderer cache", () => {
+    const { directory } = fixture(), registry = registryFixture();
+    const store = createDeviceIdentityStore(directory, { recovery: registry.recovery() });
+    const original = store.loadOrCreate(null);
+    const renamed = store.updateMutable({ ...original, deviceName: "Cliente", deviceNameConfirmed: true });
+    fs.rmSync(directory, { recursive: true, force: true });
+    expect(createDeviceIdentityStore(directory, { recovery: registry.recovery() }).loadOrCreate({ ...original, nodusId: "999 999 999" })).toEqual(renamed);
+  });
+  it("keeps desktop and different QuickSupport profiles isolated", () => {
+    const registry = registryFixture();
+    const scopes = ["Desktop", "QuickSupport-profile-a", "QuickSupport-profile-b"];
+    const identities = scopes.map(scope => {
+      const { directory } = fixture();
+      const original = createDeviceIdentityStore(directory, { recovery: registry.recovery(scope) }).loadOrCreate(null);
+      fs.rmSync(directory, { recursive: true, force: true });
+      expect(createDeviceIdentityStore(directory, { recovery: registry.recovery(scope) }).loadOrCreate(null)).toEqual(original);
+      return original.deviceId;
+    });
+    expect(new Set(identities).size).toBe(3);
+  });
+  it("does not regenerate identity when recovery is unavailable or cannot be decrypted", () => {
+    const { directory } = fixture(), registry = registryFixture();
+    registry.values.set("Desktop", Buffer.from("unreadable").toString("base64"));
+    expect(() => createDeviceIdentityStore(directory, { recovery: registry.recovery() }).loadOrCreate(null)).toThrow("DECRYPT_FAILED");
+    registry.execute.mockReturnValue({ status: 1, stdout: "" });
+    expect(() => createDeviceIdentityStore(directory, { recovery: registry.recovery() }).loadOrCreate(null)).toThrow("IDENTITY_RECOVERY_UNAVAILABLE");
+    expect(fs.existsSync(path.join(directory, "identity.json"))).toBe(false);
+  });
+  it("rejects a malformed recovered identity without silently rotating its secret", () => {
+    const { directory } = fixture(), registry = registryFixture();
+    const original = createDeviceIdentityStore(directory).loadOrCreate(null);
+    registry.recovery().save(original);
+    fs.rmSync(directory, { recursive: true, force: true });
+    expect(() => createDeviceIdentityStore(directory, { recovery: registry.recovery() }).loadOrCreate(null)).toThrow("INVALID_IDENTITY_RECOVERY");
+    expect(fs.existsSync(path.join(directory, "identity.json"))).toBe(false);
+  });
+  it("encrypts recovery data through safeStorage, excludes plaintext arguments and avoids repeated writes", () => {
+    const { directory } = fixture(), registry = registryFixture();
+    const store = createDeviceIdentityStore(directory, { recovery: registry.recovery() });
+    const original = store.loadOrCreate(null), calls = registry.execute.mock.calls.length;
+    expect(store.loadOrCreate(null)).toEqual(original);
+    expect(registry.execute).toHaveBeenCalledTimes(calls);
+    expect(registry.safeStorage.encryptString).toHaveBeenCalledOnce();
+    const argumentsUsed = JSON.stringify(registry.execute.mock.calls.map(call => call[1]));
+    expect(argumentsUsed).not.toContain(original.deviceClaim);
+    expect(argumentsUsed).not.toContain(original.nodusId);
+    expect(registry.execute.mock.calls.every(call => call[2].input === undefined || /^[A-Za-z0-9+/]+=*$/.test(call[2].input))).toBe(true);
+  });
+  it("rejects invalid scopes and never writes unencrypted recovery data", () => {
+    const registry = registryFixture();
+    expect(() => registry.recovery("Desktop';Remove-Item")).toThrow("INVALID_IDENTITY_SCOPE");
+    registry.safeStorage.isEncryptionAvailable.mockReturnValue(false);
+    expect(() => registry.recovery().save({})).toThrow("IDENTITY_ENCRYPTION_UNAVAILABLE");
+    expect(registry.execute).not.toHaveBeenCalled();
+  });
+  it.each([JSON.stringify("not-base64"), JSON.stringify("A".repeat(8193)), "{"])("rejects malformed or oversized recovery payload", output => {
+    const registry = registryFixture();
+    registry.execute.mockReturnValue({ status: 0, stdout: output });
+    expect(() => registry.recovery().load()).toThrow();
+    expect(registry.safeStorage.decryptString).not.toHaveBeenCalled();
+  });
+  it("enables Windows recovery only for real packaged profiles, preserving development isolation", () => {
+    const source = fs.readFileSync(path.resolve("apps/desktop/electron/main.cjs"), "utf8");
+    expect(source).toContain('app.isPackaged && process.platform === "win32" && !userDataDir && !isDev');
+    expect(source).toContain('supportProfile ? `QuickSupport-${supportProfile.id}` : "Desktop"');
+  });
   it("uses hardware independently of installation, disk, remote ID and Windows account", () => {
     const signals = { system: "c4927a20-b74c-4f36-bfd4-3a38d13205dc", board: "BOARD-ABCDE", boardMaker: "Example", bios: "BIOS-ABCDE", manufacturer: "Physical PC" };
     const first = hardwareIdentity(signals);

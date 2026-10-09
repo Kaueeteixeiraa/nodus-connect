@@ -3,7 +3,7 @@ import { createPrivateKey } from "node:crypto";
 import { initializeApp, applicationDefault, cert } from "firebase-admin/app";
 import { getAuth } from "firebase-admin/auth";
 import { getFirestore, AggregateField, type QueryDocumentSnapshot, type Transaction } from "firebase-admin/firestore";
-import { LicenseError, effectiveStatus, type License, type LicenseAccessRequest, type LicenseDevice, type LicensePolicy } from "../../../packages/licensing/src/index.js";
+import { LicenseError, effectiveStatus, type DeviceLicenseIdentity, type IdentityReview, type License, type LicenseAccessRequest, type LicenseDevice, type LicensePolicy } from "../../../packages/licensing/src/index.js";
 import { LicenseEngine, validId, text, requireAdmin, type Actor } from "./engine.js";
 import { configureFirestore, firestoreLicenseStore } from "./firestore-store.js";
 import { createLicenseHandler } from "./http.js";
@@ -45,18 +45,23 @@ async function admin(actor: Actor, path: string, input: Record<string, unknown>)
   if (path === "POST /admin/organizations") return engine.createBusiness(actor, { name: text(input.name), email: text(input.email, 254) });
   if (path === "POST /admin/license") return engine.modify(actor, validId(input.licenseId), input.patch as Parameters<LicenseEngine["modify"]>[2]);
   if (path === "POST /admin/device") return engine.deviceStatus(actor, validId(input.deviceId), input.status as Parameters<LicenseEngine["deviceStatus"]>[2]);
+  if (path === "POST /admin/device-identity") return engine.reviewIdentity(actor, validId(input.deviceId), input.targetDeviceId ? validId(input.targetDeviceId) : undefined, input.confirmNew === true, text(input.reason, 500));
+  if (path === "POST /admin/device-license") return engine.assignDeviceLicense(actor, validId(input.deviceId), validId(input.licenseId), text(input.reason, 500));
+  if (path === "POST /admin/release-session") return engine.releaseSession(actor, validId(input.sessionId), text(input.reason, 500));
   if (path === "POST /admin/access-request") return engine.resolveAccessRequest(actor, validId(input.requestId), input.approve === true);
-  if (path === "POST /admin/free-accesses") return engine.grantAccesses(actor, validId(input.licenseId), validId(input.operationId));
+  if (path === "POST /admin/free-accesses") return engine.grantAccesses(actor, validId(input.licenseId), validId(input.operationId), typeof input.reason === "string" ? input.reason : undefined);
   if (path === "POST /admin/key") return engine.rotateKey(actor, validId(input.licenseId), input.revoke === true);
   if (path === "POST /admin/payment") return engine.payment(actor, { licenseId: validId(input.licenseId), paymentId: validId(input.paymentId), amountCents: Number(input.amountCents) });
   if (path === "POST /admin/policy") {
     requireAdmin(actor, true);
     if (input.enforced === true && process.env.LICENSE_ENFORCEMENT_READY !== "true") throw new LicenseError("ROLLOUT_NOT_READY");
+    if ((input.identityEnabled === true || input.allowNewIdentities === true) && (process.env.LICENSE_DEVICE_IDENTITY_READY !== "true" || input.migrationApproved !== true)) throw new LicenseError("ROLLOUT_NOT_READY");
     return store.transaction(async tx => {
       const previous = await tx.get<LicensePolicy>("license_policy/current");
       if (typeof input.enforced !== "boolean") throw new LicenseError("INVALID_INPUT");
-      tx.set("license_policy/current", { ...previous, enforced: input.enforced });
-      tx.set(`license_audit/policy-${Date.now()}-${actor.uid}`, { adminUserId: actor.uid, action: "ROLLOUT_POLICY_CHANGED", before: { enforced: previous?.enforced === true }, after: { enforced: input.enforced }, timestamp: Date.now() }); return { ok: true };
+      for (const key of ["identityEnabled", "identityEnrollmentEnabled", "allowNewIdentities"]) if (input[key] !== undefined && typeof input[key] !== "boolean") throw new LicenseError("INVALID_INPUT");
+      tx.set("license_policy/current", { ...previous, enforced: input.enforced, ...(typeof input.identityEnabled === "boolean" ? { identityEnabled: input.identityEnabled } : {}), ...(typeof input.identityEnrollmentEnabled === "boolean" ? { identityEnrollmentEnabled: input.identityEnrollmentEnabled } : {}), ...(typeof input.allowNewIdentities === "boolean" ? { allowNewIdentities: input.allowNewIdentities } : {}) });
+      tx.set(`license_audit/policy-${Date.now()}-${actor.uid}`, { adminUserId: actor.uid, action: "ROLLOUT_POLICY_CHANGED", before: { enforced: previous?.enforced === true, identityEnabled: previous?.identityEnabled === true, identityEnrollmentEnabled: previous?.identityEnrollmentEnabled === true, allowNewIdentities: previous?.allowNewIdentities === true }, after: { enforced: input.enforced, identityEnabled: input.identityEnabled ?? previous?.identityEnabled ?? false, identityEnrollmentEnabled: input.identityEnrollmentEnabled ?? previous?.identityEnrollmentEnabled ?? false, allowNewIdentities: input.allowNewIdentities ?? previous?.allowNewIdentities ?? false }, timestamp: Date.now() }); return { ok: true };
     });
   }
   if (path === "GET /admin/organizations") {
@@ -85,12 +90,26 @@ async function admin(actor: Actor, path: string, input: Record<string, unknown>)
   if (path === "GET /admin/devices") {
     const rows = await db.collection("license_devices").orderBy("lastSeenAt", "desc").limit(200).get();
     const presence = rows.empty ? [] : await db.getAll(...rows.docs.map((row: QueryDocumentSnapshot) => db.doc(`devices/${(row.data() as LicenseDevice).nodusId}`)));
+    const ids = [...new Set(rows.docs.flatMap(row => { const data = row.data() as LicenseDevice; return [data.licenseId, data.freeLicenseId ?? `free-${data.id}`]; }))];
+    const licenses = ids.length ? await db.getAll(...ids.map(id => db.doc(`license_licenses/${id}`))) : [];
+    const byId = new Map(licenses.map(doc => [doc.id, doc.data() as License | undefined]));
+    const identityIds = [...new Set(rows.docs.map(row => row.data().deviceIdentityId as string | undefined).filter((id): id is string => Boolean(id)))];
+    const identities = identityIds.length ? await db.getAll(...identityIds.map(id => db.doc(`license_device_identities/${id}`))) : [];
+    const byIdentity = new Map(identities.map(doc => [doc.id, doc.data() as DeviceLicenseIdentity | undefined]));
     return rows.docs.map((doc: QueryDocumentSnapshot, index: number) => {
       const { tokenHash: _token, claimHash: _claim, ...device } = doc.data() as LicenseDevice;
       const live = presence[index]?.data(), seenAt = Date.parse(String(live?.updatedAt ?? ""));
       const online = live?.status === "online" && Number.isFinite(seenAt) && Date.now() - seenAt < PRESENCE_TTL_MS;
-      return { ...device, lastSeenAt: Number.isFinite(seenAt) ? Math.max(device.lastSeenAt, seenAt) : device.lastSeenAt, online };
+      const license = byId.get(device.licenseId), free = byId.get(device.freeLicenseId ?? `free-${device.id}`);
+      return { ...device, ...(device.deviceIdentityId && byIdentity.get(device.deviceIdentityId)?.status === "BLOCKED" ? { status: "BLOCKED" } : {}), plan: license?.plan ?? "free", licenseStatus: license ? effectiveStatus(license, Date.now()) : "EXPIRED", trialUsed: free?.trialUsed ?? 0, trialLimit: free?.trialLimit ?? 0, firstRegisteredAt: free?.createdAt ?? device.activatedAt, lastSeenAt: Number.isFinite(seenAt) ? Math.max(device.lastSeenAt, seenAt) : device.lastSeenAt, online };
     });
+  }
+  if (path === "POST /admin/device-details") {
+    const deviceId = validId(input.deviceId), device = (await db.doc(`license_devices/${deviceId}`).get()).data() as LicenseDevice | undefined;
+    if (!device) throw new LicenseError("INVALID_INPUT");
+    const [review, sessions, audits] = await Promise.all([db.doc(`license_identity_reviews/${deviceId}`).get(), db.collection("license_sessions").where("deviceId", "==", deviceId).where("status", "in", ["RESERVED", "ESTABLISHED"]).limit(50).get(), db.collection("license_audit").where("licenseId", "in", [...new Set([device.freeLicenseId ?? device.licenseId, device.licenseId])]).orderBy("timestamp", "desc").limit(100).get()]);
+    const data = review.data() as IdentityReview | undefined;
+    return { review: data ? { reason: data.reason, status: data.status, createdAt: data.createdAt } : null, sessions: sessions.docs.map(row => { const value = row.data(); return { id: row.id, status: value.status, establishedAt: value.establishedAt, expiresAt: value.expiresAt }; }), audits: audits.docs.map(row => { const value = row.data(); return { action: value.action, timestamp: value.timestamp, adminUserId: value.adminUserId }; }).sort((a, b) => b.timestamp - a.timestamp) };
   }
   throw new LicenseError("INVALID_INPUT");
 }
