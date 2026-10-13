@@ -1,5 +1,6 @@
 import type { Firestore, Transaction } from "firebase-admin/firestore";
 import type { LicenseStore } from "./store.js";
+import { LicenseError } from "../../../packages/licensing/src/index.js";
 
 export const FIRESTORE_CLIENT_CONFIG = { interfaces: { "google.firestore.v1.Firestore": {
   retry_codes: { nodus_write: ["UNAVAILABLE"] },
@@ -20,6 +21,11 @@ export function firestoreLicenseStore(db: Firestore): LicenseStore {
         if (writes.has(path)) return structuredClone(writes.get(path)) as T;
         const document = await transaction.get(db.doc(path));
         return document.exists ? document.data() as T : null;
+      },
+      async find<T>(collection: string, field: string, value: string) {
+        const documents = await transaction.get(db.collection(collection).where(field, "==", value).limit(1001));
+        if (documents.size > 1000) throw new LicenseError("SERVER_UNAVAILABLE");
+        return documents.docs.map(document => structuredClone(writes.get(document.ref.path) ?? document.data()) as T);
       },
       set(path, value) { if (options?.readOnly) throw new Error("READ_ONLY_TRANSACTION"); writes.set(path, structuredClone(value)); },
     });

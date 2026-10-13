@@ -495,15 +495,24 @@ export class LicenseEngine {
       if (!organization) throw new LicenseError("INVALID_INPUT");
       const license = await this.license(tx, organization.licenseId);
       if (license.plan !== "business" || license.organizationId !== organizationId || license.status !== "CANCELED") throw new LicenseError("FORBIDDEN");
-      if (organization.status === "ARCHIVED") return { ok: true, duplicate: true };
+      const devices = await tx.find<LicenseDevice>("license_devices", "licenseId", license.id);
+      if (organization.status === "ARCHIVED" && !devices.length) return { ok: true, duplicate: true, detachedDevices: 0 };
+      // Hardware aliases share the original personal allowance; removal must never reset it.
+      for (const device of devices) {
+        const identity = device.deviceIdentityId ? await tx.get<DeviceLicenseIdentity>(`license_device_identities/${device.deviceIdentityId}`) : null;
+        if (device.deviceIdentityId && !identity) throw new LicenseError("DEVICE_REVIEW_REQUIRED");
+        const personal = await this.license(tx, identity?.freeLicenseId ?? device.freeLicenseId ?? `free-${device.id}`);
+        if (personal.plan !== "free") throw new LicenseError("INVALID_LICENSE");
+        tx.set(`license_devices/${device.id}`, { ...device, licenseId: personal.id, freeLicenseId: personal.id });
+      }
       const subscription = await tx.get<Record<string, unknown>>(`license_subscriptions/${license.id}`);
       const now = this.now();
-      tx.set(`license_organizations/${organizationId}`, { ...organization, status: "ARCHIVED", archivedAt: now, updatedAt: now });
-      tx.set(`license_licenses/${license.id}`, { ...license, keyRevoked: true, updatedAt: now });
+      tx.set(`license_organizations/${organizationId}`, { archivedAt: now, ...organization, status: "ARCHIVED", updatedAt: now });
+      tx.set(`license_licenses/${license.id}`, { ...license, deviceIds: [], keyRevoked: true, updatedAt: now });
       tx.set(`license_keys/${license.keyHash}`, { licenseId: license.id, active: false });
       if (subscription) tx.set(`license_subscriptions/${license.id}`, { ...subscription, status: "CANCELED" });
-      audit(tx, actor, "ORGANIZATION_ARCHIVED", license.id, { organizationId, name: organization.name, status: organization.status }, { organizationId, status: "ARCHIVED" }, now);
-      return { ok: true, duplicate: false };
+      audit(tx, actor, organization.status === "ARCHIVED" ? "ORGANIZATION_DEVICES_DETACHED" : "ORGANIZATION_ARCHIVED", license.id, { organizationId, name: organization.name, status: organization.status, deviceIds: license.deviceIds }, { organizationId, status: "ARCHIVED", detachedDeviceIds: devices.map(device => device.id) }, now);
+      return { ok: true, duplicate: false, detachedDevices: devices.length };
     });
   }
 

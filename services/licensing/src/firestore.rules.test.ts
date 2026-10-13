@@ -33,7 +33,7 @@ describeRules("candidate Firestore licensing rules", () => {
   beforeEach(() => environment.clearFirestore());
   afterAll(() => environment?.cleanup());
 
-  test("real Firestore transactions preserve a reinstalled device and serialize its last free access", async () => {
+  test("real Firestore transactions preserve reinstall quotas, serialize final access and detach cancelled company aliases", async () => {
     const app = initializeApp({ projectId }, "identity-transaction-test");
     try {
       const db = getFirestore(app);
@@ -65,6 +65,21 @@ describeRules("candidate Firestore licensing rules", () => {
       await engine.lifecycle(actor, session, "establish");
       expect(await engine.info({ uid: requesterUid }, original)).toMatchObject({ trialUsed: 10_000, allowed: false, code: "TRIAL_LIMIT_REACHED" });
       await expect(engine.reserve({ uid: "reinstalled-user" }, restored, { sessionId: "access-10001", targetNodusId: targetId })).rejects.toMatchObject({ code: "TRIAL_LIMIT_REACHED" });
+      await engine.lifecycle(actor, session, "end");
+      const admin = { uid: "owner", admin: true, recent: true };
+      const company = await engine.createBusiness(admin, { name: "Archived Company", email: "owner@example.test" });
+      await engine.payment(admin, { licenseId: company.licenseId, paymentId: "initial", amountCents: 20_000 });
+      await engine.activate({ uid: requesterUid }, original, company.key);
+      await engine.activate({ uid: "reinstalled-user" }, restored, company.key);
+      const personal = (await db.doc("license_licenses/free-original").get()).data();
+      await engine.modify(admin, company.licenseId, { status: "CANCELED" });
+      expect(await engine.archiveOrganization(admin, company.organizationId)).toMatchObject({ detachedDevices: 2 });
+      expect((await db.collection("license_devices").where("licenseId", "==", company.licenseId).get()).empty).toBe(true);
+      expect((await db.doc("license_licenses/free-original").get()).data()).toEqual(personal);
+      for (const [actor, credentials] of [[{ uid: requesterUid }, original], [{ uid: "reinstalled-user" }, restored]] as const) {
+        expect(await engine.info(actor, credentials)).toMatchObject({ plan: "free", organization: "", keyMasked: "", trialUsed: 10_000, code: "TRIAL_LIMIT_REACHED" });
+      }
+      expect(await engine.archiveOrganization(admin, company.organizationId)).toMatchObject({ duplicate: true, detachedDevices: 0 });
     } finally { await deleteApp(app); }
   }, 30_000);
 
