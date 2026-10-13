@@ -4,6 +4,7 @@ import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
+import { finished } from "node:stream/promises";
 
 const root = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const cache = join(process.env.LOCALAPPDATA || "", "electron-builder", "Cache");
@@ -74,7 +75,8 @@ writeFileSync(join(bootstrapSource, "package.json"), JSON.stringify({ name: "nod
 const bootstrapArchive = join(bootstrap, "app.asar");
 const bootstrapCandidate = `${bootstrapArchive}.next`;
 rmSync(bootstrapCandidate, { force: true });
-await asar.createPackage(bootstrapSource, bootstrapCandidate);
+const bootstrapStream = await asar.createPackage(bootstrapSource, bootstrapCandidate);
+await finished(bootstrapStream, { cleanup: true });
 if (existsSync(bootstrapArchive) && hash(readFileSync(bootstrapArchive)) === hash(readFileSync(bootstrapCandidate))) rmSync(bootstrapCandidate);
 else {
   rmSync(bootstrapArchive, { force: true });

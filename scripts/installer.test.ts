@@ -6,6 +6,8 @@ import { createHash } from "node:crypto";
 import { runInNewContext } from "node:vm";
 import ts from "typescript";
 import { describe, expect, it } from "vitest";
+import { Writable } from "node:stream";
+import { finished } from "node:stream/promises";
 
 const html = readFileSync(new URL("../apps/installer/index.html", import.meta.url), "utf8");
 const main = readFileSync(new URL("../apps/installer/main.cjs", import.meta.url), "utf8");
@@ -14,6 +16,17 @@ const packageJson = JSON.parse(readFileSync(new URL("../package.json", import.me
 const makensis = join(process.env.LOCALAPPDATA || "", "electron-builder", "Cache", "nsis-3.0.4.1", "nsis-3.0.4.1-1mx3n", "makensis.exe");
 
 describe("custom installer", () => {
+  it("waits for the bootstrap archive handle to close before compiling", async () => {
+    const source = ts.createSourceFile("make-installer.mjs", readFileSync(new URL("make-installer.mjs", import.meta.url), "utf8"), ts.ScriptTarget.Latest, true, ts.ScriptKind.JS);
+    const start = source.statements.findIndex(node => node.getText(source).startsWith("const bootstrapStream ="));
+    expect(start).toBeGreaterThan(-1);
+    const stream = new Writable({ write(_chunk, _encoding, callback) { callback(); }, destroy(error, callback) { setTimeout(() => callback(error), 20); } });
+    const code = source.statements.slice(start, start + 2).map(node => node.getText(source)).join("\n");
+    const closed = await runInNewContext(`(async () => { ${code}; return bootstrapStream.closed; })()`, {
+      bootstrapSource: "source", bootstrapCandidate: "archive", finished, asar: { createPackage: async () => { stream.end("archive"); return stream; } },
+    });
+    expect(closed).toBe(true);
+  });
   it("shows a minimal bootstrap and extracts the complete application only after install confirmation", () => {
     expect(wrapper).toContain('File /r /x resources');
     expect(wrapper).toContain('bootstrap\\app.asar');
