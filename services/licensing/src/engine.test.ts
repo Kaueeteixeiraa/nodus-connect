@@ -2,7 +2,7 @@ import { generateKeyPairSync, createHmac, randomUUID } from "node:crypto";
 import { createServer } from "node:http";
 import { once } from "node:events";
 import { describe, expect, test, vi } from "vitest";
-import { FREE_SESSION_LIMIT_MS, LICENSE_DEFAULTS, LicenseError, effectiveStatus, type License, type LicenseDevice, type NodusDeviceIdentity } from "../../../packages/licensing/src/index";
+import { FREE_SESSION_LIMIT_MS, LICENSE_DEFAULTS as PRODUCTION_DEFAULTS, LICENSE_MESSAGES, LicenseError, effectiveStatus, type License, type LicenseDevice, type NodusDeviceIdentity } from "../../../packages/licensing/src/index";
 import { LicenseEngine, type Actor } from "./engine";
 import type { LicenseStore, LicenseTransaction } from "./store";
 import { signLease, verifyLease } from "./security";
@@ -15,6 +15,8 @@ import { FIRESTORE_CLIENT_CONFIG } from "./firestore-store";
 import support from "../../../apps/desktop/electron/quick-support.cjs";
 import desktopUpdates from "../../../apps/desktop/electron/desktop-update.cjs";
 import type { SupportDraft } from "../../../packages/common/src/quick-support";
+
+const LICENSE_DEFAULTS = { ...PRODUCTION_DEFAULTS, freeAccessLimit: 200 };
 
 // Only tests use this store; production always uses Firestore transactions.
 export class TestStore implements LicenseStore {
@@ -58,6 +60,31 @@ describe("hardware licensing identity", () => {
     const credentials = await f.engine.enroll(actor, { deviceId: id, nodusId, deviceName: "Reinstalled", deviceClaim: `claim-${id}`, licenseIdentity: input });
     return { actor, credentials, device: f.store.data.get(`license_devices/${id}`) as LicenseDevice };
   }
+  test("personal default is ten thousand and concurrent final reservations cannot exceed it", async () => {
+    expect(PRODUCTION_DEFAULTS.freeAccessLimit).toBe(10_000);
+    const f = await fixture();
+    f.store.data.set("license_policy/current", { ...PRODUCTION_DEFAULTS, enforced: true });
+    expect((await f.engine.policy()).freeAccessLimit).toBe(10_000);
+    const license = f.store.data.get("license_licenses/free-device-source") as License;
+    Object.assign(license, { trialLimit: 10_000, trialUsed: 9_999 });
+    const results = await Promise.allSettled([f.reserve("last-a"), f.reserve("last-b")]);
+    expect(results.filter(result => result.status === "fulfilled")).toHaveLength(1);
+    await f.establish(results[0].status === "fulfilled" ? "last-a" : "last-b");
+    expect(await f.engine.info(f.actor, f.credentials)).toMatchObject({ trialUsed: 10_000, trialLimit: 10_000 });
+    await expect(f.reserve("over-limit")).rejects.toMatchObject({ code: "TRIAL_LIMIT_REACHED" });
+    expect(LICENSE_MESSAGES.FREE_SESSION_LIMIT_REACHED).toContain("Reconecte");
+    expect(LICENSE_MESSAGES.FREE_SESSION_LIMIT_REACHED).not.toContain("Business");
+  });
+  test("enrollment and administrative confirmation use the configured personal allowance", async () => {
+    const f = await fixture();
+    f.store.data.set("license_policy/current", { ...PRODUCTION_DEFAULTS, enforced: true, identityEnabled: true });
+    const pending = await reinstall(f);
+    expect((await f.engine.info(pending.actor, pending.credentials)).trialLimit).toBe(0);
+    await f.engine.reviewIdentity(admin, pending.device.id, undefined, true, "New computer verified");
+    expect((await f.engine.info(pending.actor, pending.credentials)).trialLimit).toBe(10_000);
+    const fresh = await reinstall(f, hardware, "normal-client", "222333444");
+    expect(await f.engine.info(fresh.actor, fresh.credentials)).toMatchObject({ trialUsed: 0, trialLimit: 10_000 });
+  });
   test("preparation links the existing quota and a reinstall without enabling global hardware enforcement", async () => {
     const f = await fixture(); (f.store.data.get("license_licenses/free-device-source") as License).trialUsed = 85;
     f.store.data.set("license_policy/current", { ...LICENSE_DEFAULTS, enforced: true, identityEnrollmentEnabled: true });

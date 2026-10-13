@@ -1519,11 +1519,11 @@ test("input rate limiting never strands Ctrl or a held mouse button", () => {
 test("licensing loading belongs only to the clicked action and cannot submit a second request", async () => {
   let index = 0; const state: any[] = [{ plan: "free", trialUsed: 0, trialLimit: 200, allowed: true }, "NODUS-preserved", "", null, ""], guard = { current: false };
   let resolve!: (info: any) => void;
-  const checkLicense = vi.fn(() => new Promise(done => { resolve = done; })), requestMoreAccesses = vi.fn();
+  const checkLicense = vi.fn(() => new Promise(done => { resolve = done; })), activateLicense = vi.fn();
   const icon = () => null;
   const panel = uiFunction("LicensePanel", { exports: {}, React, useEffect: () => {}, useRef: () => guard,
     useState: () => { const slot = index++; return [state[slot], (value: unknown) => { state[slot] = value; }]; }, licenseConfigured: () => true,
-    checkLicense, requestMoreAccesses, licenseFeedback: () => "Falha", ShieldCheck: icon, RefreshCw: icon, MailPlus: icon, KeyRound: icon, ExternalLink: icon,
+    checkLicense, activateLicense, licenseFeedback: () => "Falha", ShieldCheck: icon, RefreshCw: icon, KeyRound: icon, ExternalLink: icon,
   }, "apps/desktop/src/LicensePanel.tsx");
   const render = () => {
     index = 0; const buttons: React.ReactElement<any>[] = [];
@@ -1534,8 +1534,26 @@ test("licensing loading belongs only to the clicked action and cannot submit a s
   const buttons = render();
   expect(buttons[0].props["aria-busy"]).toBe(true); expect(buttons[0].props.disabled).toBe(true);
   expect(buttons[1].props["aria-busy"]).toBe(false); expect(buttons[1].props.disabled).toBe(false);
-  await buttons[1].props.onClick(); expect(requestMoreAccesses).not.toHaveBeenCalled();
+  await buttons[1].props.onClick(); expect(activateLicense).not.toHaveBeenCalled();
   resolve(state[0]); await pending; expect(state[1]).toBe("NODUS-preserved"); expect(render()[0].props["aria-busy"]).toBe(false);
+});
+
+test("company controls hide the access counter and commercial terms without removing token activation", () => {
+  for (const plan of ["free", "business"]) {
+    let index = 0;
+    const state = [{ plan, allowed: true, trialUsed: 8_765, trialLimit: 10_000, organization: "Empresa Teste", devices: 1, maxDevices: 20, sessions: 0, maxConcurrentSessions: 5 }, "", "", null, ""];
+    const icon = () => null;
+    const panel = uiFunction("LicensePanel", { exports: {}, React, useEffect: () => {}, useRef: () => ({ current: false }), useState: () => [state[index++], () => {}], licenseConfigured: () => true, ShieldCheck: icon, RefreshCw: icon, KeyRound: icon, ExternalLink: icon }, "apps/desktop/src/LicensePanel.tsx");
+    const text: string[] = [];
+    const visit = (node: any) => { if (typeof node === "string" || typeof node === "number") text.push(String(node)); else if (React.isValidElement(node)) React.Children.forEach((node as React.ReactElement<any>).props.children, visit); };
+    visit(panel({ identity: {} }));
+    const content = text.join(" ");
+    expect(content).toContain("Controle da empresa");
+    expect(content).toContain("Token da empresa");
+    expect(content).toContain("Participar da empresa");
+    expect(content).not.toMatch(/8765|10000|licença|assinatura|200 acessos|Renovação/i);
+    expect(content).toContain(plan === "free" ? "Até 10 minutos" : "Sem limite de tempo");
+  }
 });
 
 test.each(["auto", "high", "balanced", "economy"])("%s desktop profile protects text and native pixels without changing the FPS target", async (connectionQuality) => {

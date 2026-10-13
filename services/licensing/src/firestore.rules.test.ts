@@ -47,12 +47,12 @@ describeRules("candidate Firestore licensing rules", () => {
       await db.doc(`devices/${targetId}`).set({ ownerUid: targetUid, nodusId: targetId });
       const originalInput = { deviceId: "original", nodusId: requesterId, deviceName: "Original", deviceClaim: "claim-original" };
       await engine.enroll({ uid: requesterUid }, originalInput);
-      await db.doc("license_licenses/free-original").update({ trialUsed: 199 });
+      await db.doc("license_licenses/free-original").update({ trialUsed: 9_999 });
       await db.doc("license_policy/current").update({ identityEnabled: true, allowNewIdentities: false });
       const licenseIdentity = { version: 1 as const, anchors: { system: "a".repeat(64), board: "b".repeat(64) }, virtual: false };
       const original = await engine.enroll({ uid: requesterUid }, { ...originalInput, licenseIdentity });
       const restored = await engine.enroll({ uid: "reinstalled-user" }, { deviceId: "reinstalled", nodusId: "111222333", deviceName: "Restored", deviceClaim: "claim-reinstalled", licenseIdentity });
-      expect(await engine.info({ uid: "reinstalled-user" }, restored)).toMatchObject({ trialUsed: 199, trialLimit: 200 });
+      expect(await engine.info({ uid: "reinstalled-user" }, restored)).toMatchObject({ trialUsed: 9_999, trialLimit: 10_000 });
       const attempts = await Promise.allSettled([
         engine.reserve({ uid: requesterUid }, original, { sessionId: "last-original", targetNodusId: targetId, eventDriven: true }),
         engine.reserve({ uid: "reinstalled-user" }, restored, { sessionId: "last-restored", targetNodusId: targetId, eventDriven: true }),
@@ -63,8 +63,8 @@ describeRules("candidate Firestore licensing rules", () => {
       await engine.lifecycle(actor, session, "establish");
       await engine.lifecycle({ uid: targetUid }, session, "establish");
       await engine.lifecycle(actor, session, "establish");
-      expect(await engine.info({ uid: requesterUid }, original)).toMatchObject({ trialUsed: 200, allowed: false, code: "TRIAL_LIMIT_REACHED" });
-      await expect(engine.reserve({ uid: "reinstalled-user" }, restored, { sessionId: "access-201", targetNodusId: targetId })).rejects.toMatchObject({ code: "TRIAL_LIMIT_REACHED" });
+      expect(await engine.info({ uid: requesterUid }, original)).toMatchObject({ trialUsed: 10_000, allowed: false, code: "TRIAL_LIMIT_REACHED" });
+      await expect(engine.reserve({ uid: "reinstalled-user" }, restored, { sessionId: "access-10001", targetNodusId: targetId })).rejects.toMatchObject({ code: "TRIAL_LIMIT_REACHED" });
     } finally { await deleteApp(app); }
   }, 30_000);
 

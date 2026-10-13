@@ -3,14 +3,14 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <meta name="description" content="Nodus Business por R$ 200 mensais. Licença empresarial com até 20 dispositivos e 5 sessões simultâneas." />
+    <meta name="description" content="Nodus Connect gratuito para uso pessoal. Apoie a evolução do projeto com uma doação voluntária via Pix." />
     <meta name="theme-color" content="#061124" />
     <link rel="icon" href="/assets/nodus-logo.png" type="image/png" />
     <link rel="stylesheet" href="/site.css" />
-    <title>Nodus Connect | Licença</title>
+    <title>Nodus Connect | Apoie o projeto</title>
   </head>
   <body>
-    <main class="landing license-page">
+    <main class="landing license-page donation-page">
       <header class="topbar">
         <a class="brand" href="/" aria-label="Nodus Connect">
           <img src="/assets/nodus-logo.png" alt="" />
@@ -24,14 +24,14 @@
       <section class="license" aria-labelledby="license-title">
         <div class="license-inner">
           <div class="license-heading">
-            <p class="eyebrow">Licença empresarial</p>
-            <h1 id="license-title">Nodus Business</h1>
-            <p class="intro">Acesso remoto completo para o suporte da sua empresa.</p>
+            <p class="eyebrow">Gratuito para uso pessoal</p>
+            <h1 id="license-title">Nodus Connect</h1>
+            <p class="intro">Acesso remoto para o seu dia a dia. As doações são opcionais e ajudam a manter a evolução do projeto.</p>
             <div class="license-features">
-              <div class="feature-tabs" role="tablist" aria-label="Recursos da licença">
+              <div class="feature-tabs" role="tablist" aria-label="Recursos do Nodus">
                 <button type="button" role="tab" id="tab-support" aria-controls="features-support" aria-selected="true">Suporte</button>
                 <button type="button" role="tab" id="tab-image" aria-controls="features-image" aria-selected="false" tabindex="-1">Imagem</button>
-                <button type="button" role="tab" id="tab-license" aria-controls="features-license" aria-selected="false" tabindex="-1">Licença</button>
+                <button type="button" role="tab" id="tab-license" aria-controls="features-license" aria-selected="false" tabindex="-1">Empresa</button>
               </div>
               <div id="features-support" role="tabpanel" aria-labelledby="tab-support">
                 <ul><li>Visualização e controle de mouse e teclado</li><li>Transferência de arquivos e área de transferência</li><li>Áudio remoto e gravação de sessões</li></ul>
@@ -40,31 +40,41 @@
                 <ul><li>Ajustes de qualidade e resolução</li><li>Seleção de monitores e modos de visualização</li><li>Dispositivos recentes e favoritos</li></ul>
               </div>
               <div id="features-license" role="tabpanel" aria-labelledby="tab-license" hidden>
-                <ul><li>Chave empresarial para vincular seus dispositivos</li><li>Consulta de status e renovação no aplicativo</li><li>Recebimento de acessos sem consumir a cota gratuita</li></ul>
+                <ul><li>Vínculo empresarial por token de autorização</li><li>Uso empresarial sem o limite pessoal de tempo</li><li>Uso pessoal com sessões de até 10 minutos e reconexão</li></ul>
               </div>
             </div>
           </div>
-          <div class="license-offer">
-            <p class="license-price"><span>R$</span> 200 <small>/ mês</small></p>
-            <p class="license-billing">Licença mensal para sua empresa</p>
-            <dl class="license-limits">
-              <div><dt>Acessos na licença ativa</dt><dd>Sem limite</dd></div>
-              <div><dt>Dispositivos vinculados</dt><dd>Até 20</dd></div>
-              <div><dt>Sessões simultâneas</dt><dd>Até 5</dd></div>
-            </dl>
-            <a class="download license-contact" href="https://wa.me/5543998453910?text=Ol%C3%A1%21%20Quero%20adquirir%20a%20licen%C3%A7a%20Nodus%20Business%20por%20R%24%20200%20mensais." target="_blank" rel="noopener noreferrer">
-              <span><b>Entre em contato para adquirir</b><small>Contratação e renovação pelo WhatsApp</small></span>
-              <span aria-hidden="true">↗</span>
-            </a>
+          <div class="license-offer donation-offer">
+            <h2>Apoie a evolução do Nodus</h2>
+            <p class="donation-intro">Doe qualquer valor via Pix. Sua contribuição não condiciona o uso pessoal do programa.</p>
+            <img class="pix-qr" src="/assets/pix-doacao.png" width="392" height="392" alt="QR Code Pix para doação a Kauê Galvani Teixeira" />
+            <p class="pix-recipient">Kauê Galvani Teixeira <span>Manoel Ribas · (43) 99845-3910</span></p>
+            <button class="download license-contact pix-copy" id="copy-pix" type="button">Copiar Pix</button>
+            <p class="pix-status" id="pix-status" role="status" aria-live="polite"></p>
+            <button class="pix-code-toggle" id="show-pix-code" type="button">Ver código Pix</button>
+            <dialog class="pix-code" id="pix-code-dialog" aria-labelledby="pix-code-heading"><h2 id="pix-code-heading">Pix Copia e Cola</h2><textarea id="pix-payload" readonly aria-label="Código Pix Copia e Cola">00020126360014br.gov.bcb.pix0114+55439984539105204000053039865802BR5921KAUE GALVANI TEIXEIRA6012MANOEL RIBAS62070503***63042430</textarea><form method="dialog"><button class="download pix-copy" type="submit">Fechar</button></form></dialog>
           </div>
         </div>
       </section>
       <footer>
-        <span>Conexão real. Sem limites.</span>
-        <span>Nodus Connect · Versão 1.1.17</span>
+        <span>Conexão real. Evolução contínua.</span>
+        <span>Nodus Connect · Versão 1.1.20</span>
       </footer>
     </main>
     <script>
+      document.getElementById('show-pix-code').addEventListener('click', () => document.getElementById('pix-code-dialog').showModal());
+      document.getElementById('copy-pix').addEventListener('click', async () => {
+        const payload = document.getElementById('pix-payload');
+        const status = document.getElementById('pix-status');
+        try {
+          await navigator.clipboard.writeText(payload.value);
+          status.textContent = 'Pix copiado.';
+        } catch {
+          document.getElementById('pix-code-dialog').showModal();
+          payload.focus(); payload.select();
+          status.textContent = 'Cópia automática indisponível.';
+        }
+      });
       const tabs = [...document.querySelectorAll('.feature-tabs [role="tab"]')];
       function selectTab(tab) {
         tabs.forEach(item => {

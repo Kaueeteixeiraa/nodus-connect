@@ -3,7 +3,7 @@ import support from "../../../apps/desktop/electron/quick-support.cjs";
 import desktopUpdates from "../../../apps/desktop/electron/desktop-update.cjs";
 import type { DesktopUpdatePolicy } from "../../../packages/licensing/src/index.js";
 import type { SupportDraft, SupportProfile } from "../../../packages/common/src/quick-support.js";
-import { FREE_SESSION_LIMIT_MS, LICENSE_DEFAULTS, LicenseError, effectiveStatus, licenseCode, type License, type LicenseAccessRequest, type LicenseDevice, type LicenseInfo, type LicensePolicy, type LicenseSession } from "../../../packages/licensing/src/index.js";
+import { ACCESS_INCREASE_AMOUNT, FREE_SESSION_LIMIT_MS, LICENSE_DEFAULTS, LicenseError, effectiveStatus, licenseCode, type License, type LicenseAccessRequest, type LicenseDevice, type LicenseInfo, type LicensePolicy, type LicenseSession } from "../../../packages/licensing/src/index.js";
 import type { LicenseStore, LicenseTransaction } from "./store.js";
 import { matchesSecret, newDeviceToken, newLicenseKey, secretHash, signLease } from "./security.js";
 import { resolveDeviceIdentity } from "./device-identity.js";
@@ -104,7 +104,7 @@ export class LicenseEngine {
     const stored = await tx.get<Partial<LicensePolicy>>("license_policy/current");
     const policy: LicensePolicy = { ...LICENSE_DEFAULTS, enforced: stored?.enforced === true || stored?.identityEnabled === true, identityEnabled: stored?.identityEnabled === true, identityEnrollmentEnabled: stored?.identityEnrollmentEnabled === true, allowNewIdentities: stored?.allowNewIdentities === true };
     for (const key of Object.keys(LICENSE_DEFAULTS) as Array<keyof typeof LICENSE_DEFAULTS>) {
-      const value = stored?.[key]; if (value !== undefined && Number.isSafeInteger(value) && value > 0 && value <= (key === "businessPriceCents" ? 100_000_000 : 1000)) policy[key] = value;
+      const value = stored?.[key]; if (value !== undefined && Number.isSafeInteger(value) && value > 0 && value <= (key === "businessPriceCents" ? 100_000_000 : key === "freeAccessLimit" ? 100_000 : 1000)) policy[key] = value;
     }
     return policy;
   }
@@ -170,7 +170,7 @@ export class LicenseEngine {
       const pointer = await tx.get<{ requestId: string }>(pointerPath);
       const pending = pointer ? await tx.get<LicenseAccessRequest>(`license_access_requests/${pointer.requestId}`) : null;
       if (pending?.status === "PENDING") return { request: pending, duplicate: true };
-      const request: LicenseAccessRequest = { id: randomUUID(), licenseId: license.id, deviceId: device.id, uid: actor.uid, amount: LICENSE_DEFAULTS.freeAccessLimit, status: "PENDING", notificationStatus: "PENDING", createdAt: now, updatedAt: now, resolvedAt: 0, adminUserId: "" };
+      const request: LicenseAccessRequest = { id: randomUUID(), licenseId: license.id, deviceId: device.id, uid: actor.uid, amount: ACCESS_INCREASE_AMOUNT, status: "PENDING", notificationStatus: "PENDING", createdAt: now, updatedAt: now, resolvedAt: 0, adminUserId: "" };
       tx.set(`license_access_requests/${request.id}`, request); tx.set(pointerPath, { requestId: request.id });
       audit(tx, actor, "ACCESS_INCREASE_REQUESTED", license.id, null, { requestId: request.id, amount: request.amount }, now);
       return { request, duplicate: false };
@@ -204,10 +204,10 @@ export class LicenseEngine {
       const license = await this.license(tx, licenseId); if (license.plan !== "free") throw new LicenseError("FORBIDDEN");
       const policy = await this.readPolicy(tx);
       if (policy.identityEnabled || reason !== undefined) text(reason, 500);
-      const trialLimit = license.trialLimit + LICENSE_DEFAULTS.freeAccessLimit;
+      const trialLimit = license.trialLimit + ACCESS_INCREASE_AMOUNT;
       tx.set(`license_licenses/${license.id}`, { ...license, trialLimit, updatedAt: now });
       tx.set(operationPath, { uid: actor.uid, licenseId, trialLimit });
-      audit(tx, actor, "ACCESS_INCREASE_GRANTED", license.id, { trialLimit: license.trialLimit }, { amount: LICENSE_DEFAULTS.freeAccessLimit, trialLimit, reason: reason?.trim() ?? "Legacy administrative authorization" }, now);
+      audit(tx, actor, "ACCESS_INCREASE_GRANTED", license.id, { trialLimit: license.trialLimit }, { amount: ACCESS_INCREASE_AMOUNT, trialLimit, reason: reason?.trim() ?? "Legacy administrative authorization" }, now);
       return { ok: true, duplicate: false, trialLimit };
     });
   }
@@ -254,7 +254,7 @@ export class LicenseEngine {
         tx.set(`license_licenses/${current.id}`, { ...current, trialUsed: current.trialUsed + old.trialUsed, trialLimit: Math.max(current.trialLimit, old.trialLimit), updatedAt: now });
         tx.set(`license_identity_migrations/${oldFreeId}`, { deviceIdentityId: identity.id, freeLicenseId: current.id, used: old.trialUsed, createdAt: now });
       } else if (confirmNew && oldFreeId === current.id && current.trialLimit === 0) {
-        tx.set(`license_licenses/${current.id}`, { ...current, trialLimit: LICENSE_DEFAULTS.freeAccessLimit, updatedAt: now });
+        tx.set(`license_licenses/${current.id}`, { ...current, trialLimit: (await this.readPolicy(tx)).freeAccessLimit, updatedAt: now });
       }
       const anchors = [...new Set([...identity.anchors, ...review.anchors])];
       if (anchors.length > 12) throw new LicenseError("INVALID_INPUT");
