@@ -16,6 +16,7 @@ type Organization = { id: string; name: string; email: string; licenseId: string
 type Details = { devices: { id: string; deviceName: string; nodusId: string; status: string }[]; payments: { paymentId: string; amountCents: number; paidAt: number; status: string }[]; audits: { action: string; adminUserId: string; timestamp: number }[] };
 type Dashboard = { active: number; suspended: number; trials: number; devices: number; online: number; pendingRequests: number; organizations: number; mrrCents: number };
 type PublicDevice = Omit<LicenseDevice, "claimHash" | "tokenHash"> & { online: boolean; plan?: "free" | "business"; licenseStatus?: string; trialUsed?: number; trialLimit?: number; firstRegisteredAt?: number };
+type DevicePage = { items: PublicDevice[]; nextCursor: string | null };
 type DeviceDetails = { review: { status: string; reason: string; createdAt: number } | null; sessions: { id: string; status: string; establishedAt: number; expiresAt: number }[]; audits: { action: string; timestamp: number; adminUserId: string }[] };
 const ADMIN_VIEWS = [{ id: "dashboard", label: "Visão geral", icon: LayoutDashboard }, { id: "access", label: "Solicitações", icon: KeyRound }, { id: "devices", label: "Dispositivos", icon: Laptop }, { id: "organizations", label: "Empresas", icon: Building2 }, { id: "updates", label: "Atualizações", icon: Download }] as const;
 type AdminView = typeof ADMIN_VIEWS[number]["id"];
@@ -33,9 +34,9 @@ function matches(query: string, ...values: (string | undefined)[]) {
 function ListTools({ query, filter, options, onQuery, onFilter }: { query: string; filter: string; options: [string, string][]; onQuery: (value: string) => void; onFilter: (value: string) => void }) {
   return <div className="list-tools"><label className="search-field"><Search size={16} aria-hidden="true" /><input type="search" aria-label="Buscar registros" placeholder="Buscar por nome, ID ou e-mail" value={query} onChange={event => onQuery(event.target.value)} /></label><select aria-label="Filtrar registros" value={filter} onChange={event => onFilter(event.target.value)}><option value="all">Todos os status</option>{options.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select>{(query || filter !== "all") && <button className="icon-button" aria-label="Limpar filtros" title="Limpar filtros" onClick={() => { onQuery(""); onFilter("all"); }}><X size={16} /></button>}</div>;
 }
-function Pagination({ total, page, onPage }: { total: number; page: number; onPage: (value: number) => void }) {
-  const pages = Math.max(1, Math.ceil(total / PAGE_SIZE)), current = Math.min(page, pages);
-  return <div className="pagination"><span>{total ? `${(current - 1) * PAGE_SIZE + 1}–${Math.min(current * PAGE_SIZE, total)} de ${total}` : "0 registros"}</span><div><button className="icon-button" title="Página anterior" aria-label="Página anterior" disabled={current === 1} onClick={() => onPage(current - 1)}><ChevronLeft size={16} /></button><span>Página {current} de {pages}</span><button className="icon-button" title="Próxima página" aria-label="Próxima página" disabled={current === pages} onClick={() => onPage(current + 1)}><ChevronRight size={16} /></button></div></div>;
+function Pagination({ total, page, onPage, hasNext, busy = false }: { total: number; page: number; onPage: (value: number) => void; hasNext?: boolean; busy?: boolean }) {
+  const remote = hasNext !== undefined, pages = Math.max(1, Math.ceil(total / PAGE_SIZE)), current = remote ? page : Math.min(page, pages);
+  return <div className="pagination"><span>{remote ? `${total} registros nesta página` : total ? `${(current - 1) * PAGE_SIZE + 1}–${Math.min(current * PAGE_SIZE, total)} de ${total}` : "0 registros"}</span><div><button type="button" className="icon-button" title="Página anterior" aria-label="Página anterior" disabled={busy || current === 1} onClick={() => onPage(current - 1)}><ChevronLeft size={16} /></button><span>Página {current}{!remote && ` de ${pages}`}</span><button type="button" className="icon-button" title="Próxima página" aria-label="Próxima página" disabled={busy || (remote ? !hasNext : current === pages)} onClick={() => onPage(current + 1)}><ChevronRight size={16} /></button></div></div>;
 }
 function ConfirmDialog({ title, message, requiresReason, onConfirm, onCancel }: { title: string; message: string; requiresReason?: boolean; onConfirm: (reason?: string) => void; onCancel: () => void }) {
   const ref = useRef<HTMLDialogElement>(null);
@@ -63,13 +64,34 @@ async function recentLogin() {
 }
 function DeviceDialog({ device, details, devices, organizations, busy, onClose, onAction }: { device: PublicDevice; details: DeviceDetails; devices: PublicDevice[]; organizations: Organization[]; busy: boolean; onClose(): void; onAction(path: string, body: object): void }) {
   const ref = useRef<HTMLDialogElement>(null), [reason, setReason] = useState(""), [target, setTarget] = useState(""), [licenseId, setLicenseId] = useState(""), [closedSessions, setClosedSessions] = useState<string[]>([]);
+  const [candidates, setCandidates] = useState(devices), [candidateQuery, setCandidateQuery] = useState(""), [candidateCursor, setCandidateCursor] = useState("");
+  const [candidateHistory, setCandidateHistory] = useState<string[]>([]), [candidateNext, setCandidateNext] = useState<string | null>(null);
+  const [candidateBusy, setCandidateBusy] = useState(true), [candidateError, setCandidateError] = useState("");
   useEffect(() => { ref.current?.showModal(); }, []);
+  useEffect(() => {
+    if (details.review?.status !== "PENDING") return;
+    let active = true;
+    setCandidateBusy(true); setCandidateError("");
+    const timer = window.setTimeout(() => {
+      const params = new URLSearchParams({ paged: "1", query: candidateQuery, filter: "all", cursor: candidateCursor });
+      api<DevicePage>(`/admin/devices?${params}`).then(result => {
+        if (active) { setCandidates(result.items); setCandidateNext(result.nextCursor); }
+      }).catch(error => { if (active) setCandidateError(error.message); }).finally(() => { if (active) setCandidateBusy(false); });
+    }, 350);
+    return () => { active = false; window.clearTimeout(timer); };
+  }, [details.review?.status, candidateQuery, candidateCursor]);
+  function candidatePage(next: number) {
+    if (busy || candidateBusy) return;
+    if (next > candidateHistory.length + 1 && candidateNext) { setCandidateHistory([...candidateHistory, candidateCursor]); setCandidateCursor(candidateNext); }
+    else if (next < candidateHistory.length + 1 && candidateHistory.length) { setCandidateCursor(candidateHistory.at(-1)!); setCandidateHistory(candidateHistory.slice(0, -1)); }
+    setTarget("");
+  }
   const justified = reason.trim().length > 0;
   return <dialog ref={ref} className="confirm-dialog device-dialog" aria-labelledby="device-heading" onCancel={event => { if (busy) event.preventDefault(); else onClose(); }}>
     <div className="section-heading"><h2 id="device-heading">{device.deviceName}</h2><button className="icon-button" title="Fechar detalhes" aria-label="Fechar detalhes" disabled={busy} onClick={onClose}><X size={16} /></button></div>
     <dl className="company-summary"><div><dt>Registro administrativo</dt><dd>{device.deviceIdentityId ?? device.id}</dd></div><div><dt>Plano</dt><dd>{device.plan === "business" ? "Nodus Business" : "Gratuito"}</dd></div><div><dt>Acessos gratuitos</dt><dd>{device.trialUsed ?? 0} / {device.trialLimit ?? 200}</dd></div><div><dt>Licença</dt><dd><Status value={device.licenseStatus ?? "TRIAL"} /></dd></div><div><dt>Primeiro registro</dt><dd>{date(device.firstRegisteredAt ?? device.activatedAt)}</dd></div><div><dt>Último acesso autorizado</dt><dd>{device.lastAuthorizedAccessAt ? date(device.lastAuthorizedAccessAt) : "Ainda não registrado"}</dd></div></dl>
     <label>Justificativa<input maxLength={500} value={reason} onChange={event => setReason(event.target.value)} /></label>
-    {details.review?.status === "PENDING" && <form onSubmit={event => { event.preventDefault(); onAction("/admin/device-identity", { deviceId: device.id, targetDeviceId: target || undefined, confirmNew: !target, reason }); }}><h3>Revisão do computador</h3><label>Associar registro<select value={target} onChange={event => setTarget(event.target.value)}><option value="">Confirmar computador novo</option>{devices.filter(item => item.id !== device.id).map(item => <option key={item.id} value={item.id}>{item.deviceName} · {item.nodusId}</option>)}</select></label><button type="submit" disabled={busy || !justified}><ShieldCheck size={16} />Concluir revisão</button></form>}
+    {details.review?.status === "PENDING" && <form onSubmit={event => { event.preventDefault(); if (!candidateBusy && !candidateError) onAction("/admin/device-identity", { deviceId: device.id, targetDeviceId: target || undefined, confirmNew: !target, reason }); }}><h3>Revisão do computador</h3><label className="search-field"><Search size={16} aria-hidden="true" /><input type="search" aria-label="Buscar registro para associar" placeholder="Nome ou Nodus ID" value={candidateQuery} onKeyDown={event => { if (event.key === "Enter") event.preventDefault(); }} onChange={event => { setCandidateQuery(event.target.value); setCandidateCursor(""); setCandidateHistory([]); setTarget(""); }} /></label><label>Associar registro<select value={target} disabled={busy || candidateBusy} onChange={event => setTarget(event.target.value)}><option value="">Confirmar computador novo</option>{candidates.filter(item => item.id !== device.id).map(item => <option key={item.id} value={item.id}>{item.deviceName} · {item.nodusId}</option>)}</select></label><Pagination total={candidates.filter(item => item.id !== device.id).length} page={candidateHistory.length + 1} onPage={candidatePage} hasNext={Boolean(candidateNext)} busy={busy || candidateBusy} />{candidateError && <p role="alert">{candidateError}</p>}<button type="submit" disabled={busy || candidateBusy || Boolean(candidateError) || !justified}><ShieldCheck size={16} />Concluir revisão</button></form>}
     <form onSubmit={event => { event.preventDefault(); onAction("/admin/device-license", { deviceId: device.id, licenseId, reason }); }}><h3>Vinculação da licença</h3><label>Plano<select value={licenseId} onChange={event => setLicenseId(event.target.value)}><option value="">Selecionar licença</option>{device.freeLicenseId && <option value={device.freeLicenseId}>Gratuito · histórico preservado</option>}{organizations.map(item => <option key={item.licenseId} value={item.licenseId}>{item.name} · {statusLabels[item.license.status]}</option>)}</select></label><button type="submit" disabled={busy || !justified || !licenseId}><KeyRound size={16} />Aplicar licença</button></form>
     {!!details.sessions.length && <><h3>Sessões reservadas</h3>{details.sessions.map(session => <div key={session.id}><span className="muted">{session.establishedAt ? date(session.establishedAt) : "Aguardando conexão"}</span><div className="section-heading"><label><input type="checkbox" checked={closedSessions.includes(session.id)} onChange={event => setClosedSessions(previous => event.target.checked ? [...previous, session.id] : previous.filter(id => id !== session.id))} />Confirmei que esta sessão já foi encerrada</label><button disabled={busy || !justified || !closedSessions.includes(session.id)} onClick={() => onAction("/admin/release-session", { sessionId: session.id, reason })}><X size={15} />Liberar slot</button></div></div>)}</>}
     <h3>Histórico administrativo</h3><div className="table-scroll"><table><thead><tr><th>Ação</th><th>Data</th></tr></thead><tbody>{details.audits.slice(0, 10).map((entry, index) => <tr key={`${entry.timestamp}-${index}`}><td>{entry.action}</td><td>{date(entry.timestamp)}</td></tr>)}</tbody></table>{!details.audits.length && <p className="empty-state">Nenhuma alteração registrada.</p>}</div>
@@ -84,6 +106,9 @@ function Admin() {
   const [query, setQuery] = useState(""), [filter, setFilter] = useState("all"), [page, setPage] = useState(1), [updatedAt, setUpdatedAt] = useState(0);
   const [confirmation, setConfirmation] = useState<{ title: string; message: string; action: (reason?: string) => Promise<void>; requiresReason?: boolean } | null>(null);
   const [refreshing, setRefreshing] = useState(false);
+  const [deviceCursor, setDeviceCursor] = useState(""), [deviceNextCursor, setDeviceNextCursor] = useState<string | null>(null);
+  const [deviceHistory, setDeviceHistory] = useState<string[]>([]), [devicesLoading, setDevicesLoading] = useState(false);
+  const deviceRequest = useRef<{ key: string; promise: Promise<DevicePage> } | null>(null);
   const [selectedDevice, setSelectedDevice] = useState<PublicDevice | null>(null), [deviceDetails, setDeviceDetails] = useState<DeviceDetails | null>(null);
   const [desktopUpdate, setDesktopUpdate] = useState<DesktopUpdatePolicy | null>(null), [updateVersion, setUpdateVersion] = useState("");
   const [updateVersions, setUpdateVersions] = useState<string[]>([]);
@@ -96,8 +121,23 @@ function Admin() {
   const filteredDevices = devices.filter(item => (filter === "all" || (filter === "online" ? item.online : filter === "offline" ? !item.online : item.status === filter)) && matches(query, item.deviceName, item.nodusId, item.id, item.licenseId));
   const filteredOrganizations = organizations.filter(item => (filter === "all" || item.license.status === filter) && matches(query, item.name, item.email, item.id, item.licenseId));
   function pageRows<T>(rows: T[]): T[] { const current = Math.min(page, Math.max(1, Math.ceil(rows.length / PAGE_SIZE))); return rows.slice((current - 1) * PAGE_SIZE, current * PAGE_SIZE); }
-  function updateQuery(value: string) { setQuery(value); setPage(1); }
-  function updateFilter(value: string) { setFilter(value); setPage(1); }
+  function updateQuery(value: string) { setQuery(value); setPage(1); setDeviceCursor(""); setDeviceHistory([]); }
+  function updateFilter(value: string) { setFilter(value); setPage(1); setDeviceCursor(""); setDeviceHistory([]); }
+  function loadDevicePage() {
+    const params = new URLSearchParams({ paged: "1", query, filter, cursor: deviceCursor });
+    const key = `${auth?.currentUser?.uid}:${params}`;
+    if (deviceRequest.current?.key === key) return deviceRequest.current.promise;
+    const promise = api<DevicePage>(`/admin/devices?${params}`).finally(() => { if (deviceRequest.current?.key === key) deviceRequest.current = null; });
+    deviceRequest.current = { key, promise };
+    return promise;
+  }
+  function devicePage(next: number) {
+    if (busy || devicesLoading) return;
+    if (next > page && deviceNextCursor) { setDeviceHistory([...deviceHistory, deviceCursor]); setDeviceCursor(deviceNextCursor); }
+    else if (next < page && deviceHistory.length) { setDeviceCursor(deviceHistory.at(-1)!); setDeviceHistory(deviceHistory.slice(0, -1)); }
+    else return;
+    setPage(next);
+  }
   function confirmAction(title: string, message: string, action: (reason?: string) => Promise<void>, requiresReason = false) { setConfirmation({ title, message, action, requiresReason }); }
   async function copy(value: string) { await navigator.clipboard.writeText(value); setFeedback("Copiado para a área de transferência."); }
   async function reload(only: typeof view = view, summaryOnly = false) {
@@ -106,13 +146,16 @@ function Admin() {
       !only || only === "dashboard" ? api<Dashboard>("/admin/dashboard") : null,
       !only || (only === "dashboard" && !summaryOnly) || only === "organizations" ? api<Organization[]>("/admin/organizations") : null,
       !only || (only === "dashboard" && !summaryOnly) || only === "access" ? api<LicenseAccessRequest[]>("/admin/access-requests") : null,
-      !only || (only === "dashboard" && !summaryOnly) || only === "devices" ? api<PublicDevice[]>("/admin/devices") : null,
+      only === "devices" ? loadDevicePage() : !only || (only === "dashboard" && !summaryOnly) ? api<PublicDevice[]>("/admin/devices") : null,
       only === "updates" ? api<DesktopUpdatePolicy>("/admin/desktop-update") : null,
       only === "updates" ? api<string[]>("/admin/desktop-releases").then(versions => ({ versions, error: "" }), error => ({ versions: [] as string[], error: error.message as string })) : null,
     ]);
     if (!uid || auth?.currentUser?.uid !== uid) return;
     if (update && releases) { const version = update.release?.tag_name.replace(/^v/, "") ?? ""; setDesktopUpdate(update); setUpdateVersions(releases.versions); setUpdateVersion(releases.versions.includes(version) ? version : ""); }
-    if (summary) setDashboard(summary); if (rows) setOrganizations(rows); if (requests) setAccessRequests(requests); if (deviceRows) setDevices(deviceRows); setFeedback(releases?.error ?? ""); setVerified(true); setUpdatedAt(Date.now());
+    if (summary) setDashboard(summary); if (rows) setOrganizations(rows); if (requests) setAccessRequests(requests); if (deviceRows) {
+      if (Array.isArray(deviceRows)) setDevices(deviceRows);
+      else { setDevices(deviceRows.items); setDeviceNextCursor(deviceRows.nextCursor); }
+    } setFeedback(releases?.error ?? ""); setVerified(true); setUpdatedAt(Date.now());
   }
   useEffect(() => {
     if (!auth) return;
@@ -128,6 +171,18 @@ function Admin() {
   }, []);
   useEffect(() => { if (!verified || busy || view !== "dashboard") return; const timer = window.setInterval(() => { if (document.visibilityState === "visible") reload("dashboard", true).catch(error => setFeedback(error.message)); }, 60_000); return () => window.clearInterval(timer); }, [verified, busy, view]);
   useEffect(() => { if (selected) document.getElementById("company-heading")?.focus(); }, [selected]);
+  useEffect(() => {
+    if (!verified || view !== "devices") { setDevicesLoading(false); return; }
+    let active = true;
+    setDevicesLoading(true);
+    const timer = window.setTimeout(() => {
+      loadDevicePage().then(result => {
+        if (!active) return;
+        setDevices(result.items); setDeviceNextCursor(result.nextCursor); setUpdatedAt(Date.now());
+      }).catch(error => { if (active) setFeedback(error.message); }).finally(() => { if (active) setDevicesLoading(false); });
+    }, 350);
+    return () => { active = false; window.clearTimeout(timer); };
+  }, [verified, view, query, filter, deviceCursor]);
   async function run(action: () => Promise<void>, critical = false) {
     if (busy) return; setBusy(true); setFeedback(""); setSecret("");
     try { if (critical) await recentLogin(); await action(); } catch (error) { setFeedback(error instanceof Error ? error.message : "Operação não concluída."); } finally { setBusy(false); }
@@ -146,7 +201,7 @@ function Admin() {
     await mutate("/admin/free-accesses", { licenseId, operationId, reason });
     grantAttempts.current.delete(licenseId);
   }
-  function navigate(next: AdminView) { if (busy || next === view && !selected) return; setView(next); setSelected(""); setDetails(null); setCreate(false); updateQuery(""); updateFilter("all"); run(() => reload(next)); }
+  function navigate(next: AdminView) { if (busy || next === view && !selected) return; setView(next); setSelected(""); setDetails(null); setCreate(false); updateQuery(""); updateFilter("all"); if (next === "devices") { setDevices([]); setDeviceNextCursor(null); return; } run(() => reload(next)); }
   async function refresh() { setRefreshing(true); try { await reload(view); if (view === "organizations" && selected) setDetails(await api<Details>("/admin/details", { licenseId: selected })); } finally { setRefreshing(false); } }
   async function openOrganization(item: Organization) {
     if (view !== "organizations") { updateQuery(""); updateFilter("all"); }
@@ -170,8 +225,8 @@ function Admin() {
     return <><div className="table-scroll"><table><thead><tr><th>Solicitação</th><th>Dispositivo</th><th>Data</th>{!compact && <th>Status</th>}<th className="actions-heading">Ações</th></tr></thead><tbody>{rows.map(request => <tr key={request.id}><td><div className="cell-label"><span className="row-icon"><FileCheck2 size={17} /></span><span><strong>+{request.amount} acessos</strong>{!compact && <small>{request.licenseId}</small>}</span></div></td><td>{deviceById.get(request.deviceId)?.deviceName ?? request.deviceId}</td><td className="date-cell">{date(request.createdAt)}</td>{!compact && <td><Status value={request.status} /></td>}<td><div className="row-actions">{request.status === "PENDING" ? <><button className="primary" disabled={busy} onClick={() => confirmAction("Aprovar solicitação", `Liberar ${request.amount} acessos para ${deviceById.get(request.deviceId)?.deviceName ?? request.deviceId}?`, () => mutate("/admin/access-request", { requestId: request.id, approve: true }))}><Check size={15} />Aprovar</button><button disabled={busy} onClick={() => confirmAction("Rejeitar solicitação", "Este pedido será marcado como rejeitado.", () => mutate("/admin/access-request", { requestId: request.id, approve: false }))}><X size={15} />Rejeitar</button></> : <span className="muted">Concluída</span>}</div></td></tr>)}</tbody></table>{!rows.length && <p className="empty-state">{compact ? "Nenhuma solicitação pendente." : query || filter !== "all" ? "Nenhuma solicitação corresponde aos filtros." : "Nenhuma solicitação registrada."}</p>}</div>{!compact && <Pagination total={filteredRequests.length} page={page} onPage={setPage} />}</>;
   }
   function devicesTable(compact = false) {
-    const rows = compact ? devices.slice(0, 3) : pageRows(filteredDevices);
-    return <><div className="table-scroll"><table><thead><tr><th>Dispositivo</th><th>Nodus ID</th><th>Conexão</th>{!compact && <><th>Acessos</th><th>Permissão</th><th>Último uso</th><th className="actions-heading">Ações</th></>}</tr></thead><tbody>{rows.map(device => <tr key={device.id}><td><div className="cell-label"><span className="row-icon"><Laptop size={17} /></span><span><strong>{device.deviceName}</strong>{!compact && <small>{device.licenseId.startsWith("free-") ? "Licença gratuita" : "Nodus Business"}{device.identityReview ? " · Revisão pendente" : ""}</small>}</span></div></td><td className="nodus-id"><span>{device.nodusId.replace(/(\d{3})(?=\d)/g, "$1 ")}</span>{!compact && <button className="icon-button" title="Copiar Nodus ID" aria-label={`Copiar ID de ${device.deviceName}`} disabled={busy} onClick={() => run(() => copy(device.nodusId))}><Copy size={14} /></button>}</td><td><Status value={device.online ? "Online" : "Offline"} /></td>{!compact && <><td>{device.trialUsed ?? 0} / {device.trialLimit ?? 200}</td><td><Status value={device.status} /></td><td className="date-cell">{date(device.lastSeenAt)}</td><td><div className="row-actions"><button className="icon-button" disabled={busy} title={`Detalhes de ${device.deviceName}`} aria-label={`Detalhes de ${device.deviceName}`} onClick={() => run(() => openDevice(device))}><ArrowRight size={16} /></button><button className={device.status === "ACTIVE" ? "danger" : ""} disabled={busy} onClick={() => confirmAction(device.status === "ACTIVE" ? "Bloquear acessos" : "Liberar acessos", `${device.status === "ACTIVE" ? "Bloquear" : "Liberar"} os acessos de ${device.deviceName}?`, () => mutate("/admin/device", { deviceId: device.id, status: device.status === "ACTIVE" ? "BLOCKED" : "ACTIVE" }))}>{device.status === "ACTIVE" ? <Ban size={15} /> : <Check size={15} />}{device.status === "ACTIVE" ? "Bloquear" : "Liberar"}</button>{device.licenseId.startsWith("free-") && <button disabled={busy || device.identityReview} onClick={() => confirmAction("Liberar mais acessos", `Adicionar 200 acessos à licença de ${device.deviceName}?`, (reason) => grant(device.licenseId, reason), true)}><Plus size={15} />200 acessos</button>}</div></td></>}</tr>)}</tbody></table>{!rows.length && <p className="empty-state">{query || filter !== "all" ? "Nenhum dispositivo corresponde aos filtros." : "Nenhum dispositivo registrado."}</p>}</div>{!compact && <Pagination total={filteredDevices.length} page={page} onPage={setPage} />}</>;
+    const rows = compact ? devices.slice(0, 3) : filteredDevices, tableBusy = busy || devicesLoading;
+    return <><div className="table-scroll"><table><thead><tr><th>Dispositivo</th><th>Nodus ID</th><th>Conexão</th>{!compact && <><th>Acessos</th><th>Permissão</th><th>Último uso</th><th className="actions-heading">Ações</th></>}</tr></thead><tbody>{rows.map(device => <tr key={device.id}><td><div className="cell-label"><span className="row-icon"><Laptop size={17} /></span><span><strong>{device.deviceName}</strong>{!compact && <small>{device.licenseId.startsWith("free-") ? "Licença gratuita" : "Nodus Business"}{device.identityReview ? " · Revisão pendente" : ""}</small>}</span></div></td><td className="nodus-id"><span>{device.nodusId.replace(/(\d{3})(?=\d)/g, "$1 ")}</span>{!compact && <button className="icon-button" title="Copiar Nodus ID" aria-label={`Copiar ID de ${device.deviceName}`} disabled={tableBusy} onClick={() => run(() => copy(device.nodusId))}><Copy size={14} /></button>}</td><td><Status value={device.online ? "Online" : "Offline"} /></td>{!compact && <><td>{device.trialUsed ?? 0} / {device.trialLimit ?? 200}</td><td><Status value={device.status} /></td><td className="date-cell">{date(device.lastSeenAt)}</td><td><div className="row-actions"><button className="icon-button" disabled={tableBusy} title={`Detalhes de ${device.deviceName}`} aria-label={`Detalhes de ${device.deviceName}`} onClick={() => run(() => openDevice(device))}><ArrowRight size={16} /></button><button className={device.status === "ACTIVE" ? "danger" : ""} disabled={tableBusy} onClick={() => confirmAction(device.status === "ACTIVE" ? "Bloquear acessos" : "Liberar acessos", `${device.status === "ACTIVE" ? "Bloquear" : "Liberar"} os acessos de ${device.deviceName}?`, () => mutate("/admin/device", { deviceId: device.id, status: device.status === "ACTIVE" ? "BLOCKED" : "ACTIVE" }))}>{device.status === "ACTIVE" ? <Ban size={15} /> : <Check size={15} />}{device.status === "ACTIVE" ? "Bloquear" : "Liberar"}</button>{device.licenseId.startsWith("free-") && <button disabled={tableBusy || device.identityReview} onClick={() => confirmAction("Liberar mais acessos", `Adicionar 200 acessos à licença de ${device.deviceName}?`, (reason) => grant(device.licenseId, reason), true)}><Plus size={15} />200 acessos</button>}</div></td></>}</tr>)}</tbody></table>{!rows.length && <p className="empty-state">{devicesLoading ? "Carregando dispositivos..." : deviceNextCursor ? "Nenhum dispositivo nesta página." : query || filter !== "all" ? "Nenhum dispositivo corresponde aos filtros." : "Nenhum dispositivo registrado."}</p>}</div>{!compact && <Pagination total={rows.length} page={page} onPage={devicePage} hasNext={Boolean(deviceNextCursor)} busy={tableBusy} />}</>;
   }
   function organizationsTable(compact = false) {
     const rows = compact ? organizations.slice(0, 3) : pageRows(filteredOrganizations);

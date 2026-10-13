@@ -9,6 +9,8 @@ import { configureFirestore, firestoreLicenseStore } from "./firestore-store.js"
 import { createLicenseHandler } from "./http.js";
 import { paymentProviders } from "./payments.js";
 import { notifyAccessRequest } from "./email.js";
+import { devicePage, publicDevices } from "./devices.js";
+import { signalingRetention } from "./retention.js";
 
 const projectId = process.env.GCLOUD_PROJECT || process.env.GOOGLE_CLOUD_PROJECT;
 if (!projectId) throw new Error("LICENSE_PROJECT_NOT_CONFIGURED");
@@ -17,7 +19,7 @@ const serviceAccount = process.env.FIREBASE_SERVICE_ACCOUNT_JSON ? JSON.parse(pr
 if (serviceAccount && serviceAccount.project_id !== projectId) throw new Error("LICENSE_SERVICE_ACCOUNT_PROJECT_MISMATCH");
 initializeApp({ projectId, ...(process.env.FIRESTORE_EMULATOR_HOST ? {} : { credential: serviceAccount ? cert(serviceAccount) : applicationDefault() }) });
 const db = configureFirestore(getFirestore()), auth = getAuth(), store = firestoreLicenseStore(db);
-const PRESENCE_TTL_MS = 45_000;
+const PRESENCE_TTL_MS = 90_000;
 const engine = new LicenseEngine(store, process.env.LICENSE_KEY_PEPPER ?? "", (process.env.LICENSE_SIGNING_PRIVATE_KEY ?? "").replace(/\\n/g, "\n"));
 if (createPrivateKey((process.env.LICENSE_SIGNING_PRIVATE_KEY ?? "").replace(/\\n/g, "\n")).asymmetricKeyType !== "ed25519") throw new Error("LICENSE_SIGNING_KEY_INVALID");
 async function authenticate(token: string): Promise<Actor> {
@@ -57,13 +59,15 @@ async function admin(actor: Actor, path: string, input: Record<string, unknown>)
     requireAdmin(actor, true);
     if (input.enforced === true && process.env.LICENSE_ENFORCEMENT_READY !== "true") throw new LicenseError("ROLLOUT_NOT_READY");
     if ((input.identityEnabled === true || input.allowNewIdentities === true) && (process.env.LICENSE_DEVICE_IDENTITY_READY !== "true" || input.migrationApproved !== true)) throw new LicenseError("ROLLOUT_NOT_READY");
-    return store.transaction(async tx => {
+    const result = await store.transaction(async tx => {
       const previous = await tx.get<LicensePolicy>("license_policy/current");
       if (typeof input.enforced !== "boolean") throw new LicenseError("INVALID_INPUT");
       for (const key of ["identityEnabled", "identityEnrollmentEnabled", "allowNewIdentities"]) if (input[key] !== undefined && typeof input[key] !== "boolean") throw new LicenseError("INVALID_INPUT");
       tx.set("license_policy/current", { ...previous, enforced: input.enforced, ...(typeof input.identityEnabled === "boolean" ? { identityEnabled: input.identityEnabled } : {}), ...(typeof input.identityEnrollmentEnabled === "boolean" ? { identityEnrollmentEnabled: input.identityEnrollmentEnabled } : {}), ...(typeof input.allowNewIdentities === "boolean" ? { allowNewIdentities: input.allowNewIdentities } : {}) });
       tx.set(`license_audit/policy-${Date.now()}-${actor.uid}`, { adminUserId: actor.uid, action: "ROLLOUT_POLICY_CHANGED", before: { enforced: previous?.enforced === true, identityEnabled: previous?.identityEnabled === true, identityEnrollmentEnabled: previous?.identityEnrollmentEnabled === true, allowNewIdentities: previous?.allowNewIdentities === true }, after: { enforced: input.enforced, identityEnabled: input.identityEnabled ?? previous?.identityEnabled ?? false, identityEnrollmentEnabled: input.identityEnrollmentEnabled ?? previous?.identityEnrollmentEnabled ?? false, allowNewIdentities: input.allowNewIdentities ?? previous?.allowNewIdentities ?? false }, timestamp: Date.now() }); return { ok: true };
     });
+    engine.invalidatePolicyCache();
+    return result;
   }
   if (path === "GET /admin/organizations") {
     const rows = await db.collection("license_organizations").where("status", "==", "ACTIVE").orderBy("createdAt", "desc").limit(100).get();
@@ -89,21 +93,9 @@ async function admin(actor: Actor, path: string, input: Record<string, unknown>)
     return rows.docs.map((doc: QueryDocumentSnapshot) => doc.data() as LicenseAccessRequest);
   }
   if (path === "GET /admin/devices") {
+    if (input.paged === "1") return devicePage(db, input);
     const rows = await db.collection("license_devices").orderBy("lastSeenAt", "desc").limit(200).get();
-    const presence = rows.empty ? [] : await db.getAll(...rows.docs.map((row: QueryDocumentSnapshot) => db.doc(`devices/${(row.data() as LicenseDevice).nodusId}`)));
-    const ids = [...new Set(rows.docs.flatMap(row => { const data = row.data() as LicenseDevice; return [data.licenseId, data.freeLicenseId ?? `free-${data.id}`]; }))];
-    const licenses = ids.length ? await db.getAll(...ids.map(id => db.doc(`license_licenses/${id}`))) : [];
-    const byId = new Map(licenses.map(doc => [doc.id, doc.data() as License | undefined]));
-    const identityIds = [...new Set(rows.docs.map(row => row.data().deviceIdentityId as string | undefined).filter((id): id is string => Boolean(id)))];
-    const identities = identityIds.length ? await db.getAll(...identityIds.map(id => db.doc(`license_device_identities/${id}`))) : [];
-    const byIdentity = new Map(identities.map(doc => [doc.id, doc.data() as DeviceLicenseIdentity | undefined]));
-    return rows.docs.map((doc: QueryDocumentSnapshot, index: number) => {
-      const { tokenHash: _token, claimHash: _claim, ...device } = doc.data() as LicenseDevice;
-      const live = presence[index]?.data(), seenAt = Date.parse(String(live?.updatedAt ?? ""));
-      const online = live?.status === "online" && Number.isFinite(seenAt) && Date.now() - seenAt < PRESENCE_TTL_MS;
-      const license = byId.get(device.licenseId), free = byId.get(device.freeLicenseId ?? `free-${device.id}`);
-      return { ...device, ...(device.deviceIdentityId && byIdentity.get(device.deviceIdentityId)?.status === "BLOCKED" ? { status: "BLOCKED" } : {}), plan: license?.plan ?? "free", licenseStatus: license ? effectiveStatus(license, Date.now()) : "EXPIRED", trialUsed: free?.trialUsed ?? 0, trialLimit: free?.trialLimit ?? 0, firstRegisteredAt: free?.createdAt ?? device.activatedAt, lastSeenAt: Number.isFinite(seenAt) ? Math.max(device.lastSeenAt, seenAt) : device.lastSeenAt, online };
-    });
+    return publicDevices(db, rows.docs);
   }
   if (path === "POST /admin/device-details") {
     const deviceId = validId(input.deviceId), device = (await db.doc(`license_devices/${deviceId}`).get()).data() as LicenseDevice | undefined;
@@ -116,7 +108,7 @@ async function admin(actor: Actor, path: string, input: Record<string, unknown>)
 }
 const origins = (process.env.LICENSE_ALLOWED_ORIGINS ?? "").split(",").map(value => value.trim()).filter(Boolean);
 if (!origins.length || origins.includes("*")) throw new Error("LICENSE_ORIGINS_NOT_CONFIGURED");
-export const licenseHandler = createLicenseHandler({ engine, store, authenticate, admin, origins, providers: paymentProviders, notifyAccessRequest });
+export const licenseHandler = createLicenseHandler({ engine, store, authenticate, admin, origins, providers: paymentProviders, notifyAccessRequest, onSessionEnded: signalingRetention(db) });
 // Authorization computes expiry immediately; this bounded sweep persists states for administrative aggregates.
 let sweeping = false;
 const startSweep = () => setInterval(async () => {

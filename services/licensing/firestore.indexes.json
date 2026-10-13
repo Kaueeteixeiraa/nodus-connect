@@ -1,5 +1,6 @@
 {
   "indexes": [
+    { "collectionGroup": "sessionRequests", "queryScope": "COLLECTION", "fields": [{ "fieldPath": "targetNodusId", "order": "ASCENDING" }, { "fieldPath": "targetUid", "order": "ASCENDING" }, { "fieldPath": "status", "order": "ASCENDING" }, { "fieldPath": "createdAt", "order": "DESCENDING" }] },
     { "collectionGroup": "license_organizations", "queryScope": "COLLECTION", "fields": [{ "fieldPath": "status", "order": "ASCENDING" }, { "fieldPath": "createdAt", "order": "DESCENDING" }] },
     { "collectionGroup": "license_licenses", "queryScope": "COLLECTION", "fields": [{ "fieldPath": "status", "order": "ASCENDING" }, { "fieldPath": "expiresAt", "order": "ASCENDING" }] },
     { "collectionGroup": "license_licenses", "queryScope": "COLLECTION", "fields": [{ "fieldPath": "status", "order": "ASCENDING" }, { "fieldPath": "graceUntil", "order": "ASCENDING" }] },
@@ -10,6 +11,7 @@
     ,{ "collectionGroup": "license_audit", "queryScope": "COLLECTION", "fields": [{ "fieldPath": "licenseId", "order": "ASCENDING" }, { "fieldPath": "timestamp", "order": "DESCENDING" }] }
   ],
   "fieldOverrides": [
+    { "collectionGroup": "items", "fieldPath": "createdAt", "indexes": [{ "order": "ASCENDING", "queryScope": "COLLECTION_GROUP" }, { "order": "ASCENDING", "queryScope": "COLLECTION" }, { "order": "DESCENDING", "queryScope": "COLLECTION" }] },
     { "collectionGroup": "license_device_identities", "fieldPath": "anchors", "indexes": [] },
     { "collectionGroup": "license_identity_anchors", "fieldPath": "ids", "indexes": [] },
     { "collectionGroup": "license_identity_reviews", "fieldPath": "anchors", "indexes": [] },

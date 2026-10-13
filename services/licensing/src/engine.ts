@@ -34,6 +34,7 @@ function audit(tx: LicenseTransaction, actor: Actor, action: string, licenseId: 
 }
 
 export class LicenseEngine {
+  private policyCache?: { expiresAt: number; value: Promise<LicensePolicy> };
   private desktopUpdateCache?: { expiresAt: number; value: Promise<DesktopUpdatePolicy> };
   private desktopReleasesCache?: { expiresAt: number; value: Promise<string[]> };
   constructor(private readonly store: LicenseStore, private readonly pepper: string, private readonly signingKey: string, private readonly now = () => Date.now()) { secretHash("configuration-check", pepper); }
@@ -99,7 +100,17 @@ export class LicenseEngine {
     return policy;
   }
 
-  async policy(): Promise<LicensePolicy> { return this.store.transaction(tx => this.readPolicy(tx)); }
+  async policy(cached = false): Promise<LicensePolicy> {
+    if (cached && this.policyCache && this.policyCache.expiresAt > this.now()) return this.policyCache.value;
+    const value = this.store.transaction(tx => this.readPolicy(tx), { readOnly: true });
+    if (cached) {
+      const entry = { expiresAt: this.now() + 30_000, value };
+      this.policyCache = entry;
+      value.catch(() => { if (this.policyCache === entry) this.policyCache = undefined; });
+    }
+    return value;
+  }
+  invalidatePolicyCache() { this.policyCache = undefined; }
   private async readPolicy(tx: LicenseTransaction): Promise<LicensePolicy> {
     const stored = await tx.get<Partial<LicensePolicy>>("license_policy/current");
     const policy: LicensePolicy = { ...LICENSE_DEFAULTS, enforced: stored?.enforced === true || stored?.identityEnabled === true, identityEnabled: stored?.identityEnabled === true, identityEnrollmentEnabled: stored?.identityEnrollmentEnabled === true, allowNewIdentities: stored?.allowNewIdentities === true };

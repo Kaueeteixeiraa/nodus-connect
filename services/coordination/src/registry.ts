@@ -22,7 +22,7 @@ export interface PresenceInput {
 export class PresenceRegistry {
   private readonly records = new Map<string, PresenceRecord>();
 
-  constructor(private readonly ttlMs = 45_000) {}
+  constructor(private readonly ttlMs = 90_000) {}
 
   upsert(input: PresenceInput): PresenceRecord {
     const nodusId = normalizeNodusId(input.nodusId);

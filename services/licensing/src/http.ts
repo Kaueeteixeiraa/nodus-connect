@@ -6,7 +6,7 @@ import type { PaymentProvider } from "./payments.js";
 import type { SupportDraft } from "../../../packages/common/src/quick-support.js";
 
 type Body = Record<string, unknown>;
-export interface HttpDependencies { engine: LicenseEngine; store: LicenseStore; authenticate(token: string): Promise<Actor>; admin(actor: Actor, path: string, body: Body): Promise<unknown>; origins: string[]; providers?: ReadonlyMap<string, PaymentProvider>; notifyAccessRequest?(request: LicenseAccessRequest): Promise<boolean>; }
+export interface HttpDependencies { engine: LicenseEngine; store: LicenseStore; authenticate(token: string): Promise<Actor>; admin(actor: Actor, path: string, body: Body): Promise<unknown>; origins: string[]; providers?: ReadonlyMap<string, PaymentProvider>; notifyAccessRequest?(request: LicenseAccessRequest): Promise<boolean>; onSessionEnded?(): Promise<void>; }
 async function rawBody(request: IncomingMessage, limit: number): Promise<Buffer> {
   let size = 0; const chunks: Buffer[] = [];
   for await (const chunk of request) { const buffer = Buffer.from(chunk); size += buffer.length; if (size > limit) throw new LicenseError("INVALID_INPUT"); chunks.push(buffer); }
@@ -23,7 +23,7 @@ export function createLicenseHandler(deps: HttpDependencies) {
     response.setHeader("content-type", "application/json; charset=utf-8"); response.setHeader("cache-control", "no-store"); response.setHeader("x-content-type-options", "nosniff"); response.setHeader("referrer-policy", "no-referrer");
     const send = (status: number, value: unknown) => { response.statusCode = status; response.end(JSON.stringify(value)); };
     try {
-      const path = new URL(request.url ?? "/", "http://localhost").pathname;
+      const url = new URL(request.url ?? "/", "http://localhost"), path = url.pathname;
       const origin = request.headers.origin;
       if (origin && !deps.origins.includes(origin)) throw new LicenseError("FORBIDDEN");
       if (origin) { response.setHeader("access-control-allow-origin", origin); response.setHeader("vary", "Origin"); }
@@ -34,7 +34,11 @@ export function createLicenseHandler(deps: HttpDependencies) {
         response.setHeader("cache-control", "public, max-age=0, s-maxage=60");
         return send(200, result);
       }
-      if (request.method === "GET" && path === "/license/policy") return send(200, await deps.engine.policy());
+      if (request.method === "GET" && path === "/license/policy") {
+        const policy = await deps.engine.policy(true);
+        response.setHeader("cache-control", "public, max-age=0, s-maxage=30");
+        return send(200, policy);
+      }
       const webhook = path.match(/^\/webhooks\/([a-zA-Z0-9_-]+)$/);
       if (request.method === "POST" && webhook) {
         const provider = deps.providers?.get(webhook[1]); if (!provider || provider.name !== webhook[1]) throw new LicenseError("FORBIDDEN");
@@ -60,7 +64,7 @@ export function createLicenseHandler(deps: HttpDependencies) {
         const count = current?.minute === minute ? current.count + 1 : 1;
         if (count > 180) throw new LicenseError("FORBIDDEN"); tx.set(key, { minute, count });
       });
-      const input = request.method === "POST" ? await body(request) : {};
+      const input = request.method === "POST" ? await body(request) : Object.fromEntries(url.searchParams);
       if (path.startsWith("/admin/")) { requireAdmin(actor, request.method !== "GET" && !["/admin/details", "/admin/device-details"].includes(path)); return send(200, await deps.admin(actor, `${request.method} ${path}`, input)); }
       if (request.method !== "POST") return send(404, { code: "INVALID_INPUT" });
       if (path === "/license/enroll") return send(200, await deps.engine.enroll(actor, { deviceId: validId(input.deviceId), nodusId: text(input.nodusId, 9), deviceName: text(input.deviceName), deviceClaim: text(input.deviceClaim, 128), licenseIdentity: input.licenseIdentity as NodusDeviceIdentity | undefined, previousDeviceToken: typeof input.previousDeviceToken === "string" ? input.previousDeviceToken : undefined }));
@@ -83,7 +87,11 @@ export function createLicenseHandler(deps: HttpDependencies) {
       }
       if (path === "/license/sessions/reserve") return send(200, await deps.engine.reserve(actor, credentials(input), { sessionId: validId(input.sessionId), targetNodusId: text(input.targetNodusId, 9), offline: input.offline === true, supportProfileId: input.supportProfileId ? validId(input.supportProfileId) : undefined, supportPassword: typeof input.supportPassword === "string" ? input.supportPassword : undefined, eventDriven: input.eventDriven === true }));
       const lifecycle = path.match(/^\/license\/sessions\/(establish|heartbeat|end)$/);
-      if (lifecycle) return send(200, await deps.engine.lifecycle(actor, validId(input.sessionId), lifecycle[1] as "establish" | "heartbeat" | "end"));
+      if (lifecycle) {
+        const result = await deps.engine.lifecycle(actor, validId(input.sessionId), lifecycle[1] as "establish" | "heartbeat" | "end");
+        if (lifecycle[1] === "end") await deps.onSessionEnded?.().catch(() => undefined);
+        return send(200, result);
+      }
       if (path === "/license/transport/identity") {
         if (!/^\d{9}$/.test(String(input.nodusId))) throw new LicenseError("INVALID_INPUT");
         const device = await deps.store.transaction(tx => tx.get<{ ownerUid: string }>(`devices/${input.nodusId}`));

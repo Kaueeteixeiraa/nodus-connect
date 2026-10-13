@@ -427,7 +427,7 @@ function updateFlowFixture() {
     fetch: vi.fn(async () => ({ ok: true, json: async () => releaseFixture() })),
     downloadVerifiedFile: vi.fn(async (_url, _file, _sha, _size, progress) => progress(50)),
     updateRelease: desktopUpdates.updateRelease, releasedStartupUpdate: vi.fn(async () => desktopUpdates.updateRelease(releaseFixture(), "1.1.10")), launchUpdate: vi.fn(async () => {}),
-    appendLog: vi.fn(), setTimeout: vi.fn(), quitApp: vi.fn() };
+    desktopUpdates: { pruneCache: vi.fn(async () => undefined) }, appendLog: vi.fn(), setTimeout: vi.fn(), quitApp: vi.fn() };
   const sender = { isDestroyed: () => false, send: vi.fn() };
   return { context, sender, check: uiFunction("checkAndInstallUpdate", context, updateMain) };
 }
@@ -794,7 +794,7 @@ function cloudListenerFixture() {
   });
   const context = { exports: {}, firebaseConfigured: () => true, normalizeNodusId: (id: string) => id.replace(/\D/g, ""), ensureDeviceUid: async () => "owner",
     setTimeout, clearTimeout, Date, PENDING_REQUEST_TTL_MS: 300_000, isFresh: (at: string, ttl: number) => Date.now() - Date.parse(at) < ttl,
-    fire: async () => ({ collection: (_store: any, ...path: string[]) => path, query: (...args: any[]) => args, where: (...args: any[]) => args, store: {}, onSnapshot, getDocs }) };
+    fire: async () => ({ collection: (_store: any, ...path: string[]) => path, doc: (_store: any, ...path: string[]) => path, query: (...args: any[]) => args, where: (...args: any[]) => args, orderBy: (...args: any[]) => args, limit: (value: number) => ({ limit: value }), store: {}, onSnapshot, getDocs }) };
   const snapshot = (items: { id: string; seq?: number; status?: string; createdAt?: string; type?: string }[], cached = false) => {
     const docs = items.map(item => ({ id: item.id, data: () => item }));
     return { docs, size: docs.length, metadata: { fromCache: cached }, docChanges: () => docs.map(doc => ({ type: "added", doc })) };
@@ -822,6 +822,110 @@ test("cloud signals use one listener with no repeated reads during an idle hour"
   expect(f.onSnapshot).toHaveBeenCalledOnce(); expect(f.getDocs).not.toHaveBeenCalled(); expect(onSignal).not.toHaveBeenCalled();
   expect(f.onSnapshot.mock.calls[0][0]).toEqual(["sessions", "session", "signals", "123456789", "items"]);
   connection.close(); expect(f.listeners[0].stop).toHaveBeenCalledOnce();
+});
+
+test("steady sessions write 90 percent fewer detailed samples while diagnostic and change events remain immediate", () => {
+  const source = ts.createSourceFile("App.tsx", readFileSync("apps/desktop/src/App.tsx", "utf8"), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  let expression = "";
+  const visit = (node: ts.Node) => { if (ts.isVariableDeclaration(node) && node.name.getText(source) === "detailedLogDue") expression = node.initializer!.getText(source); ts.forEachChild(node, visit); }; visit(source);
+  const context = { performanceDiagnosticRef: { current: null as object | null }, logChanged: false, now: 0, lastDetailedLogAt: -Infinity };
+  const code = ts.transpile(`Boolean(${expression})`, { target: ts.ScriptTarget.ES2022 });
+  let writes = 0;
+  for (context.now = 0; context.now < 60_000; context.now += 500) {
+    if (runInNewContext(code, context)) { writes++; context.lastDetailedLogAt = context.now; }
+  }
+  expect(writes).toBe(12);
+  context.now = context.lastDetailedLogAt + 500; context.logChanged = true;
+  expect(runInNewContext(code, context)).toBe(true);
+  context.logChanged = false; context.performanceDiagnosticRef.current = {};
+  expect(runInNewContext(code, context)).toBe(true);
+});
+
+test.each(["complete", "cancelled-start"])("recording writes incrementally and handles %s without retaining all chunks or stopping remote video", async mode => {
+  vi.useFakeTimers();
+  let release!: () => void, begin!: (value: { id: string }) => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  class Recorder {
+    static isTypeSupported() { return true; }
+    state = "inactive"; mimeType = "video/webm";
+    ondataavailable: ((event: { data: Blob }) => void) | null = null;
+    onstop: (() => Promise<void>) | null = null;
+    start() { this.state = "recording"; }
+    stop() { this.state = "inactive"; }
+    pause() { this.state = "paused"; }
+    resume() { this.state = "recording"; }
+  }
+  const track = { stop: vi.fn() }, desktop = {
+    beginFileSave: vi.fn(() => mode === "cancelled-start" ? new Promise<{ id: string }>(resolve => { begin = resolve; }) : Promise.resolve({ id: "recording-disk" })),
+    appendFileSave: vi.fn(async () => { await gate; }),
+    finishFileSave: vi.fn(async () => ({ name: "recording.webm" })), cancelFileSave: vi.fn(async () => undefined),
+  };
+  const recordingRef = { current: new Map() }, setFeedback = vi.fn();
+  const toggle = uiFunction("toggleRecording", { recordingRef, selectedSessionId: "test", sessionsRef: { current: [{ session: { sessionId: "test" }, remoteStream: { getVideoTracks: () => [track], getAudioTracks: () => [] } }] }, MediaRecorder: Recorder, MediaStream: class {}, window: { nodusDesktop: desktop }, Date, Blob, MAX_FILE_SIZE: 256 * 1024 * 1024, setRecordingSessionId: vi.fn(), setFeedback, updateRuntime: vi.fn() });
+  const started = toggle("test", "none"); await vi.advanceTimersByTimeAsync(0);
+  if (mode === "cancelled-start") {
+    recordingRef.current.delete("test"); begin({ id: "recording-disk" }); await started;
+    expect(desktop.cancelFileSave).toHaveBeenCalledWith("recording-disk"); expect(desktop.appendFileSave).not.toHaveBeenCalled();
+    return;
+  }
+  await started;
+  const entry = recordingRef.current.get("test"); expect(entry).not.toHaveProperty("chunks");
+  entry.recorder.ondataavailable({ data: new Blob([new Uint8Array([1, 2, 3, 4])]) });
+  entry.recorder.stop(); const stopped = entry.recorder.onstop();
+  await vi.advanceTimersByTimeAsync(0); expect(desktop.finishFileSave).not.toHaveBeenCalled();
+  release(); await stopped;
+  expect(desktop.finishFileSave).toHaveBeenCalledWith("recording-disk");
+  expect(setFeedback).toHaveBeenCalledWith(expect.stringContaining("Documentos")); expect(track.stop).not.toHaveBeenCalled();
+});
+
+test("outgoing requests subscribe only to the current document and ignore callbacks after close", async () => {
+  const f = cloudListenerFixture(), updated = vi.fn();
+  const watch = uiFunction("subscribeCloudRequest", f.context, "apps/desktop/src/core/firebase.ts")("request-current", updated);
+  await vi.advanceTimersByTimeAsync(0);
+  expect(f.onSnapshot.mock.calls[0][0]).toEqual(["sessionRequests", "request-current"]);
+  const request = { id: "request-current", status: "accepted" };
+  f.listeners[0].next({ exists: () => true, data: () => request });
+  expect(updated).toHaveBeenCalledWith(request);
+  watch.close(); f.listeners[0].next({ exists: () => true, data: () => request });
+  expect(updated).toHaveBeenCalledOnce(); expect(f.listeners[0].stop).toHaveBeenCalledOnce();
+});
+
+test.each(["complete", "incomplete", "closed-start"])("file receiver serializes asynchronous decryption and handles %s without saving a partial file", async mode => {
+  vi.useFakeTimers();
+  let release!: (value: ArrayBuffer) => void, start!: (value: { id: string }) => void;
+  const decoded = new Promise<ArrayBuffer>(resolve => { release = resolve; });
+  const saved: number[] = [], pending: number[] = [];
+  const desktop = {
+    beginFileSave: vi.fn(() => mode === "closed-start" ? new Promise<{ id: string }>(resolve => { start = resolve; }) : Promise.resolve({ id: "disk-file" })),
+    appendFileSave: vi.fn(async (_id: string, bytes: ArrayBuffer) => { pending.push(bytes.byteLength); }),
+    finishFileSave: vi.fn(async () => { saved.push(pending.reduce((sum, size) => sum + size, 0)); return { ok: true, name: "file.bin" }; }),
+    cancelFileSave: vi.fn(async () => undefined),
+  };
+  const context: any = {
+    MAX_FILE_SIZE: 256 * 1024 * 1024, Blob, ArrayBuffer, JSON, Number, Math, Date,
+    fileChannelsRef: { current: new Map() }, fileCryptoRef: { current: new Map() }, fileCryptoSessionsRef: { current: new Map() },
+    incomingFilesRef: { current: new Map() }, pausedFilesRef: { current: new Set() },
+    createFileCryptoSession: async () => ({ publicKey: "test" }), deriveFileCryptoKey: async () => ({}), decryptFileChunk: () => decoded,
+    patchFileTransfer: vi.fn(), upsertFileTransfer: vi.fn(), updateRuntime: vi.fn(), setFileChannelReady: vi.fn(), window: { nodusDesktop: desktop },
+  };
+  context.handleFileTransferMessage = uiFunction("handleFileTransferMessage", context);
+  const channel: any = { readyState: "open", send: vi.fn(), close: () => { channel.readyState = "closed"; channel.onclose(); } };
+  uiFunction("attachFileTransfer", context)("test", channel, "Remote");
+  await vi.advanceTimersByTimeAsync(0);
+  context.fileCryptoRef.current.set("test", { remote: Promise.resolve({}) });
+  channel.onmessage({ data: JSON.stringify({ type: "file-meta", id: "file", name: "file.bin", size: mode === "incomplete" ? 5 : 4 }) });
+  await vi.advanceTimersByTimeAsync(0);
+  if (mode === "closed-start") {
+    channel.close(); start({ id: "disk-file" }); await vi.advanceTimersByTimeAsync(0);
+    expect(desktop.cancelFileSave).toHaveBeenCalledWith("disk-file"); expect(context.incomingFilesRef.current.size).toBe(0);
+    return;
+  }
+  channel.onmessage({ data: new Uint8Array([1, 2, 3, 4]).buffer });
+  channel.onmessage({ data: JSON.stringify({ type: "file-end", id: "file" }) });
+  await vi.advanceTimersByTimeAsync(0); expect(desktop.finishFileSave).not.toHaveBeenCalled();
+  release(new Uint8Array([1, 2, 3, 4]).buffer); await vi.advanceTimersByTimeAsync(0);
+  if (mode === "complete") { expect(saved).toEqual([4]); expect(context.incomingFilesRef.current.size).toBe(0); }
+  else { expect(saved).toEqual([]); expect(desktop.cancelFileSave).toHaveBeenCalledWith("disk-file"); }
 });
 
 test("cloud signals serialize SDP and ICE, ignore replay, and deliver a late lower sequence", async () => {
@@ -881,8 +985,10 @@ test("incoming requests are reconciled by snapshot without polling or stale acce
   f.listeners[0].next(f.snapshot([current, { ...current, id: "expired", createdAt: new Date(Date.now() - 300_001).toISOString() }]));
   expect(onIncomingRequests).toHaveBeenLastCalledWith([current]);
   f.listeners[0].next(f.snapshot([{ ...current, status: "accepted" }])); expect(onIncomingRequests).toHaveBeenLastCalledWith([]);
-  f.listeners[1].next(f.snapshot([{ ...current, status: "accepted" }])); expect(onRequestUpdate).toHaveBeenCalledOnce();
-  await vi.advanceTimersByTimeAsync(3_600_000); expect(f.onSnapshot).toHaveBeenCalledTimes(2); expect(f.getDocs).not.toHaveBeenCalled();
+  expect(onRequestUpdate).not.toHaveBeenCalled();
+  expect(f.onSnapshot.mock.calls[0][0]).toContainEqual(["status", "==", "pending"]);
+  expect(f.onSnapshot.mock.calls[0][0]).toContainEqual({ limit: 100 });
+  await vi.advanceTimersByTimeAsync(3_600_000); expect(f.onSnapshot).toHaveBeenCalledOnce(); expect(f.getDocs).not.toHaveBeenCalled();
   connection.close(); expect(f.listeners.every(listener => listener.stop.mock.calls.length === 1)).toBe(true);
 });
 
@@ -890,23 +996,22 @@ test("request listeners recover together with bounded retry and close cancels re
   const f = cloudListenerFixture(), onIncomingRequests = vi.fn(), onState = vi.fn();
   const connection = uiFunction("subscribeCloudRealtime", f.context, "apps/desktop/src/core/firebase.ts")("123456789", { onIncomingRequests, onState });
   await vi.advanceTimersByTimeAsync(0); f.listeners[0].error({ code: "resource-exhausted" });
-  f.listeners[1].error({ code: "resource-exhausted" });
   expect(f.listeners.every(listener => listener.stop.mock.calls.length === 1)).toBe(true);
-  await vi.advanceTimersByTimeAsync(30_000); expect(f.listeners).toHaveLength(4);
+  await vi.advanceTimersByTimeAsync(30_000); expect(f.listeners).toHaveLength(2);
   f.listeners[0].next(f.snapshot([])); expect(onIncomingRequests).not.toHaveBeenCalled();
-  f.listeners[2].error({ code: "resource-exhausted" });
-  await vi.advanceTimersByTimeAsync(59_999); expect(f.listeners).toHaveLength(4);
-  connection.close(); await vi.advanceTimersByTimeAsync(300_000); expect(f.listeners).toHaveLength(4);
+  f.listeners[1].error({ code: "resource-exhausted" });
+  await vi.advanceTimersByTimeAsync(59_999); expect(f.listeners).toHaveLength(2);
+  connection.close(); await vi.advanceTimersByTimeAsync(300_000); expect(f.listeners).toHaveLength(2);
 });
 
 test("Firebase sessions bypass both request polling effects and dispose signal listeners", () => {
   const source = ts.createSourceFile("App.tsx", readFileSync("apps/desktop/src/App.tsx", "utf8"), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
   const effects: string[] = [];
   const visit = (node: ts.Node) => { if (ts.isCallExpression(node) && node.expression.getText(source) === "useEffect") effects.push(node.getText(source)); ts.forEachChild(node, visit); }; visit(source);
-  for (const call of ["listIncomingRequests(identity.nodusId)", "getSessionRequest(outgoingRequest.id)"]) {
+  for (const call of ["listIncomingRequests(identity.nodusId)", "subscribeCloudRequest(outgoingRequest.id"]) {
     const effect = effects.find(text => text.includes(call))!;
     expect(effect.indexOf("if (firebaseConfigured())")).toBeLessThan(effect.indexOf(call));
-    expect(effect).toMatch(/if \(firebaseConfigured\(\)\) \{[\s\S]*return \(\) => (?:\{ disposed = true; )?window.clear(?:Interval|Timeout)\(timer\);(?: \})?\s*\}/);
+    expect(effect).toMatch(/if \(firebaseConfigured\(\)\) \{[\s\S]*return \(\) => (?:\{ disposed = true; (?:watch.close\(\); )?)?window.clear(?:Interval|Timeout)\(timer\);(?: \})?\s*\}/);
   }
   expect(readFileSync("apps/desktop/src/App.tsx", "utf8")).toContain("signalConnectionsRef.current.get(sessionId)?.close();");
 });
@@ -1228,7 +1333,7 @@ test("both desktop modes restrict native caption commands to their own Electron 
 test("admin loads only the active view and reports timeouts in Portuguese", async () => {
   const api = vi.fn(async (path: string) => path === "/admin/dashboard" ? { devices: 2 } : []);
   const setDashboard = vi.fn(), setFeedback = vi.fn(), setVerified = vi.fn();
-  const reload = uiFunction("reload", { view: "dashboard", auth: { currentUser: { uid: "owner" } }, api, setDashboard, setFeedback, setVerified, setUpdatedAt: vi.fn(), setOrganizations: vi.fn(), setAccessRequests: vi.fn(), setDevices: vi.fn() }, "apps/admin/src/App.tsx");
+  const reload = uiFunction("reload", { view: "dashboard", auth: { currentUser: { uid: "owner" } }, api, loadDevicePage: async () => { await api("/admin/devices?paged=1"); return { items: [], nextCursor: null }; }, setDeviceNextCursor: vi.fn(), setDashboard, setFeedback, setVerified, setUpdatedAt: vi.fn(), setOrganizations: vi.fn(), setAccessRequests: vi.fn(), setDevices: vi.fn() }, "apps/admin/src/App.tsx");
   await reload();
   expect(api.mock.calls.map(([path]) => path)).toEqual(["/admin/dashboard", "/admin/organizations", "/admin/access-requests", "/admin/devices"]);
   expect(setDashboard).toHaveBeenCalledExactlyOnceWith({ devices: 2 });
@@ -1237,7 +1342,7 @@ test("admin loads only the active view and reports timeouts in Portuguese", asyn
   api.mockClear();
   await reload("dashboard", true);
   expect(api).toHaveBeenCalledExactlyOnceWith("/admin/dashboard");
-  for (const [view, path] of [["access", "/admin/access-requests"], ["devices", "/admin/devices"], ["organizations", "/admin/organizations"]]) {
+  for (const [view, path] of [["access", "/admin/access-requests"], ["devices", "/admin/devices?paged=1"], ["organizations", "/admin/organizations"]]) {
     api.mockClear(); await reload(view); expect(api).toHaveBeenCalledExactlyOnceWith(path);
   }
   const timeout = Object.assign(new Error("signal timed out"), { name: "TimeoutError" });
@@ -1288,7 +1393,8 @@ test("Admin polls only the lightweight dashboard and uses live coordination pres
   expect(admin).toContain('reload("dashboard", true)');
   expect(admin).not.toContain("window.setInterval(refresh, 30_000)");
   expect(server).toContain('db.collection("devices").where("updatedAt", ">=", onlineSince)');
-  expect(server).toContain("const presence = rows.empty ? [] : await db.getAll");
+  expect(server).toContain("return publicDevices(db, rows.docs);");
+  expect(readFileSync("services/licensing/src/devices.ts", "utf8")).toContain("const presence = rows.length ? await db.getAll");
 });
 
 test("Electron forwards punctuation, dead keys, numpad and every viewer virtual key", () => {

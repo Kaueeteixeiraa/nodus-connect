@@ -7,6 +7,8 @@ import { getFirestore } from "firebase-admin/firestore";
 import { LicenseEngine } from "./engine";
 import { firestoreLicenseStore } from "./firestore-store";
 import { LICENSE_DEFAULTS } from "../../../packages/licensing/src/index";
+import { devicePage } from "./devices";
+import { signalingRetention } from "./retention";
 import { assertFails, assertSucceeds, initializeTestEnvironment, type RulesTestEnvironment } from "@firebase/rules-unit-testing";
 
 const projectId = "demo-nodus-licensing";
@@ -32,6 +34,56 @@ describeRules("candidate Firestore licensing rules", () => {
   });
   beforeEach(() => environment.clearFirestore());
   afterAll(() => environment?.cleanup());
+
+  test("device pagination searches beyond 200 records and preserves cursor ordering and hardware blocks", async () => {
+    const app = initializeApp({ projectId }, "device-pagination-test");
+    try {
+      const db = getFirestore(app), now = Date.now();
+      for (let offset = 0; offset < 300; offset += 100) {
+        const batch = db.batch();
+        for (let index = offset; index < offset + 100; index++) {
+          const id = `device-${String(index).padStart(3, "0")}`, nodusId = String(100_000_000 + index);
+          batch.set(db.doc(`license_devices/${id}`), { id, nodusId, deviceName: `Estação ${index}`, uid: "owner", licenseId: `free-${id}`, status: "ACTIVE", activatedAt: now, lastSeenAt: now - index, tokenHash: "private", claimHash: "private", ...(index === 260 ? { deviceIdentityId: "blocked-hardware" } : {}) });
+          batch.set(db.doc(`devices/${nodusId}`), { status: "online", updatedAt: new Date(now).toISOString() });
+        }
+        await batch.commit();
+      }
+      await db.doc("license_device_identities/blocked-hardware").set({ status: "BLOCKED" });
+      const first = await devicePage(db, { query: "", filter: "all" });
+      expect(first.items).toHaveLength(10); expect(first.nextCursor).toBeTruthy();
+      const second = await devicePage(db, { cursor: first.nextCursor });
+      expect(second.items).toHaveLength(10);
+      expect(second.items.some(device => first.items.some(first => first.id === device.id))).toBe(false);
+      const old = await devicePage(db, { query: "estacao260", filter: "BLOCKED" });
+      expect(old.items).toHaveLength(1); expect(old.items[0]).toMatchObject({ id: "device-260", status: "BLOCKED" });
+      expect(old.items[0]).not.toHaveProperty("tokenHash"); expect(old.items[0]).not.toHaveProperty("claimHash");
+      expect(old.nextCursor).toBeNull();
+      const exact = await devicePage(db, { query: "100 000 260", filter: "BLOCKED" });
+      expect(exact.items.map(device => device.id)).toEqual(["device-260"]);
+      expect(exact.nextCursor).toBeNull();
+      await expect(devicePage(db, { cursor: "invalid" })).rejects.toMatchObject({ code: "INVALID_INPUT" });
+    } finally { await deleteApp(app); }
+  }, 30_000);
+
+  test("bounded retention removes only old signaling and requests and coalesces cleanup between instances", async () => {
+    const app = initializeApp({ projectId }, "signaling-retention-test");
+    try {
+      const db = getFirestore(app), now = Date.now(), old = new Date(now - 86_400_001).toISOString(), fresh = new Date(now).toISOString();
+      const paths = ["sessionRequests/old", "sessions/old/signals/123456789/items/old"];
+      for (const path of paths) await db.doc(path).set({ createdAt: old });
+      for (const path of ["sessionRequests/fresh", "sessions/fresh/signals/123456789/items/fresh"]) await db.doc(path).set({ createdAt: fresh });
+      await db.doc("license_licenses/free-original").set({ trialUsed: 85, trialLimit: 10_000 });
+      await db.doc("license_access_blocks/123456789").set({ blocked: true });
+      const clean = signalingRetention(db, () => now);
+      await Promise.all([clean(), clean(), signalingRetention(db, () => now)()]);
+      for (const path of paths) expect((await db.doc(path).get()).exists).toBe(false);
+      expect((await db.doc("sessionRequests/fresh").get()).exists).toBe(true);
+      expect((await db.doc("sessions/fresh/signals/123456789/items/fresh").get()).exists).toBe(true);
+      expect((await db.doc("license_licenses/free-original").get()).data()).toEqual({ trialUsed: 85, trialLimit: 10_000 });
+      expect((await db.doc("license_access_blocks/123456789").get()).get("blocked")).toBe(true);
+      await clean();
+    } finally { await deleteApp(app); }
+  }, 30_000);
 
   test("real Firestore transactions preserve reinstall quotas, serialize final access and detach cancelled company aliases", async () => {
     const app = initializeApp({ projectId }, "identity-transaction-test");

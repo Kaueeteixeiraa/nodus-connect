@@ -10,6 +10,8 @@ const { pathToFileURL } = require("node:url");
 const { createDeviceIdentityStore, createWindowsIdentityRecovery, collectHardwareIdentity } = require("./device-identity.cjs");
 let licenseIdentityPromise;
 const { createLogWriter } = require("./log-writer.cjs");
+const { createFileStorage } = require("./file-storage.cjs");
+const fileStorage = createFileStorage(() => app.getPath("documents"));
 const { RemoteCursorVisibility } = require("./remote-cursor-visibility.cjs");
 const { RemoteWindowsKeys } = require("./remote-windows-keys.cjs");
 const supportPackages = require("./quick-support.cjs");
@@ -231,6 +233,7 @@ function createMainWindow() {
     setRemoteControlActive(false);
     hostCursorVisibility?.setActive(false);
     stopNativeMediaForOwner(mainWebContentsId, true);
+    fileStorage.release(mainWebContentsId).catch(() => undefined);
   };
   mainWindow.webContents.on("render-process-gone", releaseRendererResources);
   mainWindow.webContents.on("destroyed", releaseRendererResources);
@@ -602,6 +605,10 @@ function setupIpc() {
     return shell.openExternal(url.toString());
   });
   ipcMain.handle("nodus:save-received-file", (_event, payload) => saveReceivedFile(payload));
+  for (const method of ["begin", "append", "finish", "cancel"]) ipcMain.handle(`nodus:file-${method}`, (event, ...args) => {
+    if (!isMainAppSender(event)) throw new Error("UNAUTHORIZED");
+    return fileStorage[method](event.sender.id, ...args);
+  });
   ipcMain.handle("nodus:wake-on-lan", (_event, macAddress) => wakeOnLan(macAddress));
   ipcMain.handle("nodus:open-diagnostics", () => shell.showItemInFolder(path.join(app.getPath("userData"), "logs", "desktop.log")));
   ipcMain.handle("nodus:write-diagnostic", (_event, message) => appendLog(String(message || "").slice(0, 2000)));
@@ -655,6 +662,7 @@ async function checkAndInstallUpdate(sender, automatic = false) {
     if (!fs.existsSync(setup) || await hashFile(setup) !== update.sha256) {
       await downloadVerifiedFile(update.url, setup, update.sha256, update.size, percent => progress("downloading", percent));
     }
+    await desktopUpdates.pruneCache(cache, path.basename(setup)).catch(() => undefined);
     if (activeSessionCount) return { ok: false, error: "Encerre as sessões remotas antes de atualizar." };
     if (automatic) {
       const approved = await releasedStartupUpdate();
@@ -724,6 +732,7 @@ async function generateSupportPackage(input) {
       const url = `https://github.com/Kaueeteixeiraa/nodus-connect/releases/download/v${version}/Nodus-QuickSupport-${version}.exe`;
       await downloadVerifiedFile(url, source, profile.template.sha256);
     }
+    await desktopUpdates.pruneCache(path.dirname(source), path.basename(source)).catch(() => undefined);
   }
   const result = await dialog.showSaveDialog(mainWindow, { title: "Salvar suporte portatil", defaultPath: `${profile.name.replace(/[^a-zA-Z0-9_-]/g, "-")}.exe`, filters: [{ name: "Aplicativo Windows", extensions: ["exe"] }] });
   if (result.canceled || !result.filePath) return { canceled: true };

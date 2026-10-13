@@ -461,6 +461,20 @@ describe("QuickSupport licensing", { timeout: 15000 }, () => {
 });
 
 describe("server licensing", () => {
+  test("public policy checks coalesce and expire without caching session authorization", async () => {
+    const f = await fixture();
+    f.store.reads = 0; const writes = f.store.writes;
+    const policies = await Promise.all(Array.from({ length: 20 }, () => f.engine.policy(true)));
+    expect(policies.every(policy => policy.enforced)).toBe(true);
+    expect(f.store.reads).toBe(1); expect(f.store.writes).toBe(writes);
+    (f.store.data.get("license_policy/current") as any).enforced = false;
+    expect((await f.engine.policy()).enforced).toBe(false);
+    expect((await f.engine.policy(true)).enforced).toBe(true);
+    f.engine.invalidatePolicyCache();
+    expect((await f.engine.policy(true)).enforced).toBe(false);
+    f.advance(30_001); await f.engine.policy(true);
+    expect(f.store.reads).toBe(4);
+  });
   test("tracking continues before enforcement, counts once and blocks only after rollout", async () => {
     const f = await fixture();
     f.store.data.set("license_policy/current", { ...LICENSE_DEFAULTS, enforced: false });

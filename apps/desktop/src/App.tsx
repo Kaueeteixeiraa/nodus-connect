@@ -101,6 +101,7 @@ import {
   subscribeCloudDevicePresence,
   subscribeCloudAccessBlock,
   subscribeCloudSignals,
+  subscribeCloudRequest,
   getCloudUsageDiagnostics,
   PENDING_REQUEST_TTL_MS,
 } from "./core/firebase";
@@ -288,6 +289,7 @@ type IncomingFileTransfer = {
   mime: string;
   received: number;
   chunks: BlobPart[];
+  saveId?: string;
 };
 type FileControlMessage =
   | { type: "file-key"; publicKey: string }
@@ -295,6 +297,7 @@ type FileControlMessage =
   | { type: "file-end"; id: string }
   | { type: "file-saved"; id: string; name: string }
   | { type: "file-error"; id: string; message: string };
+type FileFlowMessage = { type: "file-flow"; paused: boolean };
 
 const navItems: Array<{ view: View; label: string; icon: LucideIcon }> = [
   { view: "connection", label: "Conexão", icon: Monitor },
@@ -399,6 +402,8 @@ export function App({ initialIdentity, supportProfile = null }: { initialIdentit
   const fileCryptoRef = useRef(new Map<string, { local: FileCryptoSession; remote: Promise<CryptoKey> | null }>());
   const fileCryptoSessionsRef = useRef(new Map<string, Promise<FileCryptoSession>>());
   const incomingFilesRef = useRef(new Map<string, IncomingFileTransfer>());
+  const sendingFilesRef = useRef(new Set<string>());
+  const pausedFilesRef = useRef(new Set<string>());
   const pendingPointerRef = useRef<{ sessionId: string; x: number; y: number; eventAt: number } | null>(null);
   const pointerFrameRef = useRef(0);
   const pressedPointerButtonsRef = useRef(new Set<number>());
@@ -460,7 +465,7 @@ export function App({ initialIdentity, supportProfile = null }: { initialIdentit
   const capturePoolRef = useRef(new CapturePool());
   const captureQueueRef = useRef<Promise<void>>(Promise.resolve());
   const captureCleanupRef = useRef(new Map<string, () => void>());
-  const recordingRef = useRef(new Map<string, { recorder: MediaRecorder; chunks: BlobPart[]; cleanup: () => void }>());
+  const recordingRef = useRef(new Map<string, { recorder: MediaRecorder; cleanup: () => void }>());
   const autoAcceptingRef = useRef(new Set<string>());
   const processedSignalsRef = useRef(new Set<string>());
   const lastIncomingAlertRef = useRef("");
@@ -695,8 +700,10 @@ export function App({ initialIdentity, supportProfile = null }: { initialIdentit
     if (!identity.deviceNameConfirmed) return;
 
     let disposed = false;
+    let presencePending = false;
 
     async function syncPresence() {
+      presencePending = true;
       try {
         setServiceState("connecting");
         await registerPresence(identity);
@@ -704,18 +711,20 @@ export function App({ initialIdentity, supportProfile = null }: { initialIdentit
       } catch (error) {
         if (error instanceof Error && error.message === "NODUS_ID_CONFLICT") logDiagnostic(`identity-conflict nodusId=${identity.nodusId} preserved=true`);
         if (!disposed) setServiceState(navigator.onLine ? "error" : "offline");
-      }
+      } finally { presencePending = false; }
     }
 
     syncPresence();
     const timer = window.setInterval(async () => {
+      if (disposed || presencePending) return;
+      presencePending = true;
       try {
         await heartbeat(identity);
         if (!disposed) setServiceState("online");
       } catch {
         if (!disposed) setServiceState(navigator.onLine ? "error" : "offline");
-      }
-    }, 15_000);
+      } finally { presencePending = false; }
+    }, 30_000);
 
     return () => {
       disposed = true;
@@ -809,7 +818,7 @@ export function App({ initialIdentity, supportProfile = null }: { initialIdentit
     if (firebaseConfigured()) {
       let disposed = false;
       // Recover an acceptance delivered before React published the pending request.
-      getSessionRequest(outgoingRequest.id).then(request => { if (!disposed) handleRequestUpdate(request); }).catch(() => undefined);
+      const watch = subscribeCloudRequest(outgoingRequest.id, request => { if (!disposed) handleRequestUpdate(request); });
       const timer = window.setTimeout(() => {
         if (outgoingRequestRef.current?.id !== outgoingRequest.id) return;
         outgoingRequestRef.current = null;
@@ -817,7 +826,7 @@ export function App({ initialIdentity, supportProfile = null }: { initialIdentit
         setFeedback("Solicitacao expirada. Tente novamente.");
         scheduleConnectionReset();
       }, Math.max(0, PENDING_REQUEST_TTL_MS - (Date.now() - Date.parse(outgoingRequest.createdAt))));
-      return () => { disposed = true; window.clearTimeout(timer); };
+      return () => { disposed = true; watch.close(); window.clearTimeout(timer); };
     }
     const timer = window.setInterval(async () => {
       try {
@@ -1646,6 +1655,7 @@ export function App({ initialIdentity, supportProfile = null }: { initialIdentit
     const current = qualityTimersRef.current.get(sessionId);
     if (current) window.clearInterval(current);
     let inspecting = false;
+    let lastDetailedLogAt = -Infinity;
     const inspect = async () => {
       if (peer.connectionState === "closed" || inspecting) return;
       inspecting = true;
@@ -1900,6 +1910,11 @@ export function App({ initialIdentity, supportProfile = null }: { initialIdentit
               packetLossPct: lossPct, packetLossPctValid: measuredLossPct !== null } satisfies RemoteInputMessage));
           }
         }
+        const previousLogState = performanceEventStateRef.current.get(sessionId);
+        const logChanged = !previousLogState || previousLogState.bottleneck !== metrics.bottleneck || previousLogState.quality !== quality || previousLogState.route !== route || previousLogState.encoder !== metrics.encoder;
+        const detailedLogDue = Boolean(performanceDiagnosticRef.current) || logChanged || now - lastDetailedLogAt >= 5_000;
+        if (detailedLogDue) {
+        lastDetailedLogAt = now;
         logMediaDiagnostic(`media-stats id=${sessionId} role=${role} capture=${captureFps} encoded=${encodedFps} sent=${sentFps} received=${receivedFps} decoded=${decodedFps} bitrate=${bitrateKbps} encodeMs=${encodeMs} dropped=${droppedFrames} limit=${limitation} encoder=${encoder || "pending"}`);
         const videoSender = role === "host" ? peer.getSenders().find((item) => item.track?.kind === "video") : undefined;
         const senderParameters = videoSender?.getParameters();
@@ -1958,6 +1973,7 @@ export function App({ initialIdentity, supportProfile = null }: { initialIdentit
           gpu: { adapter: gpuDiagnosticsRef.current?.adapter || "", videoEncode: gpuDiagnosticsRef.current?.videoEncode || "unknown", videoDecode: gpuDiagnosticsRef.current?.videoDecode || "unknown", gpuCompositing: gpuDiagnosticsRef.current?.gpuCompositing || "unknown", gpuProcessAvailable: gpuDiagnosticsRef.current?.gpuProcessAvailable ?? null, hardwareH264Available: nativeCaptureStatusRef.current?.hardwareH264 ?? null },
           counters: role === "host" ? { captured, encoded, sent, packetsSent } : { received: receivedFrames, decoded, rendered: render?.presented ?? 0, dropped },
         })).catch(() => undefined);
+        }
         const previousEventState = performanceEventStateRef.current.get(sessionId);
         const eventState = { bottleneck: metrics.bottleneck, quality, route, encoder: metrics.encoder };
         if (previousEventState) {
@@ -2353,18 +2369,46 @@ export function App({ initialIdentity, supportProfile = null }: { initialIdentit
     };
     channel.onclose = () => {
       fileCryptoRef.current.delete(sessionId);
+      pausedFilesRef.current.delete(sessionId);
+      incomingFilesRef.current.forEach((transfer, id) => {
+        if (transfer.sessionId !== sessionId) return;
+        if (transfer.saveId) window.nodusDesktop?.cancelFileSave(transfer.saveId).catch(() => undefined);
+        incomingFilesRef.current.delete(id);
+        patchFileTransfer(id, { status: "error", error: "Conexão encerrada antes de concluir o arquivo." });
+      });
       setFileChannelReady((current) => ({ ...current, [sessionId]: false }));
     };
+    let queue = Promise.resolve(), pendingBytes = 0, paused = false;
     channel.onmessage = (event) => {
-      handleFileTransferMessage(sessionId, remoteName, event.data).catch(() => {
-        updateRuntime(sessionId, { error: "Nao foi possivel receber o arquivo." });
+      const size = typeof event.data === "string" ? event.data.length : event.data.byteLength ?? event.data.size ?? 0;
+      if (pendingBytes + size > 16 * 1024 * 1024) { channel.close(); return; }
+      pendingBytes += size;
+      if (!paused && pendingBytes > 1024 * 1024 && channel.readyState === "open") {
+        paused = true; channel.send(JSON.stringify({ type: "file-flow", paused: true } satisfies FileFlowMessage));
+      }
+      queue = queue.then(async () => {
+        if (channel.readyState === "closed") return;
+        await handleFileTransferMessage(sessionId, remoteName, event.data);
+      }).catch(() => {
+        updateRuntime(sessionId, { error: "Não foi possível receber o arquivo." });
+        channel.close();
+      }).finally(() => {
+        pendingBytes -= size;
+        if (paused && pendingBytes < 256 * 1024 && channel.readyState === "open") {
+          paused = false; channel.send(JSON.stringify({ type: "file-flow", paused: false } satisfies FileFlowMessage));
+        }
       });
     };
   }
 
   async function handleFileTransferMessage(sessionId: string, remoteName: string, data: unknown) {
     if (typeof data === "string") {
-      const message = JSON.parse(data) as FileControlMessage;
+      const message = JSON.parse(data) as FileControlMessage | FileFlowMessage;
+      if (message.type === "file-flow") {
+        if (message.paused === true) pausedFilesRef.current.add(sessionId);
+        else if (message.paused === false) pausedFilesRef.current.delete(sessionId);
+        return;
+      }
       if (message.type === "file-key") {
         const local = await fileCryptoSessionsRef.current.get(sessionId);
         if (!local) throw new Error("Sessao de arquivos indisponivel.");
@@ -2373,7 +2417,8 @@ export function App({ initialIdentity, supportProfile = null }: { initialIdentit
         return;
       }
       if (message.type === "file-meta") {
-        if (!Number.isFinite(message.size) || message.size < 0 || message.size > MAX_FILE_SIZE) {
+        if (!Number.isSafeInteger(message.size) || message.size < 0 || message.size > MAX_FILE_SIZE
+          || incomingFilesRef.current.has(message.id) || [...incomingFilesRef.current.values()].some(item => item.sessionId === sessionId)) {
           fileChannelsRef.current.get(sessionId)?.send(JSON.stringify({ type: "file-error", id: message.id, message: "Arquivo maior que 256 MB." } satisfies FileControlMessage));
           return;
         }
@@ -2387,6 +2432,10 @@ export function App({ initialIdentity, supportProfile = null }: { initialIdentit
           received: 0,
           chunks: [],
         };
+        if (window.nodusDesktop?.beginFileSave) {
+          transfer.saveId = (await window.nodusDesktop.beginFileSave(message.name, message.size)).id;
+          if (fileChannelsRef.current.get(sessionId)?.readyState !== "open") { await window.nodusDesktop.cancelFileSave(transfer.saveId); return; }
+        }
         incomingFilesRef.current.set(message.id, transfer);
         upsertFileTransfer({
           id: message.id,
@@ -2402,33 +2451,44 @@ export function App({ initialIdentity, supportProfile = null }: { initialIdentit
       }
       if (message.type === "file-end") {
         const transfer = incomingFilesRef.current.get(message.id);
-        if (!transfer) return;
-        const blob = new Blob(transfer.chunks, { type: transfer.mime });
-        const saved = window.nodusDesktop ? await window.nodusDesktop.saveReceivedFile(transfer.fileName, await blob.arrayBuffer()) : null;
+        if (!transfer || transfer.sessionId !== sessionId) return;
+        if (transfer.received !== transfer.size) throw new Error("FILE_SIZE_MISMATCH");
+        const blob = transfer.saveId ? null : new Blob(transfer.chunks, { type: transfer.mime });
+        const saved = transfer.saveId ? await window.nodusDesktop!.finishFileSave(transfer.saveId)
+          : window.nodusDesktop ? await window.nodusDesktop.saveReceivedFile(transfer.fileName, await blob!.arrayBuffer()) : null;
         if (saved && !saved.ok) {
           incomingFilesRef.current.delete(message.id);
           patchFileTransfer(message.id, { status: "error", error: "Não foi possível salvar em Documentos." });
           fileChannelsRef.current.get(sessionId)?.send(JSON.stringify({ type: "file-error", id: message.id, message: "O computador remoto não conseguiu salvar o arquivo." } satisfies FileControlMessage));
           return;
         }
-        const url = URL.createObjectURL(blob);
+        const url = blob ? URL.createObjectURL(blob) : undefined;
         incomingFilesRef.current.delete(message.id);
         patchFileTransfer(message.id, { status: "received", progress: 100, url, savedPath: saved?.name ? `Documentos\\${saved.name}` : undefined });
         if (saved?.name) fileChannelsRef.current.get(sessionId)?.send(JSON.stringify({ type: "file-saved", id: message.id, name: saved.name } satisfies FileControlMessage));
       }
       if (message.type === "file-saved") patchFileTransfer(message.id, { status: "sent", progress: 100, savedPath: `Documentos\\${message.name}` });
-      if (message.type === "file-error") patchFileTransfer(message.id, { status: "error", error: message.message });
+      if (message.type === "file-error") {
+        const transfer = incomingFilesRef.current.get(message.id);
+        if (transfer?.sessionId === sessionId) {
+          if (transfer.saveId) await window.nodusDesktop?.cancelFileSave(transfer.saveId);
+          incomingFilesRef.current.delete(message.id);
+        }
+        patchFileTransfer(message.id, { status: "error", error: message.message });
+      }
       return;
     }
 
-    const transfer = [...incomingFilesRef.current.values()].find((item) => item.sessionId === sessionId && item.received < item.size);
+    const transfer = [...incomingFilesRef.current.values()].find((item) => item.sessionId === sessionId);
     if (!transfer) return;
     const chunk = data instanceof Blob ? await data.arrayBuffer() : data instanceof ArrayBuffer ? data : null;
     if (!chunk) return;
     const keyPromise = fileCryptoRef.current.get(sessionId)?.remote;
     if (!keyPromise) throw new Error("A criptografia da transferencia ainda nao esta pronta.");
     const decrypted = await decryptFileChunk(await keyPromise, chunk);
-    transfer.chunks.push(decrypted);
+    if (transfer.received + decrypted.byteLength > transfer.size) throw new Error("FILE_SIZE_MISMATCH");
+    if (transfer.saveId) await window.nodusDesktop!.appendFileSave(transfer.saveId, decrypted);
+    else transfer.chunks.push(decrypted);
     transfer.received += decrypted.byteLength;
     patchFileTransfer(transfer.id, { progress: Math.min(99, Math.round((transfer.received / transfer.size) * 100)) });
   }
@@ -2447,6 +2507,9 @@ export function App({ initialIdentity, supportProfile = null }: { initialIdentit
       setFeedback("O limite por arquivo e 256 MB.");
       return;
     }
+    const sessionId = activeSession.sessionId;
+    if (sendingFilesRef.current.has(sessionId)) { setFeedback("Aguarde o envio atual terminar."); return; }
+    sendingFilesRef.current.add(sessionId);
 
     const id = crypto.randomUUID();
     upsertFileTransfer({
@@ -2479,15 +2542,23 @@ export function App({ initialIdentity, supportProfile = null }: { initialIdentit
     } catch {
       channel.readyState === "open" && channel.send(JSON.stringify({ type: "file-error", id, message: "Envio cancelado." } satisfies FileControlMessage));
       patchFileTransfer(id, { status: "error", error: "Nao foi possivel enviar." });
-    }
+    } finally { sendingFilesRef.current.delete(sessionId); }
   }
 
   function upsertFileTransfer(record: FileTransferRecord) {
-    setFileTransfers((current) => [record, ...current.filter((item) => item.id !== record.id)].slice(0, 30));
+    setFileTransfers((current) => {
+      const next = [record, ...current.filter(item => item.id !== record.id)].slice(0, 30);
+      current.filter(item => item.url && !next.some(kept => kept.url === item.url)).forEach(item => URL.revokeObjectURL(item.url!));
+      return next;
+    });
   }
 
   function patchFileTransfer(id: string, patch: Partial<FileTransferRecord>) {
-    setFileTransfers((current) => current.map((item) => (item.id === id ? { ...item, ...patch } : item)));
+    setFileTransfers((current) => {
+      const item = current.find(item => item.id === id);
+      if (!item || Object.entries(patch).every(([key, value]) => item[key as keyof FileTransferRecord] === value)) return current;
+      return current.map(item => item.id === id ? { ...item, ...patch } : item);
+    });
   }
 
   async function waitForFileChannel(channel: RTCDataChannel, sessionId: string) {
@@ -2496,7 +2567,7 @@ export function App({ initialIdentity, supportProfile = null }: { initialIdentit
         const other = ref.current.get(sessionId);
         return other?.readyState === "open" && other.bufferedAmount > (ref === pointerChannelsRef ? 64 : 8 * 1024);
       });
-      if (channel.bufferedAmount <= 128 * 1024 && !competing) break;
+      if (channel.bufferedAmount <= 128 * 1024 && !competing && !pausedFilesRef.current.has(sessionId)) break;
       await new Promise((resolve) => window.setTimeout(resolve, 16));
     }
     if (channel.readyState !== "open") throw new Error("Conexao encerrada.");
@@ -2802,7 +2873,10 @@ export function App({ initialIdentity, supportProfile = null }: { initialIdentit
     fileCryptoRef.current.delete(sessionId);
     fileCryptoSessionsRef.current.delete(sessionId);
     incomingFilesRef.current.forEach((value, key) => {
-      if (value.sessionId === sessionId) incomingFilesRef.current.delete(key);
+      if (value.sessionId === sessionId) {
+        if (value.saveId) window.nodusDesktop?.cancelFileSave(value.saveId).catch(() => undefined);
+        incomingFilesRef.current.delete(key);
+      }
     });
     setFileChannelReady((current) => ({ ...current, [sessionId]: false }));
     peersRef.current.get(sessionId)?.close();
@@ -3315,6 +3389,7 @@ export function App({ initialIdentity, supportProfile = null }: { initialIdentit
     }
     let microphone: MediaStream | null = null;
     let audioContext: AudioContext | null = null;
+    let saveId: string | undefined;
     const ownedTracks: MediaStreamTrack[] = [];
     try {
       if (audioMode === "microphone" || audioMode === "both") microphone = await navigator.mediaDevices.getUserMedia({ video: false, audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
@@ -3336,15 +3411,57 @@ export function App({ initialIdentity, supportProfile = null }: { initialIdentit
         [...new Set(ownedTracks)].forEach((track) => track.stop());
         audioContext?.close().catch(() => undefined);
       };
-      const entry = { recorder, chunks: [] as BlobPart[], cleanup };
+      const entry = { recorder, cleanup };
       recordingRef.current.set(sessionId, entry);
-      recorder.ondataavailable = (event) => event.data.size && entry.chunks.push(event.data);
-      recorder.onstop = () => {
+      if (window.nodusDesktop?.beginFileSave) saveId = (await window.nodusDesktop.beginFileSave(`Nodus-${new Date().toISOString().replace(/[:.]/g, "-")}.webm`, 4 * 1024 ** 3, true)).id;
+      if (recordingRef.current.get(sessionId) !== entry) {
+        if (saveId) await window.nodusDesktop?.cancelFileSave(saveId);
+        cleanup(); return;
+      }
+      let writes = Promise.resolve(), queuedBytes = 0, totalBytes = 0, failed = false;
+      const chunks: BlobPart[] = [];
+      recorder.ondataavailable = (event) => {
+        if (!event.data.size || failed) return;
+        totalBytes += event.data.size;
+        if (!saveId) {
+          chunks.push(event.data);
+          if (totalBytes >= MAX_FILE_SIZE && recorder.state !== "inactive") recorder.stop();
+          return;
+        }
+        queuedBytes += event.data.size;
+        if (queuedBytes > 8 * 1024 * 1024 && recorder.state === "recording") recorder.pause();
+        writes = writes.then(async () => {
+          if (failed) return;
+          for (let offset = 0; offset < event.data.size; offset += 256 * 1024) {
+            await window.nodusDesktop!.appendFileSave(saveId!, await event.data.slice(offset, offset + 256 * 1024).arrayBuffer());
+          }
+        }).catch(() => {
+          failed = true;
+          updateRuntime(sessionId, { error: "Não foi possível salvar a gravação no disco." });
+          if (recorder.state !== "inactive") recorder.stop();
+        }).finally(() => {
+          queuedBytes -= event.data.size;
+          if (!failed && queuedBytes < 2 * 1024 * 1024 && recorder.state === "paused") recorder.resume();
+        });
+      };
+      recorder.onstop = async () => {
         cleanup();
         recordingRef.current.delete(sessionId);
         setRecordingSessionId((current) => current === sessionId ? null : current);
-        if (!entry.chunks.length) return;
-        const url = URL.createObjectURL(new Blob(entry.chunks, { type: recorder.mimeType || "video/webm" }));
+        await writes;
+        if (saveId) {
+          try {
+            if (failed || !totalBytes) { await window.nodusDesktop!.cancelFileSave(saveId); return; }
+            const saved = await window.nodusDesktop!.finishFileSave(saveId);
+            setFeedback(`Gravação salva em Documentos: ${saved.name}`);
+          } catch {
+            await window.nodusDesktop!.cancelFileSave(saveId).catch(() => undefined);
+            updateRuntime(sessionId, { error: "Não foi possível concluir a gravação." });
+          }
+          return;
+        }
+        if (!chunks.length) return;
+        const url = URL.createObjectURL(new Blob(chunks, { type: recorder.mimeType || "video/webm" }));
         const link = document.createElement("a");
         link.href = url;
         link.download = `Nodus-${new Date().toISOString().replace(/[:.]/g, "-")}.webm`;
@@ -3355,6 +3472,7 @@ export function App({ initialIdentity, supportProfile = null }: { initialIdentit
       setRecordingSessionId(sessionId);
     } catch {
       recordingRef.current.delete(sessionId);
+      if (saveId) window.nodusDesktop?.cancelFileSave(saveId).catch(() => undefined);
       [...new Set(ownedTracks)].forEach((track) => track.stop());
       microphone?.getTracks().forEach((track) => track.stop());
       audioContext?.close().catch(() => undefined);

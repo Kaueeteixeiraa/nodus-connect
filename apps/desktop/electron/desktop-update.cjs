@@ -33,4 +33,23 @@ function verifyPolicy(token, key, now = Date.now()) {
   } catch { throw new Error("INVALID_UPDATE_POLICY"); }
 }
 
-module.exports = { updateRelease, signPolicy, verifyPolicy };
+async function pruneCache(directory, protectedName) {
+  const fs = require("node:fs/promises"), path = require("node:path");
+  const root = path.resolve(directory);
+  if (root === path.parse(root).root) throw new Error("INVALID_CACHE_DIRECTORY");
+  const executables = [];
+  for (const name of await fs.readdir(root).catch(error => { if (error.code === "ENOENT") return []; throw error; })) {
+    const file = path.resolve(root, name);
+    if (path.dirname(file) !== root || name === protectedName) continue;
+    const entry = await fs.lstat(file).catch(() => null);
+    if (!entry?.isFile() || entry.isSymbolicLink()) continue;
+    if (/^[a-f0-9]{64}\.exe$/.test(name)) executables.push({ file, modified: entry.mtimeMs });
+    else if (/^[a-f0-9]{64}\.exe\.[a-f0-9-]{36}\.tmp$/.test(name) && Date.now() - entry.mtimeMs > 86_400_000) await fs.unlink(file).catch(() => undefined);
+  }
+  executables.sort((a, b) => b.modified - a.modified);
+  for (const entry of executables.slice(protectedName ? 1 : 2)) {
+    if (Date.now() - entry.modified >= 3_600_000) await fs.unlink(entry.file).catch(() => undefined);
+  }
+}
+
+module.exports = { updateRelease, signPolicy, verifyPolicy, pruneCache };

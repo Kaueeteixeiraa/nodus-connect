@@ -15,7 +15,7 @@ const config = {
   messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID,
   appId: import.meta.env.VITE_FIREBASE_APP_ID,
 };
-const DEVICE_ONLINE_TTL_MS = 45_000;
+const DEVICE_ONLINE_TTL_MS = 90_000;
 export const PENDING_REQUEST_TTL_MS = 5 * 60_000;
 const cloudUsage = { readRequests: 0, writeRequests: 0, listenerStarts: 0, serverSnapshots: 0, documentsDelivered: 0, minimumReadEstimate: 0, errors: 0 };
 
@@ -257,8 +257,8 @@ export async function cloudListIncomingRequests(nodusIdInput: string): Promise<S
   const nodusId = normalizeNodusId(nodusIdInput);
   if (!nodusId) throw new Error("Nodus ID invalido");
   if (!uid) throw new Error("Conta indisponivel.");
-  const { collection, getDocs, query, store, where } = await fire();
-  const snapshot = await getDocs(query(collection(store, "sessionRequests"), where("targetNodusId", "==", nodusId), where("targetUid", "==", uid)));
+  const { collection, getDocs, query, store, where, orderBy, limit } = await fire();
+  const snapshot = await getDocs(query(collection(store, "sessionRequests"), where("targetNodusId", "==", nodusId), where("targetUid", "==", uid), where("status", "==", "pending"), where("createdAt", ">=", new Date(Date.now() - PENDING_REQUEST_TTL_MS).toISOString()), orderBy("createdAt", "desc"), limit(100)));
   return snapshot.docs
     .map((item) => item.data() as SessionRequestRecord)
     .filter((item) => item.status === "pending" && isFresh(item.createdAt, PENDING_REQUEST_TTL_MS))
@@ -406,9 +406,9 @@ export function subscribeCloudRealtime(
     ensureDeviceUid().then(async (uid) => {
       if (closed || current !== generation) return;
       if (!uid) throw new Error("Conta indisponivel.");
-      const { collection, onSnapshot, query, store, where } = await fire();
+      const { collection, onSnapshot, query, store, where, orderBy, limit } = await fire();
       if (closed || current !== generation) return;
-      unsubscribes.push(onSnapshot(query(collection(store, "sessionRequests"), where("targetNodusId", "==", nodusId), where("targetUid", "==", uid)), { includeMetadataChanges: true }, (snapshot) => {
+      unsubscribes.push(onSnapshot(query(collection(store, "sessionRequests"), where("targetNodusId", "==", nodusId), where("targetUid", "==", uid), where("status", "==", "pending"), where("createdAt", ">=", new Date(Date.now() - PENDING_REQUEST_TTL_MS).toISOString()), orderBy("createdAt", "desc"), limit(100)), { includeMetadataChanges: true }, (snapshot) => {
         if (closed || current !== generation) return;
         handlers.onState?.(snapshot.metadata.fromCache ? "connecting" : "online");
         if (!snapshot.metadata.fromCache) retries = 0;
@@ -423,12 +423,6 @@ export function subscribeCloudRealtime(
           if (change.type !== "removed" && request.status === "pending" && isFresh(request.createdAt, PENDING_REQUEST_TTL_MS)) handlers.onIncomingRequest?.(request);
         });
       }, onError));
-      unsubscribes.push(onSnapshot(query(collection(store, "sessionRequests"), where("requesterNodusId", "==", nodusId), where("requesterUid", "==", uid)), (snapshot) => {
-        if (closed || current !== generation) return;
-        snapshot.docChanges().forEach((change) => {
-          if (change.type !== "removed") handlers.onRequestUpdate?.(change.doc.data() as SessionRequestRecord);
-        });
-      }, onError));
     }).catch(onError);
   };
   open();
@@ -437,6 +431,18 @@ export function subscribeCloudRealtime(
     clearTimeout(retryTimer);
     unsubscribes.forEach((unsubscribe) => unsubscribe());
   } };
+}
+
+export function subscribeCloudRequest(id: string, onUpdate: (request: SessionRequestRecord) => void): { close(): void } {
+  let closed = false, unsubscribe: Unsubscribe | undefined;
+  void ensureDeviceUid().then(async () => {
+    const { doc, onSnapshot, store } = await fire();
+    if (closed) return;
+    unsubscribe = onSnapshot(doc(store, "sessionRequests", id), snapshot => {
+      if (!closed && snapshot.exists()) onUpdate(snapshot.data() as SessionRequestRecord);
+    }, () => undefined);
+  }).catch(() => undefined);
+  return { close() { closed = true; unsubscribe?.(); } };
 }
 
 function cloudDevice(identity: LocalIdentity, status: CoordinationDevice["status"], ownerUid: string | null): CoordinationDevice {

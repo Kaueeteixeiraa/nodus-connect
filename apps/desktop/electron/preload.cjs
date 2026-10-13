@@ -137,6 +137,10 @@ contextBridge.exposeInMainWorld("nodusDesktop", {
   saveReceivedFile(fileName, data) {
     return ipcRenderer.invoke("nodus:save-received-file", { fileName, data });
   },
+  beginFileSave(fileName, size, recording = false) { return ipcRenderer.invoke("nodus:file-begin", fileName, size, recording); },
+  appendFileSave(id, data) { return ipcRenderer.invoke("nodus:file-append", id, data); },
+  finishFileSave(id) { return ipcRenderer.invoke("nodus:file-finish", id); },
+  cancelFileSave(id) { return ipcRenderer.invoke("nodus:file-cancel", id); },
   wakeOnLan(macAddress) {
     return ipcRenderer.invoke("nodus:wake-on-lan", macAddress);
   },

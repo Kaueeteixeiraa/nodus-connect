@@ -50,6 +50,10 @@ interface Window {
     saveConnectionPassword(nodusId: string, password: string): Promise<{ ok: boolean }>;
     openExternal(url: string): Promise<void>;
     saveReceivedFile(fileName: string, data: ArrayBuffer): Promise<{ ok: boolean; path?: string; name?: string; error?: string }>;
+    beginFileSave(fileName: string, size: number, recording?: boolean): Promise<{ id: string }>;
+    appendFileSave(id: string, data: ArrayBuffer): Promise<{ bytes: number }>;
+    finishFileSave(id: string): Promise<{ ok: boolean; name: string; path: string; bytes: number }>;
+    cancelFileSave(id: string): Promise<void>;
     wakeOnLan(macAddress: string): Promise<{ ok: boolean; error?: string }>;
     openDiagnostics(): Promise<void>;
     writeDiagnostic(message: string): Promise<void>;
