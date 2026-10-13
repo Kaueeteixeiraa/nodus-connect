@@ -6,17 +6,20 @@ service cloud.firestore {
       return request.auth != null;
     }
     function licensingEnabled() {
-      return exists(/databases/$(database)/documents/license_policy/current)
-        && (get(/databases/$(database)/documents/license_policy/current).data.enforced == true
-          || ('identityEnabled' in get(/databases/$(database)/documents/license_policy/current).data
-            && get(/databases/$(database)/documents/license_policy/current).data.identityEnabled == true));
+      let policy = get(/databases/$(database)/documents/license_policy/current);
+      return policy != null && (policy.data.enforced == true
+        || policy.data.get('identityEnabled', false) == true);
+    }
+    function hardwareAllowed(nodusId) {
+      let binding = get(/databases/$(database)/documents/license_identity_bindings/$(nodusId));
+      return binding == null
+        || get(/databases/$(database)/documents/license_device_identities/$(binding.data.deviceIdentityId)).data.status == 'ACTIVE';
     }
     function initiatorAllowed(nodusId, uid) {
+      let block = get(/databases/$(database)/documents/license_access_blocks/$(nodusId));
       return get(/databases/$(database)/documents/devices/$(nodusId)).data.ownerUid == uid
-        && (!exists(/databases/$(database)/documents/license_access_blocks/$(nodusId))
-          || get(/databases/$(database)/documents/license_access_blocks/$(nodusId)).data.blocked != true)
-        && (!exists(/databases/$(database)/documents/license_identity_bindings/$(nodusId))
-          || get(/databases/$(database)/documents/license_device_identities/$(get(/databases/$(database)/documents/license_identity_bindings/$(nodusId)).data.deviceIdentityId)).data.status == 'ACTIVE');
+        && (block == null || block.data.blocked != true)
+        && hardwareAllowed(nodusId);
     }
     function readyGrant(sessionId) {
       let grant = get(/databases/$(database)/documents/license_session_grants/$(sessionId)).data;
@@ -30,7 +33,8 @@ service cloud.firestore {
     function licensedRequest(requestId) {
       let data = request.resource.data;
       let grant = get(/databases/$(database)/documents/license_session_grants/$(requestId)).data;
-      return data.sessionId == requestId && readyGrant(requestId)
+      return data.sessionId == requestId && grant.status == 'RESERVED'
+        && grant.expiresAt > request.time.toMillis()
         && grant.requesterUid == request.auth.uid && data.requesterUid == grant.requesterUid
         && data.targetUid == grant.targetUid && data.requesterNodusId == grant.requesterNodusId
         && data.targetNodusId == grant.targetNodusId

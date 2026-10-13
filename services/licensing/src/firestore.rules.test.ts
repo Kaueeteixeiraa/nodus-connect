@@ -195,6 +195,34 @@ describeRules("candidate Firestore licensing rules", () => {
     await assertSucceeds(source.doc("sessionRequests/reserved").set(request("reserved")));
   });
 
+  test("an active hardware-bound device creates a reserved request with an existing cleared block", async () => {
+    const sessionId = "bound-request";
+    await seed(true, sessionId);
+    await environment.withSecurityRulesDisabled(async context => {
+      const db = context.firestore();
+      await db.doc("license_policy/current").update({ identityEnabled: true });
+      await db.doc(`license_access_blocks/${requesterId}`).set({ blocked: false, uid: requesterUid });
+      await db.doc(`license_identity_bindings/${requesterId}`).set({ deviceIdentityId: "physical" });
+      await db.doc("license_device_identities/physical").set({ status: "ACTIVE" });
+    });
+    const source = environment.authenticatedContext(requesterUid).firestore();
+    await assertSucceeds(source.doc(`sessionRequests/${sessionId}`).set({ ...request(sessionId), requestedPermissions: ["screen:view", "mouse:control", "keyboard:control"], passwordHash: "", preferredResolution: "native", preferredFps: 60 }));
+    await environment.withSecurityRulesDisabled(async context => {
+      await context.firestore().doc(`sessionRequests/${sessionId}`).delete();
+      await context.firestore().doc(`license_access_blocks/${requesterId}`).set({ blocked: true });
+    });
+    await assertFails(source.doc(`sessionRequests/${sessionId}`).set(request(sessionId)));
+    await environment.withSecurityRulesDisabled(async context => context.firestore().doc(`license_access_blocks/${requesterId}`).set({ uid: requesterUid }));
+    await assertFails(source.doc(`sessionRequests/${sessionId}`).set(request(sessionId)));
+    await environment.withSecurityRulesDisabled(async context => {
+      await context.firestore().doc(`license_access_blocks/${requesterId}`).set({ blocked: false });
+      await context.firestore().doc("license_device_identities/physical").set({ status: "BLOCKED" });
+    });
+    await assertFails(source.doc(`sessionRequests/${sessionId}`).set(request(sessionId)));
+    await environment.withSecurityRulesDisabled(async context => context.firestore().doc("license_device_identities/physical").delete());
+    await assertFails(source.doc(`sessionRequests/${sessionId}`).set(request(sessionId)));
+  });
+
   test("a physical block follows the trusted binding without blocking incoming support", async () => {
     await seed(false);
     await environment.withSecurityRulesDisabled(async context => {
