@@ -573,6 +573,40 @@ describe("server licensing", () => {
   test("signed token rejects tampering and expiry", () => { const claims = { iss: "nodus-license", aud: "nodus-session", sessionId: "s", deviceId: "d", requesterUid: "a", targetUid: "b", requesterNodusId: "123456789", targetNodusId: "987654321", iat: 1000, exp: 2000 } as const; const token = signLease(claims, keys.privateKey); expect(verifyLease(token, keys.publicKey, 1500)).toEqual(claims); expect(() => verifyLease(token, keys.publicKey, 2000)).toThrow(); expect(() => verifyLease(token.replace(/^./, "x"), keys.publicKey, 1500)).toThrow(); });
 });
 
+describe("cancelled organization removal", () => {
+  test("requires recent admin access and refuses an active company", async () => {
+    const f = await fixture(), company = await f.business();
+    const writes = f.store.writes;
+    await expect(f.engine.archiveOrganization(f.actor, company.organizationId)).rejects.toMatchObject({ code: "FORBIDDEN" });
+    await expect(f.engine.archiveOrganization({ ...admin, recent: false }, company.organizationId)).rejects.toMatchObject({ code: "REAUTH_REQUIRED" });
+    await expect(f.engine.archiveOrganization(admin, company.organizationId)).rejects.toMatchObject({ code: "FORBIDDEN" });
+    await expect(f.engine.archiveOrganization(admin, "missing-company")).rejects.toMatchObject({ code: "INVALID_INPUT" });
+    expect(f.store.writes).toBe(writes);
+  });
+  test("archives a cancelled company once while preserving devices, slots, payments and the free counter", async () => {
+    const f = await fixture(), company = await f.business();
+    await f.reserve("previous-session"); await f.establish("previous-session");
+    await f.engine.modify(admin, company.licenseId, { status: "CANCELED" });
+    const license = structuredClone(f.store.data.get(`license_licenses/${company.licenseId}`)) as License;
+    const device = structuredClone(f.store.data.get("license_devices/device-source"));
+    const free = structuredClone(f.store.data.get("license_licenses/free-device-source"));
+    const payment = structuredClone(f.store.data.get("license_payments/manual-initial-payment"));
+    expect(await f.engine.archiveOrganization(admin, company.organizationId)).toMatchObject({ ok: true, duplicate: false });
+    expect(f.store.data.get(`license_organizations/${company.organizationId}`)).toMatchObject({ status: "ARCHIVED", archivedAt: f.time(), name: "Example", email: "owner@example.test" });
+    expect(f.store.data.get(`license_licenses/${company.licenseId}`)).toEqual({ ...license, keyRevoked: true, updatedAt: f.time() });
+    expect(f.store.data.get(`license_keys/${license.keyHash}`)).toMatchObject({ active: false });
+    expect(f.store.data.get("license_devices/device-source")).toEqual(device);
+    expect(f.store.data.get("license_licenses/free-device-source")).toEqual(free);
+    expect(f.store.data.get("license_payments/manual-initial-payment")).toEqual(payment);
+    const writes = f.store.writes;
+    expect(await f.engine.archiveOrganization(admin, company.organizationId)).toMatchObject({ duplicate: true });
+    expect(f.store.writes).toBe(writes);
+    expect([...f.store.data.values()].filter((row: any) => row.action === "ORGANIZATION_ARCHIVED")).toHaveLength(1);
+    await expect(f.engine.activate(f.actor, f.credentials, company.key)).rejects.toMatchObject({ code: "INVALID_LICENSE" });
+    await expect(f.reserve("new-session")).rejects.toMatchObject({ code: "LICENSE_REVOKED" });
+  });
+});
+
 async function httpFixture() {
   const f = await fixture();
   const providers = new Map<string, PaymentProvider>();

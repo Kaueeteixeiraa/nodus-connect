@@ -43,6 +43,7 @@ async function admin(actor: Actor, path: string, input: Record<string, unknown>)
   if (path === "GET /admin/desktop-update") return engine.desktopUpdatePolicy();
   if (path === "POST /admin/desktop-update") return engine.publishDesktopUpdate(actor, input.enabled, input.version);
   if (path === "POST /admin/organizations") return engine.createBusiness(actor, { name: text(input.name), email: text(input.email, 254) });
+  if (path === "POST /admin/organizations/archive") return engine.archiveOrganization(actor, validId(input.organizationId));
   if (path === "POST /admin/license") return engine.modify(actor, validId(input.licenseId), input.patch as Parameters<LicenseEngine["modify"]>[2]);
   if (path === "POST /admin/device") return engine.deviceStatus(actor, validId(input.deviceId), input.status as Parameters<LicenseEngine["deviceStatus"]>[2]);
   if (path === "POST /admin/device-identity") return engine.reviewIdentity(actor, validId(input.deviceId), input.targetDeviceId ? validId(input.targetDeviceId) : undefined, input.confirmNew === true, text(input.reason, 500));
@@ -65,7 +66,7 @@ async function admin(actor: Actor, path: string, input: Record<string, unknown>)
     });
   }
   if (path === "GET /admin/organizations") {
-    const rows = await db.collection("license_organizations").orderBy("createdAt", "desc").limit(100).get();
+    const rows = await db.collection("license_organizations").where("status", "==", "ACTIVE").orderBy("createdAt", "desc").limit(100).get();
     return Promise.all(rows.docs.map(async (organization: QueryDocumentSnapshot) => {
       const data = organization.data(); const license = (await db.doc(`license_licenses/${data.licenseId}`).get()).data() as License;
       const { keyHash: _hash, ...publicLicense } = license;
@@ -80,7 +81,7 @@ async function admin(actor: Actor, path: string, input: Record<string, unknown>)
   if (path === "GET /admin/dashboard") {
     const licenses = db.collection("license_licenses");
     const onlineSince = new Date(Date.now() - PRESENCE_TTL_MS).toISOString();
-    const [active, suspended, trials, devices, presence, pending, organizations, revenue] = await Promise.all([licenses.where("plan", "==", "business").where("status", "==", "ACTIVE").count().get(), licenses.where("status", "==", "SUSPENDED").count().get(), licenses.where("plan", "==", "free").count().get(), db.collection("license_devices").where("status", "==", "ACTIVE").count().get(), db.collection("devices").where("updatedAt", ">=", onlineSince).limit(1000).get(), db.collection("license_access_requests").where("status", "==", "PENDING").count().get(), db.collection("license_organizations").count().get(), db.collection("license_subscriptions").where("status", "==", "ACTIVE").aggregate({ amount: AggregateField.sum("amountCents") }).get()]);
+    const [active, suspended, trials, devices, presence, pending, organizations, revenue] = await Promise.all([licenses.where("plan", "==", "business").where("status", "==", "ACTIVE").count().get(), licenses.where("status", "==", "SUSPENDED").count().get(), licenses.where("plan", "==", "free").count().get(), db.collection("license_devices").where("status", "==", "ACTIVE").count().get(), db.collection("devices").where("updatedAt", ">=", onlineSince).limit(1000).get(), db.collection("license_access_requests").where("status", "==", "PENDING").count().get(), db.collection("license_organizations").where("status", "==", "ACTIVE").count().get(), db.collection("license_subscriptions").where("status", "==", "ACTIVE").aggregate({ amount: AggregateField.sum("amountCents") }).get()]);
     return { active: active.data().count, suspended: suspended.data().count, trials: trials.data().count, devices: devices.data().count, online: presence.docs.filter((row: QueryDocumentSnapshot) => row.data().status === "online").length, pendingRequests: pending.data().count, organizations: organizations.data().count, mrrCents: revenue.data().amount };
   }
   if (path === "GET /admin/access-requests") {

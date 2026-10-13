@@ -488,6 +488,25 @@ export class LicenseEngine {
       audit(tx, actor, "DEVICE_STATUS_CHANGED", license.id, { deviceId, status: device.status }, { deviceId, status }, this.now()); return { ok: true };
     });
   }
+  async archiveOrganization(actor: Actor, organizationId: string) {
+    requireAdmin(actor, true); validId(organizationId);
+    return this.store.transaction(async tx => {
+      const organization = await tx.get<{ id: string; name: string; licenseId: string; status: string }>(`license_organizations/${organizationId}`);
+      if (!organization) throw new LicenseError("INVALID_INPUT");
+      const license = await this.license(tx, organization.licenseId);
+      if (license.plan !== "business" || license.organizationId !== organizationId || license.status !== "CANCELED") throw new LicenseError("FORBIDDEN");
+      if (organization.status === "ARCHIVED") return { ok: true, duplicate: true };
+      const subscription = await tx.get<Record<string, unknown>>(`license_subscriptions/${license.id}`);
+      const now = this.now();
+      tx.set(`license_organizations/${organizationId}`, { ...organization, status: "ARCHIVED", archivedAt: now, updatedAt: now });
+      tx.set(`license_licenses/${license.id}`, { ...license, keyRevoked: true, updatedAt: now });
+      tx.set(`license_keys/${license.keyHash}`, { licenseId: license.id, active: false });
+      if (subscription) tx.set(`license_subscriptions/${license.id}`, { ...subscription, status: "CANCELED" });
+      audit(tx, actor, "ORGANIZATION_ARCHIVED", license.id, { organizationId, name: organization.name, status: organization.status }, { organizationId, status: "ARCHIVED" }, now);
+      return { ok: true, duplicate: false };
+    });
+  }
+
   async rotateKey(actor: Actor, licenseId: string, revoke = false) {
     requireAdmin(actor, true); const key = newLicenseKey();
     return this.store.transaction(async tx => {
