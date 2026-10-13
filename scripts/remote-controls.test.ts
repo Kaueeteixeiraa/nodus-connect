@@ -341,8 +341,10 @@ test("unavailable controls explain channel and permission states without changin
   }
 });
 
+const uiSourceCache = new Map<string, ts.SourceFile>();
 function uiFunction(name: string, context = {}, file = "apps/desktop/src/App.tsx") {
-  const source = ts.createSourceFile(file, readFileSync(file, "utf8"), ts.ScriptTarget.Latest, true, file.endsWith("tsx") ? ts.ScriptKind.TSX : file.endsWith(".ts") ? ts.ScriptKind.TS : ts.ScriptKind.JS);
+  const source = uiSourceCache.get(file) ?? ts.createSourceFile(file, readFileSync(file, "utf8"), ts.ScriptTarget.Latest, true, file.endsWith("tsx") ? ts.ScriptKind.TSX : file.endsWith(".ts") ? ts.ScriptKind.TS : ts.ScriptKind.JS);
+  uiSourceCache.set(file, source);
   let node: ts.FunctionDeclaration | ts.VariableDeclaration | undefined;
   const visit = (current: ts.Node) => {
     if (ts.isFunctionDeclaration(current) && current.name?.text === name) node = current;

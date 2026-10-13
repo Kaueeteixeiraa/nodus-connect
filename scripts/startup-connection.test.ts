@@ -18,6 +18,37 @@ function functions(file: string, names: string[], context: object) {
 }
 afterEach(() => vi.useRealTimers());
 
+test("Windows keeps remote rendering active without replacing other disabled features", () => {
+  const source = ts.createSourceFile("main.cjs", readFileSync("apps/desktop/electron/main.cjs", "utf8"), ts.ScriptTarget.Latest, true, ts.ScriptKind.JS);
+  const block = source.statements.find(node => ts.isIfStatement(node) && node.getText(source).includes("CalculateNativeWinOcclusion"));
+  expect(block).toBeDefined();
+  const appendSwitch = vi.fn();
+  runInContext(block!.getText(source), createContext({ process: { platform: "win32" }, app: { commandLine: { appendSwitch, getSwitchValue: () => "ExistingFeature" } } }));
+  expect(appendSwitch).toHaveBeenCalledWith("disable-features", "ExistingFeature,CalculateNativeWinOcclusion");
+  expect(appendSwitch).toHaveBeenCalledWith("enable-features", expect.stringContaining("WebRtcAllowWgcScreenCapturer"));
+});
+
+test.each([false, true])("desktop and QuickSupport keep session windows unthrottled (portable=%s)", portableSupport => {
+  const windows: any[] = [];
+  class Window extends EventEmitter {
+    options: any;
+    webContents = Object.assign(new EventEmitter(), { id: 1, setWindowOpenHandler: vi.fn(), loadURL: vi.fn() });
+    constructor(options: any) { super(); this.options = options; windows.push(this); }
+    loadURL = vi.fn();
+  }
+  const { createMainWindow } = functions("apps/desktop/electron/main.cjs", ["createMainWindow"], {
+    screen: { getPrimaryDisplay: () => ({ workAreaSize: { width: 1440, height: 900 } }) }, BrowserWindow: Window,
+    portableSupport, supportProfile: null, mainWindow: null, path, __dirname: ".", createIcon: vi.fn(),
+    markStartup: vi.fn(), attachRemoteKeyboardForwarding: vi.fn(), isDev: true, devUrl: "http://127.0.0.1/",
+  });
+  createMainWindow();
+  const window = windows[0], child = window.webContents.setWindowOpenHandler.mock.calls[0][0]({ url: "about:blank" });
+  expect(window.options.webPreferences.backgroundThrottling).toBe(false);
+  expect(child.overrideBrowserWindowOptions.webPreferences.backgroundThrottling).toBe(false);
+  expect(child.overrideBrowserWindowOptions.webPreferences.sandbox).toBe(true);
+  expect(window.webContents.setWindowOpenHandler.mock.calls[0][0]({ url: "https://external.test/" })).toEqual({ action: "deny" });
+});
+
 test.each(["ok", "cancel", "incomplete", "hash", "exit", "spawn"])("deferred payload validates extraction and never accepts partial data: %s", async mode => {
   const data = Buffer.from("archive");
   const child = Object.assign(new EventEmitter(), { kill: vi.fn() });

@@ -6386,7 +6386,7 @@ button[type="submit"]:hover,
 .quick-support-name > span { color: #a2bed3; font-size: 12px; }
 .quick-support-name > div, .quick-support-name form { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .quick-support-name strong, .quick-support-name input { flex: 1; min-width: 0; overflow-wrap: anywhere; }
-.quick-support-name .icon-button { flex: 0 0 36px; }
+.quick-support-name .icon-button { flex: 0 0 38px; padding: 0; }
 .quick-support-session [role="alert"] { color: #ff9aa8; }
 .quick-support-content { flex: 1; padding: 28px 0; display: flex; flex-direction: column; align-items: flex-start; gap: 16px; min-width: 0; }
 .quick-support-content > svg { color: #22c6ec; }

@@ -121,12 +121,15 @@ app.commandLine.appendSwitch("enable-gpu-rasterization");
 app.commandLine.appendSwitch("disable-background-timer-throttling");
 app.commandLine.appendSwitch("disable-renderer-backgrounding");
 app.commandLine.appendSwitch("disable-backgrounding-occluded-windows");
-if (process.platform === "win32") app.commandLine.appendSwitch("enable-features", [
-  "WebRtcAllowWgcScreenCapturer",
-  "WebRtcAllowWgcWindowCapturer",
-  "MediaFoundationD3DVideoProcessing",
-  "MediaFoundationSharedImageEncode",
-].join(","));
+if (process.platform === "win32") {
+  app.commandLine.appendSwitch("disable-features", [app.commandLine.getSwitchValue("disable-features"), "CalculateNativeWinOcclusion"].filter(Boolean).join(","));
+  app.commandLine.appendSwitch("enable-features", [
+    "WebRtcAllowWgcScreenCapturer",
+    "WebRtcAllowWgcWindowCapturer",
+    "MediaFoundationD3DVideoProcessing",
+    "MediaFoundationSharedImageEncode",
+  ].join(","));
+}
 
 const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) app.quit();
@@ -259,6 +262,7 @@ function createMainWindow() {
         nodeIntegration: false,
         preload: path.join(__dirname, "preload.cjs"),
         sandbox: true,
+        backgroundThrottling: false,
       },
     },
     };
