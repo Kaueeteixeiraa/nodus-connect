@@ -202,7 +202,7 @@ test("ordinary mouse injection and packet coordinates remain unchanged outside s
   const baselineInput = nativeInput
     .replace("int runInputHelper(DWORD ownerPid)", "int runInputHelper()")
     .replace("  OwnWindowCaptionClick captionClick(ownerPid);\n", "")
-    .replace("      // Native caption commands preserve Electron's close/minimize lifecycle.\n      if (!pressedButtons[0] && captionClick.handle(packet)) continue;\n", "")
+    .replace("      // A missed mouse-up must not bypass native caption commands on the next click.\n      if (captionClick.handle(packet)) {\n        if (pressedButtons[0]) {\n          sendMouseButton(0, false);\n          pressedButtons[0] = false;\n        }\n        continue;\n      }\n", "")
     .replace(/    if \(packet.type == 7\) \{[\s\S]*?      continue;\n    \}\n/, "")
     .replace("  bool extendedKeys[256]{};\n  bool pressedButtons[3]{};\n", "")
     .replace("      if (packet.button < 3) pressedButtons[packet.button] = packet.type == 2;\n", "")

@@ -1316,9 +1316,10 @@ function setHostInputLock(sessionId, mouse, keyboard) {
 function ensureInputHelper() {
   if (inputHelper && !inputHelper.killed) return inputHelper;
   if (fs.existsSync(nativeService)) {
-    inputHelper = spawn(nativeService, ["--input-helper", String(process.pid)], { windowsHide: true, stdio: ["pipe", performanceDiagnostic?.inputLatency ? "pipe" : "ignore", "ignore"] });
+    inputHelper = spawn(nativeService, ["--input-helper", String(process.pid)], { windowsHide: true, stdio: ["pipe", performanceDiagnostic?.inputLatency ? "pipe" : "ignore", "pipe"] });
     inputHelper.nodusBinaryInput = true;
     inputHelper.stdin.on("error", (error) => appendLog(`remote-input-pipe-error ${error.message}`));
+    inputHelper.stderr.on("data", (data) => appendLog(`remote-input-native ${data.toString().trim().slice(0, 400)}`));
     if (performanceDiagnostic?.inputLatency) observeInputProbes(inputHelper);
     const helper = inputHelper;
     inputHelper.on("exit", () => { if (inputHelper === helper) inputHelper = null; });

@@ -1323,13 +1323,16 @@ test("remote input IPC is restricted to the main app and renderer cleanup closes
   expect(native).toContain("extendedKeys[key] ? KEYEVENTF_EXTENDEDKEY : 0");
 });
 test("both desktop modes restrict native caption commands to their own Electron process", () => {
-  const child = Object.assign(new EventEmitter(), { stdin: new EventEmitter(), nodusBinaryInput: false });
+  const child = Object.assign(new EventEmitter(), { stdin: new EventEmitter(), stderr: new EventEmitter(), nodusBinaryInput: false });
   const spawn = vi.fn(() => child);
+  const log = vi.fn();
   const ensure = uiFunction("ensureInputHelper", { inputHelper: null, process: { platform: "win32", pid: 321 }, fs: { existsSync: () => true },
-    nativeService: "nodus-service.exe", spawn, performanceDiagnostic: null, appendLog: vi.fn() }, "apps/desktop/electron/main.cjs");
+    nativeService: "nodus-service.exe", spawn, performanceDiagnostic: null, appendLog: log }, "apps/desktop/electron/main.cjs");
   expect(ensure()).toBe(child);
   expect(spawn).toHaveBeenCalledWith("nodus-service.exe", ["--input-helper", "321"], expect.objectContaining({ windowsHide: true }));
   expect(child.nodusBinaryInput).toBe(true);
+  child.stderr.emit("data", Buffer.from("caption-hit-unresolved: non-client click suppressed\n"));
+  expect(log).toHaveBeenCalledWith("remote-input-native caption-hit-unresolved: non-client click suppressed");
 });
 
 test("admin loads only the active view and reports timeouts in Portuguese", async () => {

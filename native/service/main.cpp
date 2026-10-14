@@ -145,8 +145,40 @@ class OwnWindowCaptionClick {
     GetWindowThreadProcessId(window, &pid);
     if (!ownerPid || pid != ownerPid || !IsWindowEnabled(window)) return nullptr;
     DWORD_PTR result = 0;
-    if (!SendMessageTimeoutW(window, WM_NCHITTEST, 0, MAKELPARAM(point.x, point.y),
-      SMTO_ABORTIFHUNG | SMTO_BLOCK, 50, &result)) return nullptr;
+    POINT query{};
+    // Window messages use the receiver's DPI space, not the input helper's.
+    const bool resolved = GetPhysicalCursorPos(&query) && PhysicalToLogicalPointForPerMonitorDPI(window, &query)
+      && SendMessageTimeoutW(window, WM_NCHITTEST, 0, MAKELPARAM(query.x, query.y),
+        SMTO_ABORTIFHUNG | SMTO_BLOCK, 50, &result);
+    // Cold/inactive caption buttons can initially be reported as HTCAPTION.
+    if (resolved && result != HTCLOSE && result != HTMINBUTTON && result != HTMAXBUTTON) {
+      RECT client{};
+      POINT local = point;
+      if (GetClientRect(window, &client) && ScreenToClient(window, &local) && PtInRect(&client, local)) return nullptr;
+      TITLEBARINFOEX bar{};
+      bar.cbSize = sizeof(bar);
+      DWORD_PTR unused = 0;
+      if (SendMessageTimeoutW(window, WM_GETTITLEBARINFOEX, 0, reinterpret_cast<LPARAM>(&bar),
+        SMTO_ABORTIFHUNG | SMTO_BLOCK, 50, &unused)) {
+        for (int index : {2, 3, 5}) {
+          if ((bar.rgstate[index] & (STATE_SYSTEM_INVISIBLE | STATE_SYSTEM_OFFSCREEN)) || !PtInRect(&bar.rgrect[index], query)) continue;
+          std::fprintf(stderr, "caption-hit-recovered: hit=%lld button=%d\n", static_cast<LRESULT>(result), index);
+          std::fflush(stderr);
+          result = bar.rgstate[index] & STATE_SYSTEM_UNAVAILABLE ? HTERROR : index == 2 ? HTMINBUTTON : index == 3 ? HTMAXBUTTON : HTCLOSE;
+          break;
+        }
+      }
+    }
+    if (!resolved || static_cast<LRESULT>(result) <= HTNOWHERE) {
+      RECT client{};
+      POINT local = point;
+      if (GetClientRect(window, &client) && ScreenToClient(window, &local) && PtInRect(&client, local)) return nullptr;
+      // Raw non-client mouse-down can enter a modal loop and block the IPC mouse-up.
+      std::fputs("caption-hit-unresolved: non-client click suppressed\n", stderr);
+      std::fflush(stderr);
+      hit = HTERROR;
+      return window;
+    }
     hit = static_cast<LRESULT>(result);
     return hit == HTCLOSE || hit == HTMINBUTTON || hit == HTMAXBUTTON ? window : nullptr;
   }
@@ -164,6 +196,7 @@ public:
     if (packet.type != 3 || !pressedWindow) return false;
     const HWND window = pressedWindow;
     pressedWindow = nullptr;
+    if (pressedHit == HTERROR) return true;
     if (target(point, hit) != window || hit != pressedHit) return true;
     const UINT command = hit == HTCLOSE ? SC_CLOSE : hit == HTMINBUTTON ? SC_MINIMIZE
       : IsZoomed(window) ? SC_RESTORE : SC_MAXIMIZE;
@@ -193,8 +226,14 @@ int runInputHelper(DWORD ownerPid) {
       SetCursorPos(packet.x, packet.y);
     } else if (packet.type == 2 || packet.type == 3) {
       SetCursorPos(packet.x, packet.y);
-      // Native caption commands preserve Electron's close/minimize lifecycle.
-      if (!pressedButtons[0] && captionClick.handle(packet)) continue;
+      // A missed mouse-up must not bypass native caption commands on the next click.
+      if (captionClick.handle(packet)) {
+        if (pressedButtons[0]) {
+          sendMouseButton(0, false);
+          pressedButtons[0] = false;
+        }
+        continue;
+      }
       sendMouseButton(packet.button, packet.type == 2);
       if (packet.button < 3) pressedButtons[packet.button] = packet.type == 2;
     } else if (packet.type == 4) {
