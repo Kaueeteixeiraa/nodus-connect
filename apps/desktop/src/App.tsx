@@ -290,14 +290,20 @@ type IncomingFileTransfer = {
   received: number;
   chunks: BlobPart[];
   saveId?: string;
+  clipboard?: boolean;
 };
+type FileSource = Pick<File, "name" | "size" | "type"> & { slice(start: number, end: number): Pick<Blob, "arrayBuffer"> };
 type FileControlMessage =
-  | { type: "file-key"; publicKey: string }
-  | { type: "file-meta"; id: string; name: string; size: number; mime?: string }
+  | { type: "file-key"; publicKey: string; clipboard?: boolean; clipboardReturn?: boolean }
+  | { type: "file-meta"; id: string; name: string; size: number; mime?: string; clipboard?: boolean }
+  | { type: "file-paste"; ids: string[] }
+  | { type: "file-paste-result"; ok: boolean }
   | { type: "file-end"; id: string }
-  | { type: "file-saved"; id: string; name: string }
+  | { type: "file-saved"; id: string; name: string; clipboard?: boolean }
   | { type: "file-error"; id: string; message: string };
 type FileFlowMessage = { type: "file-flow"; paused: boolean };
+const PASTE_KEYS = ([ ["keyDown", 162, "ControlLeft"], ["keyDown", 86, "KeyV"], ["keyUp", 86, "KeyV"], ["keyUp", 162, "ControlLeft"] ] as const)
+  .map(([type, keyCode, code]) => ({ type, keyCode, code, location: keyCode === 162 ? 1 : 0, repeat: false }));
 
 const navItems: Array<{ view: View; label: string; icon: LucideIcon }> = [
   { view: "connection", label: "Conexão", icon: Monitor },
@@ -403,6 +409,13 @@ export function App({ initialIdentity, supportProfile = null }: { initialIdentit
   const fileCryptoSessionsRef = useRef(new Map<string, Promise<FileCryptoSession>>());
   const incomingFilesRef = useRef(new Map<string, IncomingFileTransfer>());
   const sendingFilesRef = useRef(new Set<string>());
+  const clipboardFilePeersRef = useRef(new Set<string>());
+  const clipboardReturnPeersRef = useRef(new Set<string>());
+  const clipboardLocalSequenceRef = useRef(new Map<string, number>());
+  const clipboardCopyPendingRef = useRef(false);
+  const clipboardReceivedRef = useRef(new Map<string, { sessionId: string; saveId: string }>());
+  const clipboardKeysRef = useRef(new Map<string, { keys: Set<number>; paste: boolean; busy: boolean; copied?: Promise<number> }>());
+  const clipboardPasteOwnerRef = useRef<string | null>(null);
   const pausedFilesRef = useRef(new Set<string>());
   const pendingPointerRef = useRef<{ sessionId: string; x: number; y: number; eventAt: number } | null>(null);
   const pointerFrameRef = useRef(0);
@@ -535,6 +548,14 @@ export function App({ initialIdentity, supportProfile = null }: { initialIdentit
   useEffect(() => {
     sessionsRef.current = sessionRuntimes;
   }, [sessionRuntimes]);
+
+  const receiveClipboardEnabled = settings.allowRemoteControl && settings.allowClipboard && settings.allowFileTransfer
+    && sessionRuntimes.some(item => item.session.role === "host" && item.controlReady
+      && ["files:transfer", "clipboard:sync", "keyboard:control"].every(permission => item.session.permissions.includes(permission as SessionPermission)));
+  useEffect(() => {
+    if (!receiveClipboardEnabled) return;
+    return window.nodusDesktop?.onClipboardFilesChanged?.(() => { void copyClipboardFilesToViewer(); });
+  }, [receiveClipboardEnabled, settings.allowClipboard, settings.allowFileTransfer, settings.allowRemoteControl]);
 
   useEffect(() => {
     outgoingRequestRef.current = outgoingRequest;
@@ -2365,9 +2386,14 @@ export function App({ initialIdentity, supportProfile = null }: { initialIdentit
     channel.onopen = async () => {
       setFileChannelReady((current) => ({ ...current, [sessionId]: true }));
       const local = await cryptoSessionPromise;
-      if (channel.readyState === "open") channel.send(JSON.stringify({ type: "file-key", publicKey: local.publicKey } satisfies FileControlMessage));
+      if (channel.readyState === "open") channel.send(JSON.stringify({ type: "file-key", publicKey: local.publicKey, clipboard: Boolean(window.nodusDesktop?.writeClipboardFiles), clipboardReturn: Boolean(window.nodusDesktop?.readClipboardSequence) } satisfies FileControlMessage));
     };
     channel.onclose = () => {
+      clipboardFilePeersRef.current.delete(sessionId);
+      clipboardReturnPeersRef.current.delete(sessionId);
+      clipboardLocalSequenceRef.current.delete(sessionId);
+      clipboardKeysRef.current.delete(sessionId);
+      for (const [id, entry] of clipboardReceivedRef.current) if (entry.sessionId === sessionId) clipboardReceivedRef.current.delete(id);
       fileCryptoRef.current.delete(sessionId);
       pausedFilesRef.current.delete(sessionId);
       incomingFilesRef.current.forEach((transfer, id) => {
@@ -2414,9 +2440,53 @@ export function App({ initialIdentity, supportProfile = null }: { initialIdentit
         if (!local) throw new Error("Sessao de arquivos indisponivel.");
         const state = fileCryptoRef.current.get(sessionId);
         if (state) state.remote = deriveFileCryptoKey(local, message.publicKey);
+        if (message.clipboard === true) clipboardFilePeersRef.current.add(sessionId);
+        if (message.clipboardReturn === true) clipboardReturnPeersRef.current.add(sessionId);
+        return;
+      }
+      if (message.type === "file-paste") {
+        if (!canPasteFiles(sessionId) || !Array.isArray(message.ids) || !message.ids.length || message.ids.length > 32 || new Set(message.ids).size !== message.ids.length) throw new Error("UNAUTHORIZED");
+        const ids = message.ids.map(id => {
+          const file = clipboardReceivedRef.current.get(id);
+          if (!file || file.sessionId !== sessionId) throw new Error("INVALID_TRANSFER");
+          return file.saveId;
+        });
+        let ok = false;
+        const local = sessionsRef.current.some(item => item.session.sessionId === sessionId && item.session.role === "viewer");
+        try {
+          if (local && !clipboardLocalSequenceRef.current.has(sessionId)) throw new Error("CLIPBOARD_CHANGED");
+          if (local) await window.nodusDesktop!.writeClipboardFiles(ids, clipboardLocalSequenceRef.current.get(sessionId));
+          else await window.nodusDesktop!.writeClipboardFiles(ids);
+          if (canPasteFiles(sessionId) && fileChannelsRef.current.get(sessionId)?.readyState === "open") {
+            if (!local) for (const input of PASTE_KEYS) window.nodusDesktop!.applyRemoteInput(input);
+            else {
+              const state = clipboardKeysRef.current.get(sessionId) ?? { keys: new Set<number>(), paste: false, busy: false };
+              state.copied = window.nodusDesktop!.readClipboardSequence().catch(() => -1);
+              clipboardKeysRef.current.set(sessionId, state);
+              updateRuntime(sessionId, { error: "Arquivos copiados. Agora você pode colar na sua máquina." });
+            }
+            ok = true;
+          }
+        } catch {
+          updateRuntime(sessionId, { error: "Não foi possível preparar os arquivos copiados. Copie novamente e aguarde a transferência." });
+        } finally {
+          clipboardLocalSequenceRef.current.delete(sessionId);
+          const channel = fileChannelsRef.current.get(sessionId);
+          if (channel?.readyState === "open") channel.send(JSON.stringify({ type: "file-paste-result", ok } satisfies FileControlMessage));
+        }
+        return;
+      }
+      if (message.type === "file-paste-result") {
+        if (typeof message.ok === "boolean")
+          updateRuntime(sessionId, { error: message.ok ? "" : "Os arquivos chegaram, mas não foi possível preparar a área de transferência." });
         return;
       }
       if (message.type === "file-meta") {
+        if (message.clipboard && !canPasteFiles(sessionId)) throw new Error("UNAUTHORIZED");
+        if (message.clipboard && sessionsRef.current.some(item => item.session.sessionId === sessionId && item.session.role === "viewer") && !clipboardLocalSequenceRef.current.has(sessionId)) {
+          clipboardLocalSequenceRef.current.set(sessionId, await window.nodusDesktop!.readClipboardSequence());
+          updateRuntime(sessionId, { error: "Recebendo arquivos copiados..." });
+        }
         if (!Number.isSafeInteger(message.size) || message.size < 0 || message.size > MAX_FILE_SIZE
           || incomingFilesRef.current.has(message.id) || [...incomingFilesRef.current.values()].some(item => item.sessionId === sessionId)) {
           fileChannelsRef.current.get(sessionId)?.send(JSON.stringify({ type: "file-error", id: message.id, message: "Arquivo maior que 256 MB." } satisfies FileControlMessage));
@@ -2431,9 +2501,10 @@ export function App({ initialIdentity, supportProfile = null }: { initialIdentit
           mime: message.mime || "application/octet-stream",
           received: 0,
           chunks: [],
+          ...(message.clipboard ? { clipboard: true } : {}),
         };
         if (window.nodusDesktop?.beginFileSave) {
-          transfer.saveId = (await window.nodusDesktop.beginFileSave(message.name, message.size)).id;
+          transfer.saveId = (await (message.clipboard ? window.nodusDesktop.beginFileSave(message.name, message.size, false, true) : window.nodusDesktop.beginFileSave(message.name, message.size))).id;
           if (fileChannelsRef.current.get(sessionId)?.readyState !== "open") { await window.nodusDesktop.cancelFileSave(transfer.saveId); return; }
         }
         incomingFilesRef.current.set(message.id, transfer);
@@ -2464,11 +2535,16 @@ export function App({ initialIdentity, supportProfile = null }: { initialIdentit
         }
         const url = blob ? URL.createObjectURL(blob) : undefined;
         incomingFilesRef.current.delete(message.id);
-        patchFileTransfer(message.id, { status: "received", progress: 100, url, savedPath: saved?.name ? `Documentos\\${saved.name}` : undefined });
-        if (saved?.name) fileChannelsRef.current.get(sessionId)?.send(JSON.stringify({ type: "file-saved", id: message.id, name: saved.name } satisfies FileControlMessage));
+        if (transfer.clipboard && transfer.saveId) {
+          if (clipboardReceivedRef.current.size >= 32) clipboardReceivedRef.current.delete(clipboardReceivedRef.current.keys().next().value!);
+          clipboardReceivedRef.current.set(message.id, { sessionId, saveId: transfer.saveId });
+        }
+        patchFileTransfer(message.id, { status: "received", progress: 100, url, savedPath: saved?.name ? `${transfer.clipboard ? "Área de transferência" : "Documentos"}\\${saved.name}` : undefined });
+        if (saved?.name) fileChannelsRef.current.get(sessionId)?.send(JSON.stringify({ type: "file-saved", id: message.id, name: saved.name, ...(transfer.clipboard ? { clipboard: true } : {}) } satisfies FileControlMessage));
       }
-      if (message.type === "file-saved") patchFileTransfer(message.id, { status: "sent", progress: 100, savedPath: `Documentos\\${message.name}` });
+      if (message.type === "file-saved") patchFileTransfer(message.id, { status: "sent", progress: 100, savedPath: `${message.clipboard ? "Área de transferência" : "Documentos"}\\${message.name}` });
       if (message.type === "file-error") {
+        clipboardLocalSequenceRef.current.delete(sessionId);
         const transfer = incomingFilesRef.current.get(message.id);
         if (transfer?.sessionId === sessionId) {
           if (transfer.saveId) await window.nodusDesktop?.cancelFileSave(transfer.saveId);
@@ -2493,12 +2569,19 @@ export function App({ initialIdentity, supportProfile = null }: { initialIdentit
     patchFileTransfer(transfer.id, { progress: Math.min(99, Math.round((transfer.received / transfer.size) * 100)) });
   }
 
-  async function sendFile(file: File) {
-    if (!activeSession) {
+  function canPasteFiles(sessionId: string) {
+    const runtime = sessionsRef.current.find(item => item.session.sessionId === sessionId);
+    return runtime?.controlReady === true && settings.allowRemoteControl && settings.allowClipboard && settings.allowFileTransfer
+      && ["files:transfer", "clipboard:sync", "keyboard:control"].every(permission => runtime.session.permissions.includes(permission as SessionPermission));
+  }
+
+  async function sendFile(file: FileSource, sessionId = activeSession?.sessionId, clipboard = false) {
+    const session = sessionsRef.current.find(item => item.session.sessionId === sessionId)?.session;
+    if (!session || !sessionId) {
       setFeedback("Inicie uma conexao antes de enviar arquivos.");
       return;
     }
-    const channel = fileChannelsRef.current.get(activeSession.sessionId);
+    const channel = fileChannelsRef.current.get(sessionId);
     if (!channel || channel.readyState !== "open") {
       setFeedback("Aguarde a conexao de arquivos ficar pronta.");
       return;
@@ -2507,15 +2590,14 @@ export function App({ initialIdentity, supportProfile = null }: { initialIdentit
       setFeedback("O limite por arquivo e 256 MB.");
       return;
     }
-    const sessionId = activeSession.sessionId;
     if (sendingFilesRef.current.has(sessionId)) { setFeedback("Aguarde o envio atual terminar."); return; }
     sendingFilesRef.current.add(sessionId);
 
     const id = crypto.randomUUID();
     upsertFileTransfer({
       id,
-      sessionId: activeSession.sessionId,
-      remoteName: activeSession.remoteName,
+      sessionId,
+      remoteName: session.remoteName,
       fileName: file.name,
       size: file.size,
       direction: "sent",
@@ -2525,20 +2607,21 @@ export function App({ initialIdentity, supportProfile = null }: { initialIdentit
     });
 
     try {
-      channel.send(JSON.stringify({ type: "file-meta", id, name: file.name, size: file.size, mime: file.type } satisfies FileControlMessage));
-      const keyPromise = fileCryptoRef.current.get(activeSession.sessionId)?.remote;
+      channel.send(JSON.stringify({ type: "file-meta", id, name: file.name, size: file.size, mime: file.type, ...(clipboard ? { clipboard: true } : {}) } satisfies FileControlMessage));
+      const keyPromise = fileCryptoRef.current.get(sessionId)?.remote;
       if (!keyPromise) throw new Error("A criptografia da transferencia ainda nao esta pronta.");
       const key = await keyPromise;
       const chunkSize = 16 * 1024;
       for (let offset = 0; offset < file.size; offset += chunkSize) {
-        await waitForFileChannel(channel, activeSession.sessionId);
+        await waitForFileChannel(channel, sessionId);
         channel.send(await encryptFileChunk(key, await file.slice(offset, offset + chunkSize).arrayBuffer()));
         patchFileTransfer(id, { progress: Math.min(99, Math.round(((offset + chunkSize) / file.size) * 100)) });
       }
-      await waitForFileChannel(channel, activeSession.sessionId);
+      await waitForFileChannel(channel, sessionId);
       channel.send(JSON.stringify({ type: "file-end", id } satisfies FileControlMessage));
       patchFileTransfer(id, { status: "sent", progress: 100 });
       setFeedback("Arquivo enviado.");
+      return id;
     } catch {
       channel.readyState === "open" && channel.send(JSON.stringify({ type: "file-error", id, message: "Envio cancelado." } satisfies FileControlMessage));
       patchFileTransfer(id, { status: "error", error: "Nao foi possivel enviar." });
@@ -3519,8 +3602,85 @@ export function App({ initialIdentity, supportProfile = null }: { initialIdentit
     sendRemoteInput({ type: "wheel", delta: -event.deltaY });
   }
 
+  async function copyClipboardFilesToViewer() {
+    clipboardCopyPendingRef.current = true;
+    if (clipboardPasteOwnerRef.current) return;
+    clipboardPasteOwnerRef.current = "clipboard-sync";
+    clipboardCopyPendingRef.current = false;
+    try {
+      for (const { session } of sessionsRef.current) {
+        if (session.role !== "host" || !canPasteFiles(session.sessionId) || !clipboardReturnPeersRef.current.has(session.sessionId)) continue;
+        await pasteClipboardFiles(session.sessionId, { busy: true }, true);
+        if (clipboardCopyPendingRef.current) break;
+      }
+    } finally {
+      clipboardPasteOwnerRef.current = null;
+      if (clipboardCopyPendingRef.current) void copyClipboardFilesToViewer();
+    }
+  }
+
+  async function pasteClipboardFiles(sessionId: string, state: { busy: boolean; copied?: Promise<number> }, copyToViewer = false) {
+    const channel = fileChannelsRef.current.get(sessionId);
+    const current = () => sessionsRef.current.find(item => item.session.sessionId === sessionId && item.session.role === (copyToViewer ? "host" : "viewer") && item.controlReady);
+    try {
+      const snapshot = await window.nodusDesktop!.readClipboardFiles();
+      if (!current()) return;
+      if (snapshot.files.length && (copyToViewer || snapshot.sequence !== await state.copied)) {
+        const permissions = current()!.session.permissions;
+        if (!settings.allowClipboard || !settings.allowFileTransfer || !["clipboard:sync", "files:transfer", "keyboard:control"].every(p => permissions.includes(p as SessionPermission))) throw new Error("CLIPBOARD_PERMISSION_DENIED");
+        if (!clipboardFilePeersRef.current.has(sessionId)) throw new Error("CLIPBOARD_UPDATE_REQUIRED");
+        if (channel?.readyState !== "open" || sendingFilesRef.current.has(sessionId)) throw new Error("CLIPBOARD_CHANNEL_UNAVAILABLE");
+        const ids: string[] = [];
+        updateRuntime(sessionId, { error: "Enviando arquivos copiados..." });
+        for (const file of snapshot.files) {
+          if (!current() || fileChannelsRef.current.get(sessionId) !== channel) return;
+          const id = await sendFile({ ...file, slice: (start, end) => ({ arrayBuffer: async () => {
+            const bytes = await window.nodusDesktop!.readClipboardFileChunk(file.id, start, Math.min(end, file.size) - start);
+            return new Uint8Array(bytes).buffer;
+          } }) }, sessionId, true);
+          if (!id) throw new Error("CLIPBOARD_TRANSFER_FAILED");
+          ids.push(id);
+        }
+        if (current() && channel.readyState === "open" && fileChannelsRef.current.get(sessionId) === channel) channel.send(JSON.stringify({ type: "file-paste", ids } satisfies FileControlMessage));
+      } else if (!copyToViewer) {
+        for (const message of PASTE_KEYS) sendRemoteInputToSession(sessionId, message);
+      }
+    } catch (error) {
+      const code = (error as Error).message;
+      if (current()) updateRuntime(sessionId, { error: code.endsWith("CLIPBOARD_FOLDERS_UNSUPPORTED") ? "Não é possível colar pastas sem compactá-las."
+        : code.endsWith("CLIPBOARD_FILE_LIMIT") ? "O limite é de 32 arquivos e 256 MB por arquivo."
+        : code.endsWith("CLIPBOARD_PERMISSION_DENIED") ? "A sessão não autoriza colar arquivos."
+        : code.endsWith("CLIPBOARD_UPDATE_REQUIRED") ? "Esta versão do computador remoto não aceita colar arquivos."
+        : "Não foi possível colar os arquivos. Verifique a conexão e tente novamente." });
+    } finally {
+      state.busy = false;
+      await window.nodusDesktop?.releaseClipboardFiles().catch(() => undefined);
+      if (clipboardPasteOwnerRef.current === sessionId) clipboardPasteOwnerRef.current = null;
+      if (!copyToViewer && clipboardCopyPendingRef.current) void copyClipboardFilesToViewer();
+    }
+  }
+
   function sendKey(type: "keyDown" | "keyUp", input: RemoteKeyInput) {
     if (!activeSession || activeSession.role !== "viewer") return;
+    const sessionId = activeSession.sessionId;
+    let state = clipboardKeysRef.current.get(sessionId);
+    if (!state) { state = { keys: new Set(), paste: false, busy: false }; clipboardKeysRef.current.set(sessionId, state); }
+    if (input.keyCode === 86 && state.paste) { if (type === "keyUp") state.paste = false; return; }
+    const ctrl = [...state.keys].some(code => [17, 162, 163].includes(code));
+    const otherModifier = [...state.keys].some(code => [16, 160, 161, 18, 164, 165, 91, 92].includes(code));
+    if (type === "keyDown" && ctrl && !otherModifier && [67, 88, 45].includes(input.keyCode)) state.copied = window.nodusDesktop?.readClipboardSequence().catch(() => -1);
+    if (type === "keyDown" && ctrl && !otherModifier && input.keyCode === 86 && window.nodusDesktop?.readClipboardFiles) {
+      state.paste = true;
+      if (clipboardPasteOwnerRef.current && clipboardPasteOwnerRef.current !== sessionId) { updateRuntime(sessionId, { error: "Aguarde a transferência dos arquivos copiados terminar." }); return; }
+      if (!state.busy) {
+        state.busy = true;
+        clipboardPasteOwnerRef.current = sessionId;
+        for (const keyCode of state.keys) if ([17, 162, 163].includes(keyCode)) sendRemoteInputToSession(sessionId, { type: "keyUp", keyCode, code: keyCode === 163 ? "ControlRight" : "ControlLeft", location: keyCode === 163 ? 2 : 1, repeat: false });
+        void pasteClipboardFiles(sessionId, state);
+      }
+      return;
+    }
+    if (type === "keyDown") state.keys.add(input.keyCode); else state.keys.delete(input.keyCode);
     sendRemoteInput({ type, ...input });
   }
 

@@ -125,6 +125,17 @@ contextBridge.exposeInMainWorld("nodusDesktop", {
   writeClipboard(text) {
     return ipcRenderer.invoke("nodus:write-clipboard", text);
   },
+  readClipboardFiles() { return ipcRenderer.invoke("nodus:clipboard-files"); },
+  readClipboardSequence() { return ipcRenderer.invoke("nodus:clipboard-sequence"); },
+  readClipboardFileChunk(id, offset, length) { return ipcRenderer.invoke("nodus:clipboard-file-chunk", id, offset, length); },
+  releaseClipboardFiles() { return ipcRenderer.invoke("nodus:clipboard-files-release"); },
+  writeClipboardFiles(ids, sequence) { return ipcRenderer.invoke("nodus:clipboard-files-write", ids, sequence); },
+  onClipboardFilesChanged(callback) {
+    const listener = () => callback();
+    ipcRenderer.on("nodus:clipboard-files-changed", listener);
+    ipcRenderer.send("nodus:watch-clipboard-files", true);
+    return () => { ipcRenderer.removeListener("nodus:clipboard-files-changed", listener); ipcRenderer.send("nodus:watch-clipboard-files", false); };
+  },
   getConnectionPassword(nodusId) {
     return ipcRenderer.invoke("nodus:get-connection-password", nodusId);
   },
@@ -137,7 +148,7 @@ contextBridge.exposeInMainWorld("nodusDesktop", {
   saveReceivedFile(fileName, data) {
     return ipcRenderer.invoke("nodus:save-received-file", { fileName, data });
   },
-  beginFileSave(fileName, size, recording = false) { return ipcRenderer.invoke("nodus:file-begin", fileName, size, recording); },
+  beginFileSave(fileName, size, recording = false, clipboard = false) { return ipcRenderer.invoke("nodus:file-begin", fileName, size, recording, clipboard); },
   appendFileSave(id, data) { return ipcRenderer.invoke("nodus:file-append", id, data); },
   finishFileSave(id) { return ipcRenderer.invoke("nodus:file-finish", id); },
   cancelFileSave(id) { return ipcRenderer.invoke("nodus:file-cancel", id); },

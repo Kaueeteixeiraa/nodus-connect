@@ -15,6 +15,7 @@ import { translateText } from "../apps/desktop/src/core/localization";
 import { advanceStage, assessQuality, DESKTOP_VIDEO_POLICY, nativeVideoBitrate, nextBitrate, STAGE_LIMITS } from "../apps/desktop/src/core/adaptive-quality";
 import { LicenseError, LICENSE_MESSAGES } from "../packages/licensing/src/index";
 import { mapVideoPointer } from "../apps/desktop/src/core/remote-cursor";
+import { createFileCryptoSession, deriveFileCryptoKey, encryptFileChunk, decryptFileChunk } from "../apps/desktop/src/core/file-crypto";
 import { formatNodusId, normalizeNodusId } from "../packages/common/src/nodusId";
 
 const { RemoteWindowsKeys, keyboardInput } = createRequire(import.meta.url)("../apps/desktop/electron/remote-windows-keys.cjs");
@@ -907,6 +908,8 @@ test.each(["complete", "incomplete", "closed-start"])("file receiver serializes 
     MAX_FILE_SIZE: 256 * 1024 * 1024, Blob, ArrayBuffer, JSON, Number, Math, Date,
     fileChannelsRef: { current: new Map() }, fileCryptoRef: { current: new Map() }, fileCryptoSessionsRef: { current: new Map() },
     incomingFilesRef: { current: new Map() }, pausedFilesRef: { current: new Set() },
+    clipboardFilePeersRef: { current: new Set() }, clipboardKeysRef: { current: new Map() }, clipboardReceivedRef: { current: new Map() },
+    clipboardReturnPeersRef: { current: new Set() }, clipboardLocalSequenceRef: { current: new Map() },
     createFileCryptoSession: async () => ({ publicKey: "test" }), deriveFileCryptoKey: async () => ({}), decryptFileChunk: () => decoded,
     patchFileTransfer: vi.fn(), upsertFileTransfer: vi.fn(), updateRuntime: vi.fn(), setFileChannelReady: vi.fn(), window: { nodusDesktop: desktop },
   };
@@ -1987,4 +1990,202 @@ test("workspace and remote video remain fluid across display sizes and DPI", () 
   expect(css).not.toContain("grid-template-rows: 88px minmax(0, 1fr)");
   expect(css).toContain("grid-template-rows: auto minmax(0, 1fr)");
   expect(css).toContain(".viewer-session-v2 .remote-viewer-surface video { width:100%; height:100%; object-fit:contain;");
+});
+
+function clipboardPasteFixture(files: Array<{ id: string; name: string; size: number; type: string }> = []) {
+  const session = { sessionId: "paste", role: "viewer", permissions: ["keyboard:control", "files:transfer", "clipboard:sync"], remoteName: "Host" };
+  const channel = { readyState: "open", send: vi.fn() };
+  const desktop = { readClipboardFiles: vi.fn(async () => ({ sequence: 42, files })), readClipboardSequence: vi.fn(async () => 42),
+    readClipboardFileChunk: vi.fn(async () => new Uint8Array([1])), releaseClipboardFiles: vi.fn(async () => undefined) };
+  const context: any = { activeSession: session, sessionsRef: { current: [{ session, controlReady: true }] },
+    clipboardKeysRef: { current: new Map() }, clipboardFilePeersRef: { current: new Set(["paste"]) }, clipboardPasteOwnerRef: { current: null },
+    clipboardCopyPendingRef: { current: false }, clipboardReturnPeersRef: { current: new Set(["paste"]) },
+    clipboardLocalSequenceRef: { current: new Map() },
+    fileChannelsRef: { current: new Map([["paste", channel]]) }, sendingFilesRef: { current: new Set() },
+    settings: { allowClipboard: true, allowFileTransfer: true }, window: { nodusDesktop: desktop },
+    sendRemoteInput: vi.fn(), sendRemoteInputToSession: vi.fn(), updateRuntime: vi.fn(), sendFile: vi.fn(async () => "wire-file"),
+    PASTE_KEYS: [162, 86, 86, 162].map((keyCode, index) => ({ type: index < 2 ? "keyDown" : "keyUp", keyCode, code: keyCode === 162 ? "ControlLeft" : "KeyV", location: keyCode === 162 ? 1 : 0, repeat: false })),
+  };
+  context.pasteClipboardFiles = uiFunction("pasteClipboardFiles", context);
+  const send = uiFunction("sendKey", context);
+  const key = (type: string, keyCode: number, repeat = false) => send(type, { keyCode, code: keyCode === 162 ? "ControlLeft" : keyCode === 86 ? "KeyV" : "KeyC", location: 0, repeat });
+  return { context, desktop, channel, key };
+}
+
+test("file paste shortcut suppresses repeated V and releases Ctrl before asynchronous transfer", async () => {
+  const f = clipboardPasteFixture([{ id: "source", name: "copiado.bin", size: 1, type: "application/octet-stream" }]);
+  f.key("keyDown", 162); f.key("keyDown", 86); f.key("keyDown", 86, true); f.key("keyUp", 86); f.key("keyUp", 162);
+  await vi.waitFor(() => expect(f.desktop.releaseClipboardFiles).toHaveBeenCalledOnce());
+  expect(f.desktop.readClipboardFiles).toHaveBeenCalledOnce();
+  expect(f.context.sendFile).toHaveBeenCalledWith(expect.objectContaining({ name: "copiado.bin" }), "paste", true);
+  expect(f.channel.send).toHaveBeenCalledExactlyOnceWith(JSON.stringify({ type: "file-paste", ids: ["wire-file"] }));
+  expect(f.context.sendRemoteInputToSession).toHaveBeenCalledExactlyOnceWith("paste", expect.objectContaining({ type: "keyUp", keyCode: 162 }));
+  expect(f.context.clipboardPasteOwnerRef.current).toBeNull();
+});
+
+test.each(["permission", "old-peer", "closed", "failed", "disconnected"])("clipboard files never paste after %s", async mode => {
+  const f = clipboardPasteFixture([{ id: "source", name: "file.bin", size: 1, type: "application/octet-stream" }]);
+  if (mode === "permission") f.context.settings.allowFileTransfer = false;
+  if (mode === "old-peer") f.context.clipboardFilePeersRef.current.clear();
+  if (mode === "closed") f.channel.readyState = "closed";
+  if (mode === "failed") f.context.sendFile.mockResolvedValue(undefined);
+  if (mode === "disconnected") f.context.sessionsRef.current = [];
+  await f.context.pasteClipboardFiles("paste", { busy: true });
+  expect(f.channel.send).not.toHaveBeenCalled(); expect(f.context.sendRemoteInputToSession).not.toHaveBeenCalled();
+  expect(f.desktop.releaseClipboardFiles).toHaveBeenCalledOnce();
+  if (mode !== "failed") expect(f.context.sendFile).not.toHaveBeenCalled();
+});
+
+test.each([67, 88, 45])("remote copy/cut key %s keeps normal remote paste instead of sending stale local files", async copyKey => {
+  const f = clipboardPasteFixture([{ id: "source", name: "local.bin", size: 1, type: "application/octet-stream" }]);
+  f.key("keyDown", 162); f.key("keyDown", copyKey); f.key("keyUp", copyKey); f.key("keyUp", 162);
+  const state = f.context.clipboardKeysRef.current.get("paste");
+  await f.context.pasteClipboardFiles("paste", state);
+  expect(f.context.sendFile).not.toHaveBeenCalled(); expect(f.context.sendRemoteInputToSession).toHaveBeenCalledTimes(4);
+  expect(f.context.sendRemoteInputToSession.mock.calls.map((call: any[]) => call[1].keyCode)).toEqual([162, 86, 86, 162]);
+  const empty = clipboardPasteFixture(); await empty.context.pasteClipboardFiles("paste", { busy: true });
+  expect(empty.context.sendFile).not.toHaveBeenCalled(); expect(empty.context.sendRemoteInputToSession).toHaveBeenCalledTimes(4);
+});
+
+test("clipboard receiver accepts only completed files from its own session and pastes after OS clipboard readiness", async () => {
+  const write = vi.fn(async () => undefined), apply = vi.fn(), channel = { readyState: "open", send: vi.fn() };
+  const context: any = { canPasteFiles: () => true, clipboardReceivedRef: { current: new Map([["file", { sessionId: "host", saveId: "saved" }]]) },
+    sessionsRef: { current: [{ session: { sessionId: "host", role: "host" } }] }, clipboardLocalSequenceRef: { current: new Map() }, updateRuntime: vi.fn(),
+    fileChannelsRef: { current: new Map([["host", channel]]) }, window: { nodusDesktop: { writeClipboardFiles: write, applyRemoteInput: apply } },
+    PASTE_KEYS: [162, 86, 86, 162].map((keyCode, index) => ({ type: index < 2 ? "keyDown" : "keyUp", keyCode })) };
+  const receive = uiFunction("handleFileTransferMessage", context);
+  await expect(receive("other", "Remote", JSON.stringify({ type: "file-paste", ids: ["file"] }))).rejects.toThrow("INVALID_TRANSFER");
+  await expect(receive("host", "Remote", JSON.stringify({ type: "file-paste", ids: ["file", "file"] }))).rejects.toThrow("UNAUTHORIZED");
+  expect(write).not.toHaveBeenCalled();
+  let ready!: () => void; write.mockImplementationOnce(() => new Promise<void>(resolve => { ready = resolve; }));
+  const pending = receive("host", "Remote", JSON.stringify({ type: "file-paste", ids: ["file"] }));
+  await Promise.resolve(); expect(apply).not.toHaveBeenCalled(); ready(); await pending;
+  expect(write).toHaveBeenCalledExactlyOnceWith(["saved"]); expect(apply).toHaveBeenCalledTimes(4);
+  expect(channel.send).toHaveBeenCalledExactlyOnceWith(JSON.stringify({ type: "file-paste-result", ok: true }));
+});
+
+test.each([false, true])("clipboard files traverse the encrypted stream in both directions (return=%s)", async returning => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "nodus-paste-test-"));
+  const { createFileStorage, createClipboardReader } = createRequire(import.meta.url)("../apps/desktop/electron/file-storage.cjs");
+  const files = [path.join(directory, "first.txt"), path.join(directory, "empty.bin")];
+  fs.writeFileSync(files[0], "encrypted file contents"); fs.writeFileSync(files[1], "");
+  const storage = createFileStorage(directory, () => path.join(directory, "cache"));
+  const header = Buffer.alloc(4); header.writeUInt32LE(42);
+  const reader = createClipboardReader(async () => Buffer.concat([header, Buffer.from(files.join("\0") + "\0", "utf16le")]));
+  try {
+    const f = clipboardPasteFixture(), local = await createFileCryptoSession(), remote = await createFileCryptoSession();
+    Object.assign(f.desktop, { readClipboardFiles: () => reader.snapshot(1), readClipboardFileChunk: (id: string, offset: number, length: number) => reader.chunk(1, id, offset, length), releaseClipboardFiles: () => reader.release(1) });
+    const applied: unknown[] = [], received: string[] = [];
+    const hostChannel: any = { readyState: "open", send: vi.fn(), close: () => { hostChannel.readyState = "closed"; hostChannel.onclose(); } };
+    const host: any = { MAX_FILE_SIZE: 256 * 1024 * 1024, Blob, ArrayBuffer, JSON, Number, Math, Date, PASTE_KEYS: f.context.PASTE_KEYS,
+      fileChannelsRef: { current: new Map() }, fileCryptoRef: { current: new Map() }, fileCryptoSessionsRef: { current: new Map() },
+      incomingFilesRef: { current: new Map() }, pausedFilesRef: { current: new Set() }, clipboardFilePeersRef: { current: new Set() },
+      clipboardKeysRef: { current: new Map() }, clipboardReceivedRef: { current: new Map() }, canPasteFiles: () => true,
+      clipboardReturnPeersRef: { current: new Set() }, clipboardLocalSequenceRef: { current: new Map() },
+      sessionsRef: { current: [{ session: { sessionId: "paste", role: returning ? "viewer" : "host" } }] },
+      createFileCryptoSession: async () => remote, deriveFileCryptoKey, decryptFileChunk,
+      patchFileTransfer: vi.fn(), upsertFileTransfer: vi.fn(), updateRuntime: vi.fn(), setFileChannelReady: vi.fn(),
+      window: { nodusDesktop: { beginFileSave: (...args: any[]) => storage.begin(2, ...args), appendFileSave: (id: string, bytes: ArrayBuffer) => storage.append(2, id, bytes),
+        finishFileSave: async (id: string) => { const result = await storage.finish(2, id); received.push(result.path); return result; }, cancelFileSave: (id: string) => storage.cancel(2, id),
+        readClipboardSequence: async () => 10,
+        writeClipboardFiles: vi.fn(async (ids: string[], sequence?: number) => { expect(sequence).toBe(returning ? 10 : undefined); expect(storage.clipboardPaths(2, ids)).toEqual(received); expect(received.map(file => fs.readFileSync(file, "utf8"))).toEqual(["encrypted file contents", ""]); }),
+        applyRemoteInput: (message: unknown) => applied.push(message) } },
+    };
+    host.handleFileTransferMessage = uiFunction("handleFileTransferMessage", host);
+    uiFunction("attachFileTransfer", host)("paste", hostChannel, "Viewer");
+    hostChannel.onmessage({ data: JSON.stringify({ type: "file-key", publicKey: local.publicKey, clipboard: true }) });
+    f.channel.send.mockImplementation((data: any) => hostChannel.onmessage({ data }));
+    Object.assign(f.context, { MAX_FILE_SIZE: 256 * 1024 * 1024, crypto: globalThis.crypto, encryptFileChunk,
+      fileCryptoRef: { current: new Map([["paste", { remote: deriveFileCryptoKey(local, remote.publicKey) }]]) },
+      upsertFileTransfer: vi.fn(), patchFileTransfer: vi.fn(), setFeedback: vi.fn(), waitForFileChannel: async () => undefined });
+    f.context.sendFile = uiFunction("sendFile", f.context);
+    if (returning) {
+      f.context.sessionsRef.current[0].session.role = "host";
+      f.context.canPasteFiles = () => true;
+      await uiFunction("copyClipboardFilesToViewer", f.context)();
+    } else await f.context.pasteClipboardFiles("paste", { busy: true });
+    await vi.waitFor(() => expect(host.window.nodusDesktop.writeClipboardFiles).toHaveBeenCalledOnce());
+    expect(applied).toHaveLength(returning ? 0 : 4);
+    if (returning) expect(host.updateRuntime).toHaveBeenLastCalledWith("paste", { error: "Arquivos copiados. Agora você pode colar na sua máquina." });
+    else expect(host.updateRuntime).not.toHaveBeenCalled();
+    const binary = f.channel.send.mock.calls.map(call => call[0]).filter(value => value instanceof ArrayBuffer);
+    expect(binary).toHaveLength(1); expect(Buffer.from(binary[0]).includes(Buffer.from("encrypted file contents"))).toBe(false);
+    expect(hostChannel.send).toHaveBeenLastCalledWith(JSON.stringify({ type: "file-paste-result", ok: true }));
+  } finally {
+    await reader.release(1); await storage.release(2);
+    if (path.dirname(directory) !== path.resolve(os.tmpdir())) throw new Error("UNSAFE_TEST_CLEANUP");
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test.each(["host", "viewer"])("clipboard file permissions apply in both roles: %s", role => {
+  const context: any = { settings: { allowRemoteControl: true, allowClipboard: true, allowFileTransfer: true },
+    sessionsRef: { current: [{ controlReady: true, session: { sessionId: "s", role, permissions: ["files:transfer", "clipboard:sync", "keyboard:control"] } }] } };
+  const allowed = uiFunction("canPasteFiles", context);
+  expect(allowed("s")).toBe(true); expect(allowed("other")).toBe(false);
+  for (const key of ["allowRemoteControl", "allowClipboard", "allowFileTransfer"]) {
+    context.settings[key] = false; expect(allowed("s")).toBe(false); context.settings[key] = true;
+  }
+  for (const permission of ["files:transfer", "clipboard:sync", "keyboard:control"]) {
+    const permissions = context.sessionsRef.current[0].session.permissions;
+    context.sessionsRef.current[0].session.permissions = permissions.filter((item: string) => item !== permission);
+    expect(allowed("s")).toBe(false); context.sessionsRef.current[0].session.permissions = permissions;
+  }
+  context.sessionsRef.current[0].controlReady = false; expect(allowed("s")).toBe(false);
+});
+
+test.each(["permission", "old-peer", "viewer", "disconnected"])("clipboard return never reads local files when unavailable: %s", mode => {
+  const f = clipboardPasteFixture();
+  f.context.sessionsRef.current[0].session.role = mode === "viewer" ? "viewer" : "host";
+  if (mode === "permission") f.context.settings.allowClipboard = false;
+  if (mode === "old-peer") f.context.clipboardReturnPeersRef.current.clear();
+  if (mode === "disconnected") f.context.sessionsRef.current = [];
+  f.context.settings.allowRemoteControl = true;
+  f.context.canPasteFiles = uiFunction("canPasteFiles", f.context);
+  uiFunction("copyClipboardFilesToViewer", f.context)();
+  expect(f.desktop.readClipboardFiles).not.toHaveBeenCalled();
+});
+
+test("clipboard return coalesces copy events while a transfer is active", async () => {
+  const f = clipboardPasteFixture();
+  f.context.sessionsRef.current[0].session.role = "host"; f.context.canPasteFiles = () => true;
+  let finish!: () => void;
+  f.context.pasteClipboardFiles = vi.fn().mockImplementationOnce(() => new Promise<void>(resolve => { finish = resolve; })).mockResolvedValue(undefined);
+  const sync = uiFunction("copyClipboardFilesToViewer", f.context); f.context.copyClipboardFilesToViewer = sync;
+  const pending = sync(); await sync(); await sync();
+  expect(f.context.pasteClipboardFiles).toHaveBeenCalledOnce();
+  finish(); await pending;
+  await vi.waitFor(() => expect(f.context.pasteClipboardFiles).toHaveBeenCalledTimes(2));
+  expect(f.context.clipboardPasteOwnerRef.current).toBeNull();
+});
+
+test("clipboard return never pastes locally or overwrites a newer local copy", async () => {
+  const f = clipboardPasteFixture();
+  const write = vi.fn().mockRejectedValue(new Error("CLIPBOARD_CHANGED")), apply = vi.fn();
+  Object.assign(f.context, { canPasteFiles: () => true, clipboardReceivedRef: { current: new Map([["remote", { sessionId: "paste", saveId: "staged" }]]) } });
+  Object.assign(f.desktop, { writeClipboardFiles: write, applyRemoteInput: apply });
+  f.context.clipboardLocalSequenceRef.current.set("paste", 41);
+  await uiFunction("handleFileTransferMessage", f.context)("paste", "Host", JSON.stringify({ type: "file-paste", ids: ["remote"] }));
+  expect(write).toHaveBeenCalledExactlyOnceWith(["staged"], 41); expect(apply).not.toHaveBeenCalled();
+  expect(f.channel.send).toHaveBeenCalledExactlyOnceWith(JSON.stringify({ type: "file-paste-result", ok: false }));
+  expect(f.context.clipboardLocalSequenceRef.current.size).toBe(0);
+});
+
+test("clipboard watcher handles split events and stops with its renderer without leaking stale events", () => {
+  const child = Object.assign(new EventEmitter(), { stdout: Object.assign(new EventEmitter(), { setEncoding: vi.fn() }), kill: vi.fn() });
+  const contents = { id: 42, isDestroyed: () => false, send: vi.fn() };
+  const context: any = { process: { platform: "win32", pid: 123 }, fs: { existsSync: () => true }, nativeService: "native.exe",
+    activeSessionCount: 1, clipboardWatcher: undefined, spawn: vi.fn(() => child), appendLog: vi.fn() };
+  context.stopClipboardWatcher = uiFunction("stopClipboardWatcher", context, "apps/desktop/electron/main.cjs");
+  const start = uiFunction("startClipboardWatcher", context, "apps/desktop/electron/main.cjs");
+  start(contents);
+  expect(context.spawn).toHaveBeenCalledExactlyOnceWith("native.exe", ["--watch-clipboard-files", "123"], { windowsHide: true, stdio: ["ignore", "pipe", "ignore"] });
+  child.stdout.emit("data", "12"); expect(contents.send).not.toHaveBeenCalled();
+  child.stdout.emit("data", "3\ninvalid\n"); expect(contents.send).toHaveBeenCalledExactlyOnceWith("nodus:clipboard-files-changed");
+  context.activeSessionCount = 0; child.stdout.emit("data", "124\n"); expect(contents.send).toHaveBeenCalledOnce();
+  context.stopClipboardWatcher(); expect(child.kill).toHaveBeenCalledOnce();
+  child.stdout.emit("data", "125\n"); expect(contents.send).toHaveBeenCalledOnce();
+  const replacement = { kill: vi.fn() }; context.clipboardWatcher = replacement;
+  child.emit("exit"); child.stdout.emit("data", "a".repeat(5000));
+  expect(context.clipboardWatcher).toBe(replacement); expect(replacement.kill).not.toHaveBeenCalled();
 });

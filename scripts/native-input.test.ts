@@ -6,14 +6,18 @@ import { runInNewContext } from "node:vm";
 import ts from "typescript";
 import { expect, test, vi } from "vitest";
 
-test.skipIf(process.platform !== "win32")("Nodus caption clicks are paired, owner-scoped and preserve native window commands", () => {
+function nativeCompiler() {
   const builder = ts.createSourceFile("build-native-service.mjs", readFileSync("scripts/build-native-service.mjs", "utf8"), ts.ScriptTarget.Latest, true, ts.ScriptKind.JS);
   const compile = vi.fn(() => ({ status: 0 }));
   runInNewContext(builder.statements.filter(node => !ts.isImportDeclaration(node)).map(node => node.getText(builder)).join("\n"), {
     process: { cwd: () => process.cwd(), exit: () => { throw new Error("Native build failed"); } }, join, existsSync,
     mkdirSync: () => {}, spawnSync: compile, console: { log: () => {} },
   });
-  const [compiler, arguments_] = compile.mock.calls[0] as unknown as [string, string[]];
+  return compile.mock.calls[0] as unknown as [string, string[]];
+}
+
+test.skipIf(process.platform !== "win32")("Nodus caption clicks are paired, owner-scoped and preserve native window commands", () => {
+  const [compiler, arguments_] = nativeCompiler();
   const native = readFileSync("native/service/main.cpp", "utf8");
   const routing = native.slice(native.indexOf("class OwnWindowCaptionClick"), native.indexOf("int runInputHelper"));
   const inputLoop = native.slice(native.indexOf("int runInputHelper"), native.indexOf("static std::atomic<ULONGLONG> inputLockHeartbeat"))
@@ -176,6 +180,94 @@ int main() {
     expect(run.stdout).toContain("Nodus/QuickSupport caption routing passed");
   } finally {
     if (!resolve(directory).startsWith(resolve(tmpdir()) + "\\") || !directory.includes("nodus-input-test-")) throw new Error("UNSAFE_TEST_CLEANUP");
+    rmSync(directory, { recursive: true, force: true });
+  }
+}, 45000);
+
+test.skipIf(process.platform !== "win32")("native file clipboard round-trips Unicode paths in a private Windows station", () => {
+  const [compiler, arguments_] = nativeCompiler();
+  const native = readFileSync("native/service/main.cpp", "utf8");
+  const implementation = native.slice(native.indexOf("LRESULT CALLBACK fileClipboardWindow("), native.indexOf("int wmain("));
+  const directory = mkdtempSync(join(tmpdir(), "nodus-clipboard-test-"));
+  const source = join(directory, "clipboard.cpp"), output = join(directory, "clipboard.exe"), result = join(directory, "result.bin");
+  const copied = [join(directory, "copiado.txt"), join(directory, "acentuado-\u00e1.bin")];
+  try {
+    copied.forEach(file => writeFileSync(file, "clipboard-test"));
+    writeFileSync(source, `#include <windows.h>
+#include <shellapi.h>
+#include <shlobj.h>
+#include <vector>
+#include <string>
+#include <cwchar>
+#include <cstring>
+#include <cstdio>
+#include <fcntl.h>
+#include <io.h>
+${implementation}
+struct PrivateStation {
+  HWINSTA original = GetProcessWindowStation(), station = nullptr;
+  HDESK initial = GetThreadDesktop(GetCurrentThreadId()), desktop = nullptr;
+  bool open() {
+    station = CreateWindowStationW(nullptr, 0, WINSTA_ALL_ACCESS, nullptr);
+    if (!station || !SetProcessWindowStation(station)) return false;
+    desktop = CreateDesktopW(L"NodusClipboardTests", nullptr, nullptr, 0, GENERIC_ALL, nullptr);
+    return desktop && SetThreadDesktop(desktop);
+  }
+  ~PrivateStation() { SetThreadDesktop(initial); SetProcessWindowStation(original); if (desktop) CloseDesktop(desktop); if (station) CloseWindowStation(station); }
+};
+int wmain(int argc, wchar_t** argv) {
+  if (argc != 4) return 10;
+  PrivateStation isolated;
+  if (!isolated.open()) return 11;
+  std::wstring list = argv[1]; list.push_back(0); list += argv[2]; list.append(2, 0);
+  FILE* input = nullptr;
+  const std::wstring inputPath = std::wstring(argv[3]) + L".input";
+  if (_wfopen_s(&input, inputPath.c_str(), L"wb")) return 12;
+  std::fwrite(list.data(), sizeof(wchar_t), list.size(), input); std::fclose(input);
+  if (!_wfreopen(inputPath.c_str(), L"rb", stdin) || !_wfreopen(argv[3], L"wb", stdout)) return 13;
+  if (runFileClipboard(true) != 0) return 14;
+  if (!OpenClipboard(nullptr)) return 15;
+  const HDROP drop = static_cast<HDROP>(GetClipboardData(CF_HDROP));
+  const UINT count = drop ? DragQueryFileW(drop, 0xffffffff, nullptr, 0) : 0;
+  CloseClipboard();
+  if (count != 2) return 16;
+  if (!_wfreopen(inputPath.c_str(), L"rb", stdin)) return 17;
+  if (runFileClipboard(true, GetClipboardSequenceNumber() + 1ULL) != 3) return 18;
+  const int status = runFileClipboard(false); std::fflush(stdout);
+  if (status) return status;
+  if (!_wfreopen((std::wstring(argv[3]) + L".events").c_str(), L"wb", stdout)) return 19;
+  WNDCLASSW cls{}; cls.lpfnWndProc = fileClipboardWindow; cls.hInstance = GetModuleHandleW(nullptr); cls.lpszClassName = L"NodusClipboardEventTest";
+  if (!RegisterClassW(&cls)) return 20;
+  const HWND listener = CreateWindowW(cls.lpszClassName, L"", 0, 0, 0, 0, 0, HWND_MESSAGE, nullptr, cls.hInstance, nullptr);
+  if (!listener || !AddClipboardFormatListener(listener)) return 21;
+  MSG message;
+  auto dispatch = [&]() { while (PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE)) DispatchMessageW(&message); };
+  fileClipboardWindow(listener, WM_CLIPBOARDUPDATE, 0, 0); // Nodus writes must not echo.
+  if (!OpenClipboard(listener)) return 22;
+  HGLOBAL external = GlobalAlloc(GMEM_MOVEABLE | GMEM_ZEROINIT, sizeof(DROPFILES) + list.size() * sizeof(wchar_t));
+  auto* data = static_cast<DROPFILES*>(GlobalLock(external));
+  if (!data) return 23;
+  data->pFiles = sizeof(DROPFILES); data->fWide = TRUE;
+  std::memcpy(reinterpret_cast<char*>(data) + sizeof(DROPFILES), list.data(), list.size() * sizeof(wchar_t)); GlobalUnlock(external);
+  if (!EmptyClipboard() || !SetClipboardData(CF_HDROP, external)) return 24;
+  CloseClipboard();
+  SendMessageW(listener, WM_CLIPBOARDUPDATE, 0, 0); dispatch();
+  SendMessageW(listener, WM_CLIPBOARDUPDATE, 0, 0); // Duplicate notifications are coalesced.
+  std::fflush(stdout);
+  RemoveClipboardFormatListener(listener); DestroyWindow(listener);
+  return status;
+}`);
+    const args = arguments_.map(value => value.endsWith("main.cpp") ? source : value.startsWith("/Fe") ? `/Fe${output}` : value);
+    const build = spawnSync(compiler, args, { cwd: directory, encoding: "utf8", windowsHide: true, timeout: 30000 });
+    expect(build.status, `${build.stdout}\n${build.stderr}`).toBe(0);
+    const run = spawnSync(output, [...copied, result], { cwd: directory, windowsHide: true, timeout: 10000 });
+    expect(run.status, `private clipboard test exit ${run.status}`).toBe(0);
+    const data = readFileSync(result);
+    expect(data.readUInt32LE(0)).toBeGreaterThan(0);
+    expect(data.subarray(4).toString("utf16le").split("\0").filter(Boolean)).toEqual(copied);
+    expect(readFileSync(`${result}.events`, "utf8")).toMatch(/^\d+\r?\n$/);
+  } finally {
+    if (!resolve(directory).startsWith(resolve(tmpdir()) + "\\") || !directory.includes("nodus-clipboard-test-")) throw new Error("UNSAFE_TEST_CLEANUP");
     rmSync(directory, { recursive: true, force: true });
   }
 }, 45000);

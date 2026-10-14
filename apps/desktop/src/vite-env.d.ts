@@ -46,11 +46,17 @@ interface Window {
     setCaptureOptions(options: { sourceId: string; displayId?: string; shareAudio: boolean }): Promise<void>;
     readClipboard(): Promise<string>;
     writeClipboard(text: string): Promise<void>;
+    readClipboardFiles(): Promise<{ sequence: number; files: Array<{ id: string; name: string; size: number; type: string }> }>;
+    readClipboardSequence(): Promise<number>;
+    readClipboardFileChunk(id: string, offset: number, length: number): Promise<Uint8Array>;
+    releaseClipboardFiles(): Promise<void>;
+    writeClipboardFiles(ids: string[], sequence?: number): Promise<void>;
+    onClipboardFilesChanged?(callback: () => void): () => void;
     getConnectionPassword(nodusId: string): Promise<string>;
     saveConnectionPassword(nodusId: string, password: string): Promise<{ ok: boolean }>;
     openExternal(url: string): Promise<void>;
     saveReceivedFile(fileName: string, data: ArrayBuffer): Promise<{ ok: boolean; path?: string; name?: string; error?: string }>;
-    beginFileSave(fileName: string, size: number, recording?: boolean): Promise<{ id: string }>;
+    beginFileSave(fileName: string, size: number, recording?: boolean, clipboard?: boolean): Promise<{ id: string }>;
     appendFileSave(id: string, data: ArrayBuffer): Promise<{ bytes: number }>;
     finishFileSave(id: string): Promise<{ ok: boolean; name: string; path: string; bytes: number }>;
     cancelFileSave(id: string): Promise<void>;

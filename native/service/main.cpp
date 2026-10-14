@@ -10,6 +10,9 @@
 #include <string>
 #include <cstring>
 #include <atomic>
+#include <vector>
+#include <cwchar>
+#include <shlobj.h>
 
 static std::atomic<ULONGLONG> keyboardHeartbeat{0};
 static std::atomic<unsigned> keyboardPending{0};
@@ -845,7 +848,111 @@ int identityRecovery(bool write, const wchar_t* scope) {
   return result == ERROR_SUCCESS ? 0 : 1;
 }
 
+LRESULT CALLBACK fileClipboardWindow(HWND window, UINT message, WPARAM wParam, LPARAM lParam) {
+  if (message == WM_CLIPBOARDUPDATE) {
+    const DWORD sequence = GetClipboardSequenceNumber();
+    if (sequence != static_cast<DWORD>(GetWindowLongPtrW(window, GWLP_USERDATA))) {
+      SetWindowLongPtrW(window, GWLP_USERDATA, sequence);
+      if (IsClipboardFormatAvailable(CF_HDROP) && !IsClipboardFormatAvailable(RegisterClipboardFormatW(L"NodusClipboardTransfer"))) {
+        std::printf("%lu\n", sequence); std::fflush(stdout);
+      }
+    }
+    return 0;
+  }
+  return DefWindowProcW(window, message, wParam, lParam);
+}
+
+int watchFileClipboard(DWORD parentPid) {
+  const HANDLE parent = OpenProcess(SYNCHRONIZE, FALSE, parentPid);
+  if (!parent) return 1;
+  WNDCLASSW cls{}; cls.lpfnWndProc = fileClipboardWindow; cls.hInstance = GetModuleHandleW(nullptr); cls.lpszClassName = L"NodusFileClipboard";
+  RegisterClassW(&cls);
+  const HWND window = CreateWindowW(cls.lpszClassName, L"", 0, 0, 0, 0, 0, HWND_MESSAGE, nullptr, cls.hInstance, nullptr);
+  if (!window || !AddClipboardFormatListener(window)) { if (window) DestroyWindow(window); CloseHandle(parent); return 1; }
+  SetWindowLongPtrW(window, GWLP_USERDATA, GetClipboardSequenceNumber());
+  while (MsgWaitForMultipleObjects(1, &parent, FALSE, INFINITE, QS_ALLINPUT) == WAIT_OBJECT_0 + 1) {
+    MSG message;
+    while (PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE)) { TranslateMessage(&message); DispatchMessageW(&message); }
+  }
+  RemoveClipboardFormatListener(window); DestroyWindow(window); CloseHandle(parent);
+  return 0;
+}
+
+int runFileClipboard(bool write, ULONGLONG expected = 0x100000000ULL) {
+  _setmode(_fileno(stdin), _O_BINARY);
+  _setmode(_fileno(stdout), _O_BINARY);
+  std::vector<wchar_t> paths;
+  if (write) {
+    wchar_t chunk[4096]; size_t count;
+    while ((count = std::fread(chunk, sizeof(wchar_t), 4096, stdin)) != 0) {
+      if (paths.size() + count > 1024 * 1024 + 8) return 2;
+      paths.insert(paths.end(), chunk, chunk + count);
+    }
+    if (paths.size() < 3 || paths.back() || paths[paths.size() - 2]) return 2;
+    unsigned files = 0;
+    for (size_t i = 0; i + 1 < paths.size();) {
+      const size_t length = std::wcslen(paths.data() + i);
+      const DWORD attributes = GetFileAttributesW(paths.data() + i);
+      if (!length || ++files > 32 || attributes == INVALID_FILE_ATTRIBUTES || (attributes & FILE_ATTRIBUTE_DIRECTORY)) return 2;
+      i += length + 1;
+    }
+  }
+  const HWND owner = CreateWindowW(L"STATIC", L"Nodus clipboard", 0, 0, 0, 0, 0, HWND_MESSAGE, nullptr, nullptr, nullptr);
+  if (!owner) return 1;
+  bool opened = false;
+  for (int retry = 0; retry < 10 && !opened; ++retry) { opened = OpenClipboard(owner) != FALSE; if (!opened) Sleep(10); }
+  if (!opened) { DestroyWindow(owner); return 1; }
+  if (write && expected < 0x100000000ULL && GetClipboardSequenceNumber() != expected) { CloseClipboard(); DestroyWindow(owner); return 3; }
+  int result = 0;
+  if (write) {
+    HGLOBAL memory = GlobalAlloc(GMEM_MOVEABLE | GMEM_ZEROINIT, sizeof(DROPFILES) + paths.size() * sizeof(wchar_t));
+    auto* drop = static_cast<DROPFILES*>(memory ? GlobalLock(memory) : nullptr);
+    if (!drop) { if (memory) GlobalFree(memory); result = 1; }
+    else {
+      drop->pFiles = sizeof(DROPFILES); drop->fWide = TRUE;
+      std::memcpy(reinterpret_cast<char*>(drop) + sizeof(DROPFILES), paths.data(), paths.size() * sizeof(wchar_t));
+      GlobalUnlock(memory);
+      if (!EmptyClipboard() || !SetClipboardData(CF_HDROP, memory)) { GlobalFree(memory); result = 1; }
+      else {
+        HGLOBAL marker = GlobalAlloc(GMEM_MOVEABLE | GMEM_ZEROINIT, 1);
+        if (!marker || !SetClipboardData(RegisterClipboardFormatW(L"NodusClipboardTransfer"), marker)) {
+          if (marker) GlobalFree(marker);
+          EmptyClipboard(); CloseClipboard(); DestroyWindow(owner); return 1;
+        }
+        HGLOBAL effect = GlobalAlloc(GMEM_MOVEABLE, sizeof(DWORD));
+        auto* value = static_cast<DWORD*>(effect ? GlobalLock(effect) : nullptr);
+        if (!value) { if (effect) GlobalFree(effect); result = 1; }
+        else {
+          *value = DROPEFFECT_COPY; GlobalUnlock(effect);
+          if (!SetClipboardData(RegisterClipboardFormatW(L"Preferred DropEffect"), effect)) { GlobalFree(effect); result = 1; }
+        }
+      }
+    }
+  } else {
+    const DWORD sequence = GetClipboardSequenceNumber();
+    std::fwrite(&sequence, sizeof(sequence), 1, stdout);
+    const HDROP drop = static_cast<HDROP>(GetClipboardData(CF_HDROP));
+    const UINT count = drop ? DragQueryFileW(drop, 0xffffffff, nullptr, 0) : 0;
+    if (count > 32) result = 2;
+    else for (UINT i = 0; i < count; ++i) {
+      const UINT length = DragQueryFileW(drop, i, nullptr, 0);
+      if (!length || length > 32767) { result = 2; break; }
+      std::wstring name(length + 1, L'\0');
+      if (DragQueryFileW(drop, i, name.data(), length + 1) != length) { result = 1; break; }
+      std::fwrite(name.data(), sizeof(wchar_t), name.size(), stdout);
+    }
+    const wchar_t end = 0;
+    std::fwrite(&end, sizeof(end), 1, stdout);
+  }
+  CloseClipboard(); DestroyWindow(owner);
+  return result;
+}
+
 int wmain(int argc, wchar_t** argv) {
+  if (argc == 3 && _wcsicmp(argv[1], L"--watch-clipboard-files") == 0) return watchFileClipboard(wcstoul(argv[2], nullptr, 10));
+  if (argc == 3 && _wcsicmp(argv[1], L"--write-clipboard-files") == 0) return runFileClipboard(true, _wcstoui64(argv[2], nullptr, 10));
+  if (argc == 2 && _wcsicmp(argv[1], L"--read-clipboard-files") == 0) return runFileClipboard(false);
+  if (argc == 2 && _wcsicmp(argv[1], L"--write-clipboard-files") == 0) return runFileClipboard(true);
   if (argc == 3 && _wcsicmp(argv[1], L"--identity-recovery-read") == 0) return identityRecovery(false, argv[2]);
   if (argc == 3 && _wcsicmp(argv[1], L"--identity-recovery-write") == 0) return identityRecovery(true, argv[2]);
   if (argc >= 2 && _wcsicmp(argv[1], L"--cursor-overlay-probe") == 0) {

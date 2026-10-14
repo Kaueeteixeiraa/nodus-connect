@@ -10,8 +10,9 @@ const { pathToFileURL } = require("node:url");
 const { createDeviceIdentityStore, createWindowsIdentityRecovery, collectHardwareIdentity } = require("./device-identity.cjs");
 let licenseIdentityPromise;
 const { createLogWriter } = require("./log-writer.cjs");
-const { createFileStorage } = require("./file-storage.cjs");
-const fileStorage = createFileStorage(() => app.getPath("documents"));
+const { createFileStorage, createClipboardReader } = require("./file-storage.cjs");
+const fileStorage = createFileStorage(() => app.getPath("documents"), () => path.join(app.getPath("temp"), "Nodus-Clipboard"));
+const clipboardFiles = createClipboardReader(nativeFileClipboard);
 const { RemoteCursorVisibility } = require("./remote-cursor-visibility.cjs");
 const { RemoteWindowsKeys } = require("./remote-windows-keys.cjs");
 const supportPackages = require("./quick-support.cjs");
@@ -40,6 +41,7 @@ let remoteKeyboardCaptureWebContentsId = 0;
 let lastSecureAttentionAt = 0;
 let minimizeToTray = !portableSupport;
 let inputHelper;
+let clipboardWatcher;
 let inputProbeSequence = 0;
 const inputProbes = new Map();
 let inputLockHelper;
@@ -193,6 +195,7 @@ app.whenReady().then(() => {
 
 app.on("before-quit", () => {
   isQuitting = true;
+  stopClipboardWatcher();
   stopNativeMediaForOwner(null, true);
   hostCursorVisibility?.dispose();
   remoteWindowsKeys?.dispose();
@@ -237,6 +240,8 @@ function createMainWindow() {
     hostCursorVisibility?.setActive(false);
     stopNativeMediaForOwner(mainWebContentsId, true);
     fileStorage.release(mainWebContentsId).catch(() => undefined);
+    clipboardFiles.release(mainWebContentsId).catch(() => undefined);
+    if (clipboardWatcher?.owner === mainWebContentsId) stopClipboardWatcher();
   };
   mainWindow.webContents.on("render-process-gone", releaseRendererResources);
   mainWindow.webContents.on("destroyed", releaseRendererResources);
@@ -562,7 +567,10 @@ function setupIpc() {
     return next;
   });
   ipcMain.on("nodus:active-session-count", (event, count) => {
-    if (isMainAppSender(event) && Number.isSafeInteger(count) && count >= 0 && count <= 1000) activeSessionCount = count;
+    if (isMainAppSender(event) && Number.isSafeInteger(count) && count >= 0 && count <= 1000) {
+      activeSessionCount = count;
+      if (!count) stopClipboardWatcher();
+    }
   });
   ipcMain.handle("nodus:check-for-updates", (event) => isMainAppSender(event)
     ? checkAndInstallUpdate(event.sender) : { ok: false, error: "UNAUTHORIZED" });
@@ -601,6 +609,32 @@ function setupIpc() {
   });
   ipcMain.handle("nodus:read-clipboard", () => clipboard.readText());
   ipcMain.handle("nodus:write-clipboard", (_event, text) => clipboard.writeText(String(text || "").slice(0, 1_000_000)));
+  ipcMain.handle("nodus:clipboard-files", event => {
+    if (!isMainAppSender(event)) throw new Error("UNAUTHORIZED");
+    return clipboardFiles.snapshot(event.sender.id);
+  });
+  ipcMain.handle("nodus:clipboard-sequence", event => {
+    if (!isMainAppSender(event)) throw new Error("UNAUTHORIZED");
+    return nativeFileClipboard().then(data => data.readUInt32LE(0));
+  });
+  ipcMain.handle("nodus:clipboard-file-chunk", (event, id, offset, length) => {
+    if (!isMainAppSender(event)) throw new Error("UNAUTHORIZED");
+    return clipboardFiles.chunk(event.sender.id, id, offset, length);
+  });
+  ipcMain.handle("nodus:clipboard-files-release", event => {
+    if (!isMainAppSender(event)) throw new Error("UNAUTHORIZED");
+    return clipboardFiles.release(event.sender.id);
+  });
+  ipcMain.on("nodus:watch-clipboard-files", (event, active) => {
+    if (!isMainAppSender(event)) return;
+    stopClipboardWatcher();
+    if (active === true && activeSessionCount > 0) startClipboardWatcher(event.sender);
+  });
+  ipcMain.handle("nodus:clipboard-files-write", (event, ids, sequence) => {
+    if (!isMainAppSender(event) || (!remoteControlActive && activeSessionCount <= 0)) throw new Error("UNAUTHORIZED");
+    if (sequence !== undefined && (!Number.isInteger(sequence) || sequence < 0 || sequence > 0xffffffff)) throw new Error("INVALID_CLIPBOARD");
+    return nativeFileClipboard(fileStorage.clipboardPaths(event.sender.id, ids), sequence).then(() => undefined);
+  });
   ipcMain.handle("nodus:get-connection-password", (_event, nodusId) => getConnectionPassword(nodusId));
   ipcMain.handle("nodus:save-connection-password", (_event, nodusId, password) => saveConnectionPassword(nodusId, password));
   ipcMain.handle("nodus:open-external", (_event, value) => {
@@ -620,6 +654,42 @@ function setupIpc() {
   ipcMain.handle("nodus:get-gpu-diagnostics", () => getGpuDiagnostics());
   ipcMain.handle("nodus:get-render-display-info", (event, viewport) => getRenderDisplayInfo(event.sender, viewport));
   ipcMain.handle("nodus:google-login", (_event, options) => { if (portableSupport) throw new Error("UNAUTHORIZED"); return googleLogin(options); });
+}
+
+function stopClipboardWatcher() {
+  const child = clipboardWatcher;
+  clipboardWatcher = undefined;
+  child?.kill();
+}
+
+function startClipboardWatcher(contents) {
+  if (process.platform !== "win32" || !fs.existsSync(nativeService)) return;
+  const child = spawn(nativeService, ["--watch-clipboard-files", String(process.pid)], { windowsHide: true, stdio: ["ignore", "pipe", "ignore"] });
+  clipboardWatcher = child;
+  child.owner = contents.id;
+  let pending = "";
+  child.stdout.setEncoding("utf8");
+  child.stdout.on("data", data => {
+    if (clipboardWatcher !== child) return;
+    pending += data;
+    if (pending.length > 4096) { stopClipboardWatcher(); return; }
+    const lines = pending.split(/\r?\n/); pending = lines.pop();
+    for (const line of lines) if (/^\d{1,10}$/.test(line) && clipboardWatcher === child && activeSessionCount > 0 && !contents.isDestroyed()) contents.send("nodus:clipboard-files-changed");
+  });
+  const stopped = () => { if (clipboardWatcher === child) clipboardWatcher = undefined; };
+  child.on("error", () => { appendLog("clipboard-watcher-unavailable"); stopped(); });
+  child.on("exit", stopped);
+}
+
+function nativeFileClipboard(files, sequence) {
+  if (process.platform !== "win32" || !fs.existsSync(nativeService)) return Promise.reject(new Error("CLIPBOARD_FILES_UNAVAILABLE"));
+  return new Promise((resolve, reject) => {
+    const helper = execFile(nativeService, [files ? "--write-clipboard-files" : "--read-clipboard-files", ...(sequence === undefined ? [] : [String(sequence)])],
+      { windowsHide: true, encoding: "buffer", timeout: 5000, maxBuffer: 2 * 1024 * 1024 + 16 },
+      (error, data) => error ? reject(new Error(error.code === 3 ? "CLIPBOARD_CHANGED" : error.code === 2 ? "CLIPBOARD_FILE_LIMIT" : "CLIPBOARD_FILES_UNAVAILABLE")) : resolve(data));
+    helper.stdin.on("error", () => {});
+    helper.stdin.end(files ? Buffer.from(`${files.join("\0")}\0\0`, "utf16le") : undefined);
+  });
 }
 
 function updateRelease(release, currentVersion) {

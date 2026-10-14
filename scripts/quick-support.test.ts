@@ -211,8 +211,9 @@ test("closing the portable uses the existing app cleanup and only its trusted ma
   handle.mock.calls[0][1]("foreign"); expect(quit).not.toHaveBeenCalled();
   handle.mock.calls[0][1]("trusted"); expect(quit).toHaveBeenCalledOnce();
   const listener = source.statements.find(node => ts.isExpressionStatement(node) && node.getText(source).startsWith('app.on("before-quit"'))!.getText(source);
-  const on = vi.fn(), stop = vi.fn(), cursor = vi.fn(), keyboard = vi.fn(), locks = vi.fn(), control = vi.fn();
-  runInNewContext(listener, { app: { on }, isQuitting: false, stopNativeMediaForOwner: stop, hostCursorVisibility: { dispose: cursor }, remoteWindowsKeys: { dispose: keyboard }, clearInputLocks: locks, setRemoteControlActive: control });
+  const on = vi.fn(), stop = vi.fn(), cursor = vi.fn(), keyboard = vi.fn(), locks = vi.fn(), control = vi.fn(), clipboard = vi.fn();
+  runInNewContext(listener, { app: { on }, isQuitting: false, stopClipboardWatcher: clipboard, stopNativeMediaForOwner: stop, hostCursorVisibility: { dispose: cursor }, remoteWindowsKeys: { dispose: keyboard }, clearInputLocks: locks, setRemoteControlActive: control });
   on.mock.calls[0][1](); expect(stop).toHaveBeenCalledExactlyOnceWith(null, true);
   expect(cursor).toHaveBeenCalledOnce(); expect(keyboard).toHaveBeenCalledOnce(); expect(locks).toHaveBeenCalledOnce(); expect(control).toHaveBeenCalledExactlyOnceWith(false);
+  expect(clipboard).toHaveBeenCalledOnce();
 });
