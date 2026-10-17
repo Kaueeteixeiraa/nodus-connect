@@ -10,6 +10,7 @@
     "output": "outputs/installer"
   },
   "afterPack": "scripts/prune-electron-output.cjs",
+  "afterSign": "scripts/release-integrity.cjs",
   "files": [
     "apps/installer/**/*",
     "apps/desktop/electron/**/*",

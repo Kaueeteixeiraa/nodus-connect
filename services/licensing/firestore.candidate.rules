@@ -5,6 +5,11 @@ service cloud.firestore {
     function signedIn() {
       return request.auth != null;
     }
+    function ownsDevice(nodusId, uid) {
+      let claim = get(/databases/$(database)/documents/deviceClaims/$(nodusId));
+      return claim != null ? claim.data.ownerUid == uid
+        : get(/databases/$(database)/documents/devices/$(nodusId)).data.ownerUid == uid;
+    }
     function licensingEnabled() {
       let policy = get(/databases/$(database)/documents/license_policy/current);
       return policy != null && (policy.data.enforced == true
@@ -155,7 +160,15 @@ service cloud.firestore {
       }
     }
     match /license_access_blocks/{nodusId} {
-      allow read: if signedIn() && get(/databases/$(database)/documents/devices/$(nodusId)).data.ownerUid == request.auth.uid;
+      allow read: if signedIn() && ownsDevice(nodusId, request.auth.uid);
+    }
+    match /license_session_grants/{sessionId} {
+      allow read: if signedIn() && resource.data.get('liveAuthorization', false) == true
+        && request.auth.uid in [resource.data.requesterUid, resource.data.targetUid];
+    }
+    match /license_session_controls/{controlId} {
+      // Only blocked/ownerUid under opaque IDs; no hardware proofs, listing or client writes.
+      allow get: if signedIn();
     }
   }
 }

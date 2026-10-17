@@ -6,7 +6,7 @@ import type { PaymentProvider } from "./payments.js";
 import type { SupportDraft } from "../../../packages/common/src/quick-support.js";
 
 type Body = Record<string, unknown>;
-export interface HttpDependencies { engine: LicenseEngine; store: LicenseStore; authenticate(token: string): Promise<Actor>; admin(actor: Actor, path: string, body: Body): Promise<unknown>; origins: string[]; providers?: ReadonlyMap<string, PaymentProvider>; notifyAccessRequest?(request: LicenseAccessRequest): Promise<boolean>; onSessionEnded?(): Promise<void>; }
+export interface HttpDependencies { engine: LicenseEngine; store: LicenseStore; authenticate(token: string): Promise<Actor>; admin(actor: Actor, path: string, body: Body): Promise<unknown>; origins: string[]; businessEventsReady?: boolean; providers?: ReadonlyMap<string, PaymentProvider>; notifyAccessRequest?(request: LicenseAccessRequest): Promise<boolean>; onSessionEnded?(): Promise<void>; }
 async function rawBody(request: IncomingMessage, limit: number): Promise<Buffer> {
   let size = 0; const chunks: Buffer[] = [];
   for await (const chunk of request) { const buffer = Buffer.from(chunk); size += buffer.length; if (size > limit) throw new LicenseError("INVALID_INPUT"); chunks.push(buffer); }
@@ -30,7 +30,7 @@ export function createLicenseHandler(deps: HttpDependencies) {
       if (request.method === "OPTIONS") { response.setHeader("access-control-allow-methods", "GET, POST"); response.setHeader("access-control-allow-headers", "Authorization, Content-Type"); return send(204, null); }
       if (request.method === "GET" && path === "/health") return send(200, { ok: true, service: "nodus-license" });
       if (request.method === "GET" && path === "/license/desktop-update") {
-        const result = await deps.engine.signedDesktopUpdate();
+        const result = await deps.engine.signedDesktopUpdate(url.searchParams.get("nodusId") ?? "");
         response.setHeader("cache-control", "public, max-age=0, s-maxage=60");
         return send(200, result);
       }
@@ -85,7 +85,7 @@ export function createLicenseHandler(deps: HttpDependencies) {
         }
         return send(200, { requestId: result.request.id, duplicate: result.duplicate, notificationStatus });
       }
-      if (path === "/license/sessions/reserve") return send(200, await deps.engine.reserve(actor, credentials(input), { sessionId: validId(input.sessionId), targetNodusId: text(input.targetNodusId, 9), offline: input.offline === true, supportProfileId: input.supportProfileId ? validId(input.supportProfileId) : undefined, supportPassword: typeof input.supportPassword === "string" ? input.supportPassword : undefined, eventDriven: input.eventDriven === true }));
+      if (path === "/license/sessions/reserve") return send(200, await deps.engine.reserve(actor, credentials(input), { sessionId: validId(input.sessionId), targetNodusId: text(input.targetNodusId, 9), offline: input.offline === true, supportProfileId: input.supportProfileId ? validId(input.supportProfileId) : undefined, supportPassword: typeof input.supportPassword === "string" ? input.supportPassword : undefined, eventDriven: input.eventDriven === true, liveAuthorization: deps.businessEventsReady === true && input.liveAuthorization === true }));
       const lifecycle = path.match(/^\/license\/sessions\/(establish|heartbeat|end)$/);
       if (lifecycle) {
         const result = await deps.engine.lifecycle(actor, validId(input.sessionId), lifecycle[1] as "establish" | "heartbeat" | "end");

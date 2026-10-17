@@ -10,6 +10,7 @@ export interface DeviceLicenseIdentity { id: string; freeLicenseId: string; vers
 export interface IdentityReview { deviceId: string; uid: string; candidates: string[]; anchors: string[]; reason: string; status: "PENDING" | "RESOLVED"; createdAt: number; }
 export interface DesktopUpdatePolicy {
   enabled: boolean; updatedAt: number;
+  targetNodusIds?: string[];
   release: { tag_name: string; assets: { name: string; browser_download_url: string; digest: string; size: number }[]; draft?: boolean; prerelease?: boolean } | null;
 }
 export interface Slot { deviceId: string; expiresAt: number; established: boolean; offline: boolean; endsAt?: number; }
@@ -21,7 +22,7 @@ export interface License {
 }
 export interface LicenseDevice { id: string; licenseId: string; uid: string; nodusId: string; deviceName: string; claimHash: string; tokenHash: string; status: "ACTIVE" | "REVOKED" | "BLOCKED"; activatedAt: number; lastSeenAt: number; deviceIdentityId?: string; identityReview?: boolean; freeLicenseId?: string; lastAuthorizedAccessAt?: number; }
 export interface LicenseAccessRequest { id: string; licenseId: string; deviceId: string; uid: string; amount: number; status: "PENDING" | "APPROVED" | "DENIED"; notificationStatus: "PENDING" | "SENT" | "FAILED"; createdAt: number; updatedAt: number; resolvedAt: number; adminUserId: string; }
-export interface LicenseSession { id: string; licenseId: string; deviceId: string; requesterUid: string; targetUid: string; requesterNodusId: string; targetNodusId: string; status: "RESERVED" | "ESTABLISHED" | "ENDED"; connectedUids: string[]; consumed: boolean; createdAt: number; establishedAt: number; lastHeartbeatAt: number; endedAt: number; expiresAt: number; offline: boolean; endsAt?: number; eventDriven?: boolean; }
+export interface LicenseSession { id: string; licenseId: string; deviceId: string; requesterUid: string; targetUid: string; requesterNodusId: string; targetNodusId: string; status: "RESERVED" | "ESTABLISHED" | "ENDED"; connectedUids: string[]; consumed: boolean; createdAt: number; establishedAt: number; lastHeartbeatAt: number; endedAt: number; expiresAt: number; offline: boolean; endsAt?: number; eventDriven?: boolean; liveAuthorization?: boolean; authorizationControlId?: string; }
 export interface LicenseInfo { allowed: boolean; code: LicenseCode; enforced: boolean; plan: "free" | "business"; status: LicenseStatus; organization: string; trialUsed: number; trialLimit: number; devices: number; maxDevices: number; sessions: number; maxConcurrentSessions: number; expiresAt: number; keyMasked: string; serverTime: number; }
 export interface LeaseClaims { iss: "nodus-license"; aud: "nodus-session"; sessionId: string; deviceId: string; requesterUid: string; targetUid: string; requesterNodusId: string; targetNodusId: string; iat: number; exp: number; }
 export function effectiveStatus(license: License, now: number): LicenseStatus {

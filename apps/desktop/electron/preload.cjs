@@ -158,6 +158,7 @@ contextBridge.exposeInMainWorld("nodusDesktop", {
   openDiagnostics() {
     return ipcRenderer.invoke("nodus:open-diagnostics");
   },
+  exportDiagnostics(snapshot) { return ipcRenderer.invoke("nodus:export-diagnostics", snapshot); },
   writeDiagnostic(message) {
     return ipcRenderer.invoke("nodus:write-diagnostic", message);
   },

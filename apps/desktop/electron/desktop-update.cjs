@@ -19,6 +19,20 @@ function signPolicy(policy, key, now = Date.now()) {
   return `${payload}.${crypto.sign(null, Buffer.from(payload), key).toString("base64url")}`;
 }
 
+function releaseCompanions(release) {
+  const update = updateRelease(release, "1.1.27");
+  if (!update.available) return null;
+  const asset = name => {
+    const item = release.assets?.find(value => value.name === name);
+    if (!item || item.browser_download_url !== `https://github.com/Kaueeteixeiraa/nodus-connect/releases/download/v${update.version}/${name}`
+      || !/^sha256:[a-f0-9]{64}$/.test(item.digest) || !Number.isSafeInteger(item.size) || item.size <= 0 || item.size > 350 * 1024 * 1024) throw new Error("INCOMPLETE_RELEASE");
+    return item;
+  };
+  const support = asset(`Nodus-QuickSupport-${update.version}.exe`), manifest = asset(`Nodus-Connect-Setup-${update.version}.json`);
+  if (manifest.size > 65_536) throw new Error("INVALID_RELEASE_MANIFEST");
+  return { support, manifest };
+}
+
 function verifyPolicy(token, key, now = Date.now()) {
   try {
     if (typeof token !== "string" || token.length > 8192 || !Number.isFinite(now)) throw new Error();
@@ -52,4 +66,4 @@ async function pruneCache(directory, protectedName) {
   }
 }
 
-module.exports = { updateRelease, signPolicy, verifyPolicy, pruneCache };
+module.exports = { updateRelease, releaseCompanions, signPolicy, verifyPolicy, pruneCache };

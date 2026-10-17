@@ -36,7 +36,7 @@ interface Window {
     toggleFullScreen(enabled?: boolean): Promise<boolean>;
     checkForUpdates(): Promise<{ ok: boolean; version?: string; available?: boolean; installing?: boolean; error?: string }>;
     setActiveSessionCount(count: number): void;
-    onUpdateProgress(callback: (progress: { phase: "checking" | "downloading" | "installing"; percent: number }) => void): () => void;
+    onUpdateProgress(callback: (progress: { phase: "checking" | "downloading" | "installing" | "current" | "deferred" | "failed"; percent: number }) => void): () => void;
     restartComputer(): Promise<{ ok: boolean; error?: string }>;
     sendSecureAttention(): Promise<{ ok: boolean; error?: string }>;
     setStartupOptions(options: { startWithWindows: boolean; startMinimized: boolean; minimizeToTray: boolean }): Promise<void>;
@@ -62,6 +62,7 @@ interface Window {
     cancelFileSave(id: string): Promise<void>;
     wakeOnLan(macAddress: string): Promise<{ ok: boolean; error?: string }>;
     openDiagnostics(): Promise<void>;
+    exportDiagnostics(snapshot: { usage: unknown; sessions: unknown[] }): Promise<{ canceled: boolean }>;
     writeDiagnostic(message: string): Promise<void>;
     writePerformance(message: string): Promise<void>;
     googleLogin(options?: { clientId?: string }): Promise<

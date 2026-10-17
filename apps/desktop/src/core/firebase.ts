@@ -17,7 +17,13 @@ const config = {
 };
 const DEVICE_ONLINE_TTL_MS = 90_000;
 export const PENDING_REQUEST_TTL_MS = 5 * 60_000;
-const cloudUsage = { readRequests: 0, writeRequests: 0, listenerStarts: 0, serverSnapshots: 0, documentsDelivered: 0, minimumReadEstimate: 0, errors: 0 };
+const cloudUsage = { readRequests: 0, writeRequests: 0, listenerStarts: 0, activeListeners: 0, serverSnapshots: 0, documentsDelivered: 0, minimumReadEstimate: 0, errors: 0, quotaErrors: 0, permissionErrors: 0, unavailableErrors: 0 };
+const deviceLookups = new Map<string, Promise<CoordinationDevice | null>>();
+const observedPresence = new Map<string, CoordinationDevice>();
+type SignalWrite = { message: SignalMessage; resolve(value: SignalMessage): void; reject(error: unknown): void };
+const signalBatches = new Map<string, { items: SignalWrite[]; flush(): void }>();
+let runtimeStatus: Pick<CoordinationDevice, "appVersion" | "updateState" | "activeSessions"> = {};
+export function setCloudRuntimeStatus(patch: typeof runtimeStatus) { runtimeStatus = { ...runtimeStatus, ...patch }; }
 
 export function getCloudUsageDiagnostics() {
   return { ...cloudUsage, measuredAt: Date.now(), includesSecurityRuleReads: false };
@@ -55,6 +61,40 @@ export function subscribeCloudAccessBlock(nodusId: string, onBlocked: () => void
     }, () => undefined);
   })().catch(() => undefined);
   return { close() { closed = true; unsubscribe?.(); } };
+}
+
+export function subscribeCloudSessionAuthorization(sessionId: string, onStatus: (status: "RESERVED" | "ESTABLISHED" | "ENDED") => void, onRejected: () => void): { close(): void } {
+  let closed = false, unsubscribe: Unsubscribe | undefined, controlWatch: Unsubscribe | undefined, controlId = "", timer: ReturnType<typeof setTimeout> | undefined, retries = 0;
+  const failed = (error: unknown) => {
+    if (closed) return;
+    unsubscribe?.(); controlWatch?.(); unsubscribe = controlWatch = undefined; controlId = "";
+    if (["permission-denied", "unauthenticated"].includes((error as { code?: string })?.code ?? "")) { onRejected(); return; }
+    timer = setTimeout(open, Math.min(300_000, 30_000 * 2 ** Math.min(retries++, 4)));
+  };
+  const open = async () => {
+    try {
+      if (closed || !await ensureDeviceUid()) return;
+      const { doc, onSnapshot, store } = await fire();
+      if (closed) return;
+      unsubscribe = onSnapshot(doc(store, "license_session_grants", sessionId), { includeMetadataChanges: true }, snapshot => {
+        if (closed || snapshot.metadata.fromCache) return;
+        retries = 0;
+        const value = snapshot.data();
+        if (!snapshot.exists() || !value?.liveAuthorization || !["RESERVED", "ESTABLISHED", "ENDED"].includes(value.status)) { onRejected(); return; }
+        if (value.status !== "ENDED" && (typeof value.requesterUid !== "string" || !value.requesterUid || typeof value.authorizationControlId !== "string" || !/^[A-Za-z0-9_-]{1,160}$/.test(value.authorizationControlId))) { onRejected(); return; }
+        if (value.status !== "ENDED" && controlId !== value.authorizationControlId) {
+          controlWatch?.(); controlId = value.authorizationControlId;
+          controlWatch = onSnapshot(doc(store, "license_session_controls", controlId), { includeMetadataChanges: true }, control => {
+            if (closed || control.metadata.fromCache) return;
+            if (!control.exists() || control.data()?.blocked !== false || control.data()?.ownerUid !== value.requesterUid) onRejected();
+          }, failed);
+        }
+        onStatus(value.status);
+      }, failed);
+    } catch (error) { failed(error); }
+  };
+  void open();
+  return { close() { closed = true; clearTimeout(timer); unsubscribe?.(); controlWatch?.(); } };
 }
 
 export async function signInFirebaseWithGoogle(idToken?: string, accessToken?: string): Promise<string | null> {
@@ -156,6 +196,11 @@ export async function cloudUnregisterPresence(identityInput: LocalIdentity | str
   if (!nodusId) throw new Error("Nodus ID invalido");
   const { doc, getDoc, setDoc, store } = await fire();
   const ref = doc(store, "devices", nodusId);
+  if (uid && typeof identityInput !== "string") {
+    const device = cloudDevice(identityInput, "offline", uid);
+    await setDoc(ref, device, { merge: true });
+    return device;
+  }
   const current = await getDoc(ref);
   const currentDevice = current.data() as CoordinationDevice | undefined;
   if (currentDevice?.ownerUid && currentDevice.ownerUid !== uid) throw new Error("NODUS_ID_CONFLICT");
@@ -182,12 +227,14 @@ export function subscribeCloudDevicePresence(nodusIdInput: string, onPresence: (
   const publish = (device: CoordinationDevice | null) => {
     if (closed) return;
     window.clearTimeout(expiryTimer);
+    if (nodusId) observedPresence.delete(nodusId);
     if (!device || !isFresh(device.updatedAt, DEVICE_ONLINE_TTL_MS)) {
       onPresence(null);
       return;
     }
+    if (nodusId) { if (device.status === "online") observedPresence.set(nodusId, device); else observedPresence.delete(nodusId); }
     onPresence(device);
-    expiryTimer = window.setTimeout(() => onPresence(null), Math.max(0, DEVICE_ONLINE_TTL_MS - (Date.now() - Date.parse(device.updatedAt)) + 20));
+    expiryTimer = window.setTimeout(() => { if (nodusId) observedPresence.delete(nodusId); onPresence(null); }, Math.max(0, DEVICE_ONLINE_TTL_MS - (Date.now() - Date.parse(device.updatedAt)) + 20));
   };
 
   if (!firebaseConfigured() || !nodusId) return { close() {} };
@@ -196,13 +243,37 @@ export function subscribeCloudDevicePresence(nodusIdInput: string, onPresence: (
     unsubscribe = onSnapshot(doc(store, "devices", nodusId), (snapshot) => publish(snapshot.exists() ? snapshot.data() as CoordinationDevice : null), () => publish(null));
   }).catch(() => publish(null));
 
-  return { close() { closed = true; window.clearTimeout(expiryTimer); unsubscribe?.(); } };
+  return { close() { closed = true; observedPresence.delete(nodusId); window.clearTimeout(expiryTimer); unsubscribe?.(); } };
+}
+
+export function subscribeCloudVisiblePresence(ids: string[], onPresence: (id: string, device: CoordinationDevice | null) => void, documents: Pick<Document, "visibilityState" | "addEventListener" | "removeEventListener">[]) {
+  let subscriptions: { close(): void }[] = [], active = false;
+  const refresh = () => {
+    const visible = documents.some(item => item.visibilityState === "visible");
+    if (visible === active) return;
+    active = visible;
+    subscriptions.forEach(item => item.close()); subscriptions = [];
+    if (visible) subscriptions = [...new Set(ids)].map(id => subscribeCloudDevicePresence(id, device => onPresence(id, device)));
+  };
+  documents.forEach(item => item.addEventListener("visibilitychange", refresh));
+  refresh();
+  return { close() { documents.forEach(item => item.removeEventListener("visibilitychange", refresh)); subscriptions.forEach(item => item.close()); subscriptions = []; } };
 }
 
 export async function cloudLookupDevice(nodusIdInput: string): Promise<CoordinationDevice | null> {
   await ensureDeviceUid();
   const nodusId = normalizeNodusId(nodusIdInput);
   if (!nodusId) throw new Error("Nodus ID invalido");
+  const observed = observedPresence.get(nodusId);
+  if (observed && isFresh(observed.updatedAt, DEVICE_ONLINE_TTL_MS)) return observed;
+  const pending = deviceLookups.get(nodusId);
+  if (pending) return pending;
+  const lookup = readCloudDevice(nodusId);
+  deviceLookups.set(nodusId, lookup);
+  try { return await lookup; } finally { if (deviceLookups.get(nodusId) === lookup) deviceLookups.delete(nodusId); }
+}
+
+async function readCloudDevice(nodusId: string): Promise<CoordinationDevice | null> {
   const { doc, getDoc, store } = await fire();
   const snapshot = await getDoc(doc(store, "devices", nodusId));
   if (!snapshot.exists()) return null;
@@ -314,7 +385,8 @@ export async function cloudSendSignal(sessionId: string, signal: Omit<SignalMess
   const from = normalizeNodusId(signal.from), to = normalizeNodusId(signal.to);
   if (!from || !to) throw new Error("Nodus ID invalido");
   await ensureDeviceUid();
-  const { addDoc, collection, store } = await fire();
+  const api = await fire();
+  const { addDoc, collection, store } = api;
   const message: SignalMessage = {
     ...signal,
     from,
@@ -323,7 +395,27 @@ export async function cloudSendSignal(sessionId: string, signal: Omit<SignalMess
     seq: Date.now() * 1000 + Math.floor(Math.random() * 1000),
     createdAt: new Date().toISOString(),
   };
-  await addDoc(collection(store, "sessions", sessionId, "signals", to, "items"), firestoreData(message));
+  const target = collection(store, "sessions", sessionId, "signals", to, "items");
+  if (signal.type === "ice-candidate") return new Promise<SignalMessage>((resolve, reject) => {
+    const key = JSON.stringify([sessionId, from, to]);
+    let pending = signalBatches.get(key);
+    if (!pending) {
+      const items: SignalWrite[] = [];
+      const flush = () => {
+        clearTimeout(timer); signalBatches.delete(key);
+        try {
+          const batch = api.writeBatch(store);
+          for (const item of items) batch.set(api.doc(target), firestoreData(item.message));
+          void batch.commit().then(() => items.forEach(item => item.resolve(item.message)), error => items.forEach(item => item.reject(error)));
+        } catch (error) { items.forEach(item => item.reject(error)); }
+      };
+      const timer = setTimeout(flush, 8);
+      pending = { items, flush }; signalBatches.set(key, pending);
+    }
+    pending.items.push({ message, resolve, reject });
+    if (pending.items.length >= 20 || signalBatches.size >= 100) pending.flush();
+  });
+  await addDoc(target, firestoreData(message));
   return message;
 }
 
@@ -457,7 +549,8 @@ function cloudDevice(identity: LocalIdentity, status: CoordinationDevice["status
     deviceName: identity.deviceName,
     status,
     updatedAt: new Date().toISOString(),
-    capabilities: ["desktop-shell", "presence", "screen-share", "remote-control", "firebase"],
+    capabilities: ["desktop-shell", "presence", "screen-share", "remote-control", "firebase", "license-events-v1"],
+    ...runtimeStatus,
   };
 }
 
@@ -511,25 +604,44 @@ async function fire(): Promise<typeof import("firebase/firestore") & { store: Fi
 }
 
 function instrumentFirestore(store: Firestore, api: FirebaseModules["firestore"]): FirebaseModules["firestore"] & { store: Firestore } {
+  const failed = (error: unknown) => {
+    cloudUsage.errors++;
+    const code = String((error as { code?: string })?.code ?? "").replace(/^firestore\//, "");
+    if (code === "resource-exhausted") cloudUsage.quotaErrors++;
+    if (["permission-denied", "unauthenticated"].includes(code)) cloudUsage.permissionErrors++;
+    if (["unavailable", "deadline-exceeded"].includes(code)) cloudUsage.unavailableErrors++;
+  };
   const read = async <T extends DocumentSnapshot<unknown> | QuerySnapshot<unknown>>(work: () => Promise<T>) => {
     cloudUsage.readRequests++;
     try {
       const snapshot = await work();
       if (!snapshot.metadata.fromCache) cloudUsage.minimumReadEstimate += "size" in snapshot ? Math.max(1, snapshot.size) : 1;
       return snapshot;
-    } catch (error) { cloudUsage.errors++; throw error; }
+    } catch (error) { failed(error); throw error; }
   };
   const write = async <T>(work: () => Promise<T>) => {
     cloudUsage.writeRequests++;
-    try { return await work(); } catch (error) { cloudUsage.errors++; throw error; }
+    try { return await work(); } catch (error) { failed(error); throw error; }
   };
   return Object.assign({ store }, api, {
     getDoc: (...args: Parameters<typeof api.getDoc>) => read(() => api.getDoc(...args)),
     getDocs: (...args: Parameters<typeof api.getDocs>) => read(() => api.getDocs(...args)),
     setDoc: (...args: Parameters<typeof api.setDoc>) => write(() => api.setDoc(...args)),
     addDoc: (...args: Parameters<typeof api.addDoc>) => write(() => api.addDoc(...args)),
+    writeBatch: (...args: Parameters<typeof api.writeBatch>) => {
+      const batch = api.writeBatch(...args);
+      let writes = 0;
+      const tracked = {
+        set(...values: Parameters<typeof batch.set>) { writes++; batch.set(...values); return tracked; },
+        commit() { cloudUsage.writeRequests += writes; return batch.commit().catch(error => { failed(error); throw error; }); },
+      };
+      return tracked;
+    },
     onSnapshot: (...args: unknown[]) => {
       cloudUsage.listenerStarts++;
+      cloudUsage.activeListeners++;
+      let active = true;
+      const stopped = () => { if (active) { active = false; cloudUsage.activeListeners--; } };
       const index = typeof args[1] === "function" ? 1 : 2;
       const next = args[index] as (snapshot: DocumentSnapshot | QuerySnapshot) => void;
       const error = args[index + 1] as ((error: unknown) => void) | undefined;
@@ -544,8 +656,11 @@ function instrumentFirestore(store: Firestore, api: FirebaseModules["firestore"]
         }
         next(snapshot);
       };
-      args[index + 1] = (reason: unknown) => { cloudUsage.errors++; error?.(reason); };
-      return (api.onSnapshot as (...args: unknown[]) => Unsubscribe)(...args);
+      args[index + 1] = (reason: unknown) => { stopped(); failed(reason); error?.(reason); };
+      try {
+        const unsubscribe = (api.onSnapshot as (...args: unknown[]) => Unsubscribe)(...args);
+        return () => { stopped(); unsubscribe(); };
+      } catch (reason) { stopped(); failed(reason); throw reason; }
     },
   }) as FirebaseModules["firestore"] & { store: Firestore };
 }

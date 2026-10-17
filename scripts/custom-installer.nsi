@@ -4,7 +4,10 @@ Unicode true
   !define PRODUCT_VERSION "0.0.0.0"
 !endif
 Name "Nodus Connect Setup"
-OutFile "..\outputs\installer\Nodus-Connect-Setup.exe"
+!ifndef SETUP_OUTPUT
+  !define SETUP_OUTPUT "..\outputs\installer\Nodus-Connect-Setup.exe"
+!endif
+OutFile "${SETUP_OUTPUT}"
 Icon "..\build\icon.ico"
 VIProductVersion "${PRODUCT_VERSION}"
 VIAddVersionKey "ProductName" "Nodus Connect"
@@ -16,7 +19,33 @@ VIAddVersionKey "LegalCopyright" "Nodus Connect"
 RequestExecutionLevel user
 SilentInstall silent
 ShowInstDetails nevershow
-SetCompressor /FINAL zlib
+!ifdef COMPACT_INSTALLER
+  SetCompressor /FINAL lzma
+!else
+  SetCompressor /FINAL zlib
+!endif
+
+!ifdef SOLID_PAYLOAD
+  !addplugindir /x86-unicode "${SEVEN_ZIP_PLUGIN}"
+  Function unpack_solid
+    InitPluginsDir
+    SetOutPath "$PLUGINSDIR"
+    SetCompress off
+    File /oname=payload.7z "${SOLID_PAYLOAD}"
+    SetCompress auto
+    File /oname=compression-license.txt "${COMPRESSION_LICENSE}"
+    SetOutPath "$R3"
+    ClearErrors
+    Nsis7z::Extract "$PLUGINSDIR\payload.7z"
+    IfErrors unpack_failed
+    IfFileExists "$R3\resources\app.asar" 0 unpack_failed
+    IfFileExists "$R3\_nodus_setup\app.asar" 0 unpack_failed
+    StrCpy $R2 0
+    Return
+    unpack_failed:
+      StrCpy $R2 1
+  FunctionEnd
+!endif
 
 Section
   ${GetParameters} $R0
@@ -35,10 +64,19 @@ Section
     StrCmp $R3 "" prepare_bootstrap extract_payload
   prepare_bootstrap:
     InitPluginsDir
+!ifdef SOLID_PAYLOAD
+    StrCpy $R3 "$PLUGINSDIR\NodusConnectSetup"
+    Call unpack_solid
+    StrCmp $R2 0 0 extraction_failed
+    ClearErrors
+    CopyFiles /SILENT "$R3\_nodus_setup\app.asar" "$R3\resources\app.asar"
+    IfErrors extraction_failed
+!else
     SetOutPath "$PLUGINSDIR\NodusConnectSetup\resources"
     File /oname=app.asar "..\outputs\installer\bootstrap\app.asar"
     SetOutPath "$PLUGINSDIR\NodusConnectSetup"
     File /r /x resources "..\outputs\installer\win-unpacked\*.*"
+!endif
     StrCmp $R1 "" launch_manual launch_update
   launch_update:
     ExecWait '"$PLUGINSDIR\NodusConnectSetup\Nodus Connect Setup.exe" "--payload-wrapper=$EXEPATH" "--auto-update=$R1"' $R2
@@ -50,8 +88,18 @@ Section
     SetErrorLevel $R2
     Goto finished
   extract_payload:
+!ifdef SOLID_PAYLOAD
+    Call unpack_solid
+    StrCmp $R2 0 0 extraction_failed
+    Delete "$R3\_nodus_setup\app.asar"
+    RMDir "$R3\_nodus_setup"
+!else
     SetOutPath "$R3"
     File /r "..\outputs\installer\win-unpacked\*.*"
+!endif
     SetErrorLevel 0
+    Goto finished
+  extraction_failed:
+    SetErrorLevel 1
   finished:
 SectionEnd

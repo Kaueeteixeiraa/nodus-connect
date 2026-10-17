@@ -57,6 +57,33 @@ Inspecao do electron-builder instalado confirma que tanto normal quanto maximum 
 
 O Setup foi alterado de LZMA para zlib depois de medir o container real: a mediana da interface utilizavel caiu para 8.483 s, mas o artefato aumentou 44.31 MiB. A extracao zlib terminou em 9.05 s e produziu os mesmos 261 arquivos, 379311652 bytes e SHA-256 do `app.asar`; servico nativo e GStreamer foram conferidos.
 
+### Ensaios adicionais sem perda - 1.1.27 (2026-10-16)
+
+Payload preservado: 261 arquivos, 384649868 bytes. MB nesta tabela significa
+1000000 bytes; a meta solicitada e um setup completo menor que 100000000 bytes.
+
+| Ensaio | Bytes | Resultado |
+| --- | ---: | --- |
+| Setup publicado, zlib | 180016433 | Preservado, sem republicacao |
+| Setup separado, LZMA nao solido | 136817851 | Perfil `--compact` existente |
+| Pacote completo, 7z solido maximum | 113682082 | Extracao dos 261 arquivos conferida por SHA-256 |
+| Pacote completo, ZPAQ 7.15 metodo 4 | 124219968 | Acima da meta, descartado como formato de entrega |
+| Pacote completo, ZPAQ 7.15 metodo 5 | 111796011 | Acima da meta, ainda sem o executavel instalador |
+| Somente app.asar, 7z original | 25060127 | Referencia para o proximo ensaio |
+| Somente app.asar, Precomp 0.4.7 + 7z | 24425528 | Economia de apenas 634599 bytes |
+
+O metodo 5 levou 1969.453 s para comprimir nesta maquina i3-6100U/8 GB,
+com concorrencia em parte da execucao. Isso NAO mede o tempo de instalacao.
+O perfil NSIS experimental ZPAQ passou por testes pequenos de arquivos binarios,
+nomes Unicode e arquivo corrompido, mas foi retirado porque nao atingiu a meta.
+PAQ8PX foi considerado somente para pesquisa; seu proprio autor o classifica
+como impraticavel para producao/armazenamento de longo prazo por custo de tempo
+e memoria: https://github.com/hxim/paq8px . Nao foi incorporado ao instalador.
+
+Nenhum arquivo do aplicativo, tema, runtime ou recurso foi removido ou alterado.
+Nenhum setup abaixo de 100 MB foi obtido/validado e nenhuma publicacao foi feita.
+Nao usar o tamanho de um arquivo de dados como se fosse o tamanho de um setup.
+
 ## Sinalizacao persistente: pendencia arquitetural
 
 A producao usa Firestore para pedidos e sinalizacao. O relay WebSocket existente mantem clientes/presenca/sinais em memoria de uma instancia; simplesmente selecionar esse canal na Vercel pode perder mensagens entre instancias, reconexoes e autorizações. A Vercel oferece WebSockets, mas exige coordenacao de estado/publicacao entre instancias e reconexao. O usuario confirmou que nao possui servidor persistente nem Redis. Nao houve contratacao nem migracao de alto risco. Firestore continua principal nesta build; fases 6/7 da migracao WebSocket estao pendentes de infraestrutura/validacao. Fonte: https://vercel.com/docs/functions/websockets

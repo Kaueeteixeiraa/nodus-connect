@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { afterAll, beforeAll, beforeEach, describe, expect, test } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, test, vi } from "vitest";
 import { generateKeyPairSync } from "node:crypto";
 import { initializeApp, deleteApp } from "firebase-admin/app";
 import { getFirestore } from "firebase-admin/firestore";
@@ -35,6 +35,75 @@ describeRules("candidate Firestore licensing rules", () => {
   beforeEach(() => environment.clearFirestore());
   afterAll(() => environment?.cleanup());
 
+  test("block watchers use stable claims, deny former owners and preserve legacy ownership", async () => {
+    await seed(true);
+    await environment.withSecurityRulesDisabled(async context => {
+      await context.firestore().doc(`deviceClaims/${requesterId}`).set({ ownerUid: requesterUid });
+      await context.firestore().doc(`license_access_blocks/${requesterId}`).set({ blocked: false });
+    });
+    const owner = environment.authenticatedContext(requesterUid).firestore(), nextOwner = environment.authenticatedContext("new-owner").firestore();
+    const path = `license_access_blocks/${requesterId}`;
+    await assertSucceeds(owner.doc(path).get()); await assertFails(nextOwner.doc(path).get());
+    await environment.withSecurityRulesDisabled(async context => context.firestore().doc(`deviceClaims/${requesterId}`).update({ ownerUid: "new-owner" }));
+    await assertFails(owner.doc(path).get()); await assertSucceeds(nextOwner.doc(path).get());
+    await environment.withSecurityRulesDisabled(async context => context.firestore().doc(`deviceClaims/${requesterId}`).delete());
+    await assertSucceeds(owner.doc(path).get()); await assertFails(nextOwner.doc(path).get());
+    await assertFails(environment.unauthenticatedContext().firestore().doc(path).get());
+  });
+
+  test.each(["block", "hardware", "ownership", "end"])("live business grants enforce %s on the receiving peer without heartbeat polling", async change => {
+    const sessionId = "business-live"; await seed(true, sessionId);
+    const path = `license_session_grants/${sessionId}`, controlPath = "license_session_controls/hw-physical-source";
+    await environment.withSecurityRulesDisabled(async context => {
+      const db = context.firestore();
+      await db.doc(`deviceClaims/${requesterId}`).set({ ownerUid: requesterUid });
+      await db.doc(`license_access_blocks/${requesterId}`).set({ blocked: false });
+      await db.doc(`license_identity_bindings/${requesterId}`).set({ deviceIdentityId: "physical-source" });
+      await db.doc("license_device_identities/physical-source").set({ id: "physical-source", status: "ACTIVE" });
+      await db.doc("license_licenses/business-license").set({ id: "business-license", plan: "business", deviceIds: ["physical-source"], maxDevices: 20 });
+      await db.doc("license_devices/source").set({ id: "source", licenseId: "business-license", uid: requesterUid, nodusId: requesterId, deviceIdentityId: "physical-source", status: "ACTIVE" });
+      await db.doc("license_devices/alias").set({ id: "alias", licenseId: "business-license", uid: "alias-owner", nodusId: "111222333", deviceIdentityId: "physical-source", status: "ACTIVE" });
+      await db.doc(controlPath).set({ blocked: false, ownerUid: requesterUid });
+      await db.doc(path).update({ status: "ESTABLISHED", liveAuthorization: true, authorizationControlId: "hw-physical-source", expiresAt: Number.MAX_SAFE_INTEGER });
+    });
+    const host = environment.authenticatedContext(targetUid).firestore();
+    await assertFails(environment.authenticatedContext("outsider").firestore().doc(path).get());
+    await assertFails(host.doc(controlPath).set({ blocked: false, ownerUid: targetUid }));
+    await assertFails(host.collection("license_session_controls").get());
+    await assertFails(environment.unauthenticatedContext().firestore().doc(controlPath).get());
+    const next = vi.fn(), controls = vi.fn(), error = vi.fn(), stop = host.doc(path).onSnapshot(next, error), stopControls = host.doc(controlPath).onSnapshot(controls, error);
+    const app = initializeApp({ projectId }, `live-controls-${change}`), db = getFirestore(app);
+    const keys = generateKeyPairSync("ed25519", { privateKeyEncoding: { type: "pkcs8", format: "pem" }, publicKeyEncoding: { type: "spki", format: "pem" } });
+    const engine = new LicenseEngine(firestoreLicenseStore(db), "test-pepper-only-".repeat(3), keys.privateKey);
+    try {
+      await vi.waitFor(() => expect(next.mock.calls.some(([snapshot]) => !snapshot.metadata.fromCache)).toBe(true));
+      await vi.waitFor(() => expect(controls.mock.calls.some(([snapshot]) => !snapshot.metadata.fromCache)).toBe(true));
+      if (change === "block" || change === "hardware") await engine.deviceStatus({ uid: "admin", admin: true, recent: true }, change === "block" ? "source" : "alias", "BLOCKED");
+      await environment.withSecurityRulesDisabled(async context => {
+        const db = context.firestore();
+        if (change === "ownership") await db.doc(controlPath).update({ ownerUid: "reinstalled" });
+        if (change === "end") await db.doc(path).update({ status: "ENDED" });
+      });
+      if (change === "end") await vi.waitFor(() => expect(next.mock.calls.some(([snapshot]) => snapshot.data()?.status === "ENDED")).toBe(true));
+      else await vi.waitFor(() => expect(controls.mock.calls.some(([snapshot]) => change === "ownership" ? snapshot.data()?.ownerUid === "reinstalled" : snapshot.data()?.blocked === true && snapshot.data()?.ownerUid === requesterUid)).toBe(true));
+      expect(error).not.toHaveBeenCalled();
+    } finally { stop(); stopControls(); await deleteApp(app); }
+  }, 30_000);
+
+  test("20 unchanged ICE documents share a batch without weakening admission or direction checks", async () => {
+    const sessionId = "ice-batch"; await seed(true, sessionId);
+    await environment.withSecurityRulesDisabled(async context => context.firestore().doc(`sessions/${sessionId}`).set({ participantUids: [requesterUid, targetUid] }));
+    const source = environment.authenticatedContext(requesterUid).firestore();
+    const commit = (to: string) => {
+      const batch = source.batch();
+      for (let index = 0; index < 20; index++) batch.set(source.doc(`sessions/${sessionId}/signals/${to}/items/ice-${index}`), { sessionId, from: requesterId, to, type: "ice-candidate", payload: { candidate: `candidate-${index}` }, seq: index });
+      return batch.commit();
+    };
+    await assertSucceeds(commit(targetId)); await assertFails(commit(requesterId));
+    await environment.withSecurityRulesDisabled(async context => context.firestore().doc(`license_session_grants/${sessionId}`).update({ status: "ENDED" }));
+    await assertFails(commit(targetId));
+  });
+
   test("device pagination searches beyond 200 records and preserves cursor ordering and hardware blocks", async () => {
     const app = initializeApp({ projectId }, "device-pagination-test");
     try {
@@ -49,8 +118,20 @@ describeRules("candidate Firestore licensing rules", () => {
         await batch.commit();
       }
       await db.doc("license_device_identities/blocked-hardware").set({ status: "BLOCKED" });
+      await db.doc("devices/100000001").set({ appVersion: "1.1.28", updateState: "failed", activeSessions: 2 }, { merge: true });
+      await db.doc("devices/100000002").set({ appVersion: "private-invalid-version", updateState: "secret-text", activeSessions: -1 }, { merge: true });
       const first = await devicePage(db, { query: "", filter: "all" });
       expect(first.items).toHaveLength(10); expect(first.nextCursor).toBeTruthy();
+      expect(first.items[1]).toMatchObject({ appVersion: "1.1.28", updateState: "failed", activeSessions: 2 });
+      expect(first.items[2]).toMatchObject({ appVersion: null, updateState: null, activeSessions: null });
+      const hydration = vi.spyOn(db, "getAll");
+      const runtime = await devicePage(db, { runtimeOnly: "1" });
+      expect(runtime.items).toHaveLength(10);
+      expect(hydration).toHaveBeenCalledTimes(1);
+      expect(hydration.mock.calls[0]).toHaveLength(10);
+      expect(hydration.mock.calls[0].every(ref => "path" in ref && typeof ref.path === "string" && ref.path.startsWith("devices/"))).toBe(true);
+      hydration.mockRestore();
+      await expect(devicePage(db, { runtimeOnly: "1", filter: "BLOCKED" })).rejects.toMatchObject({ code: "INVALID_INPUT" });
       const second = await devicePage(db, { cursor: first.nextCursor });
       expect(second.items).toHaveLength(10);
       expect(second.items.some(device => first.items.some(first => first.id === device.id))).toBe(false);

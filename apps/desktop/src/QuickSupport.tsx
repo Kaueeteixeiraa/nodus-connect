@@ -4,13 +4,15 @@ import type { SupportDraft, SupportProfile, SupportPermission } from "../../../p
 import type { LocalIdentity } from "./core/identity";
 import { checkLicense, createSupportProfile, licenseFeedback } from "./core/licensing";
 import nodusLogo from "./assets/nodus-logo.png";
+import { SupportReportButton } from "./SupportReportButton";
 
 export { supportSettings } from "./core/storage";
 
-export function QuickSupportView({ profile, nodusId, deviceName, onRename, ready, sessions, error, onEnd, onQuit, children }: {
+export function QuickSupportView({ profile, nodusId, deviceName, onRename, ready, sessions, error, onEnd, onQuit, onExportDiagnostics, children }: {
   profile: SupportProfile; nodusId: string; deviceName: string; onRename: (name: string) => void;
   ready: boolean; sessions: { id: string; name: string; status: string; error?: string; connected?: boolean }[];
   error: string; onEnd: (id: string) => void; onQuit: () => void; children?: ReactNode;
+  onExportDiagnostics?: () => Promise<{ canceled: boolean }>;
 }) {
   const [editing, setEditing] = useState(false), [name, setName] = useState(deviceName);
   return <main className="quick-support-shell" data-theme="dark">
@@ -29,6 +31,7 @@ export function QuickSupportView({ profile, nodusId, deviceName, onRename, ready
       {sessions.map(session => <div className="quick-support-session" key={session.id}><div><strong>{session.name}</strong><small>{session.status}</small>{session.error && <p role="alert">{session.error}</p>}</div><button className="danger-button" type="button" onClick={() => onEnd(session.id)}>Encerrar suporte</button></div>)}
       {error && <p role="alert">{error}</p>}
       <button className="secondary-button themed-action" type="button" onClick={onQuit}><Power size={16} /> Encerrar</button>
+      {onExportDiagnostics && <SupportReportButton onExport={onExportDiagnostics} />}
     </section><footer><img src={nodusLogo} alt="" /><span>Nodus Connect</span></footer>{children}
   </main>;
 }

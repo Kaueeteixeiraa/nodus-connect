@@ -17,6 +17,8 @@ import { LicenseError, LICENSE_MESSAGES } from "../packages/licensing/src/index"
 import { mapVideoPointer } from "../apps/desktop/src/core/remote-cursor";
 import { createFileCryptoSession, deriveFileCryptoKey, encryptFileChunk, decryptFileChunk } from "../apps/desktop/src/core/file-crypto";
 import { formatNodusId, normalizeNodusId } from "../packages/common/src/nodusId";
+import { LatencyWindow, VideoProgressWatchdog } from "../apps/desktop/src/core/performance-monitor";
+import { RemoteInputState } from "../apps/desktop/src/core/remote-input-state";
 
 const { RemoteWindowsKeys, keyboardInput } = createRequire(import.meta.url)("../apps/desktop/electron/remote-windows-keys.cjs");
 const managers: any[] = [];
@@ -355,7 +357,7 @@ function uiFunction(name: string, context = {}, file = "apps/desktop/src/App.tsx
   visit(source);
   if (!node) throw new Error(`UI function missing: ${name}`);
   const code = ts.transpileModule(`${ts.isVariableDeclaration(node) ? "const " : ""}${node.getText(source)}`, { fileName: file.endsWith(".cjs") ? "fixture.ts" : file, compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.React } }).outputText;
-  for (const [key, value] of Object.entries({ payloadWrapper: "", payloadMetadata: undefined, logConnectionPhase: vi.fn(), connectionTimingsRef: { current: new Map() }, performance: { now: () => Date.now() }, clearTimeout, offlineReserved: new Set() })) {
+  for (const [key, value] of Object.entries({ LatencyWindow, VideoProgressWatchdog, hostHeldInputRef: { current: new RemoteInputState() }, releaseHostInput: vi.fn(), payloadWrapper: "", payloadMetadata: undefined, logConnectionPhase: vi.fn(), connectionTimingsRef: { current: new Map() }, performance: { now: () => Date.now() }, clearTimeout, offlineReserved: new Set() })) {
     if (!(key in context)) Object.assign(context, { [key]: value });
   }
   return runInNewContext(`${code};${name}`, context);
@@ -479,10 +481,11 @@ test.each(["approved", "paused", "changed", "offline", "active", "closed", "quit
 test("startup policy verifies the pinned signing key before consulting the installer", async () => {
   const keys = crypto.generateKeyPairSync("ed25519", { privateKeyEncoding: { type: "pkcs8", format: "pem" }, publicKeyEncoding: { type: "spki", format: "pem" } });
   const token = desktopUpdates.signPolicy({ enabled: true, release: releaseFixture(), updatedAt: Date.now() }, keys.privateKey);
-  const context = { fetch: vi.fn(async () => new Response(JSON.stringify({ token }))), desktopUpdates, supportKey: keys.publicKey, AbortSignal,
+  const context = { fetch: vi.fn(async () => new Response(JSON.stringify({ token }))), desktopUpdates, supportKey: keys.publicKey, AbortSignal, URL, identityStore: () => ({ loadOrCreate: () => ({ nodusId: "123 456 789" }) }),
     updateRelease: desktopUpdates.updateRelease, app: { getVersion: () => "1.1.10" } };
   const check = uiFunction("releasedStartupUpdate", context, updateMain);
   expect(await check()).toMatchObject({ available: true, version: "1.1.11" });
+  expect(String(context.fetch.mock.calls[0][0])).toContain("nodusId=123456789");
   context.fetch.mockResolvedValueOnce(new Response(JSON.stringify({ token: token.replace(/^./, "x") })));
   await expect(check()).rejects.toThrow("INVALID_UPDATE_POLICY");
   context.fetch.mockResolvedValueOnce(new Response("x".repeat(10_001)));
@@ -779,7 +782,10 @@ test("cloud SDP and ICE use canonical participant IDs under enforced server auth
     if (message.from !== "960632279" || message.to !== "823388407") throw Object.assign(new Error("denied"), { code: "permission-denied" });
   });
   const ensureDeviceUid = vi.fn(async () => "requester");
-  const send = uiFunction("cloudSendSignal", { exports: {}, normalizeNodusId, ensureDeviceUid, fire: async () => ({ addDoc, collection: (...args: unknown[]) => args, store: {} }), firestoreData: (data: unknown) => data }, "apps/desktop/src/core/firebase.ts");
+  const send = uiFunction("cloudSendSignal", { exports: {}, normalizeNodusId, ensureDeviceUid, signalBatches: new Map(), setTimeout, clearTimeout,
+    fire: async () => ({ addDoc, collection: (...args: unknown[]) => args, doc: (ref: unknown) => ref, store: {}, writeBatch: () => {
+      const writes: any[][] = []; return { set: (...args: any[]) => writes.push(args), commit: async () => { for (const [ref, message] of writes) await addDoc(ref, message); } };
+    } }), firestoreData: (data: unknown) => data }, "apps/desktop/src/core/firebase.ts");
   for (const type of ["offer", "answer", "ice-candidate"])
     await expect(send("session", { from: "960 632 279", to: "823 388 407", type, payload: {} })).resolves.toMatchObject({ from: "960632279", to: "823388407", type });
   expect(addDoc).toHaveBeenCalledTimes(3);
@@ -1043,7 +1049,7 @@ test("fallback signal polling never overlaps and ignores a late response after c
 
 test("local cloud counters separate cache, server documents, writes and errors without storing data", async () => {
   const f = cloudListenerFixture();
-  const cloudUsage = { readRequests: 0, writeRequests: 0, listenerStarts: 0, serverSnapshots: 0, documentsDelivered: 0, minimumReadEstimate: 0, errors: 0 };
+  const cloudUsage = { readRequests: 0, writeRequests: 0, listenerStarts: 0, activeListeners: 0, serverSnapshots: 0, documentsDelivered: 0, minimumReadEstimate: 0, errors: 0, quotaErrors: 0, permissionErrors: 0, unavailableErrors: 0 };
   const api = { onSnapshot: f.onSnapshot, getDoc: vi.fn(async () => ({ metadata: { fromCache: true } })), getDocs: vi.fn(async () => f.snapshot([])), setDoc: vi.fn(async () => undefined), addDoc: vi.fn(async () => ({})) };
   const tracked = uiFunction("instrumentFirestore", { cloudUsage }, "apps/desktop/src/core/firebase.ts")({}, api);
   await tracked.getDoc("cached"); await tracked.getDocs("empty"); await tracked.setDoc("doc", {}); await tracked.addDoc("collection", {});
@@ -1052,7 +1058,7 @@ test("local cloud counters separate cache, server documents, writes and errors w
   f.listeners[0].next(f.snapshot([{ id: "one" }, { id: "two" }]));
   f.listeners[0].next({ ...f.snapshot([]), docChanges: () => [] });
   f.listeners[0].error({ code: "resource-exhausted" });
-  expect(cloudUsage).toEqual({ readRequests: 2, writeRequests: 2, listenerStarts: 1, serverSnapshots: 2, documentsDelivered: 2, minimumReadEstimate: 3, errors: 1 });
+  expect(cloudUsage).toEqual({ readRequests: 2, writeRequests: 2, listenerStarts: 1, activeListeners: 0, serverSnapshots: 2, documentsDelivered: 2, minimumReadEstimate: 3, errors: 1, quotaErrors: 1, permissionErrors: 0, unavailableErrors: 0 });
   expect(next).toHaveBeenCalledTimes(3); expect(error).toHaveBeenCalledOnce();
   api.getDocs.mockRejectedValueOnce(new Error("unavailable")); await expect(tracked.getDocs("failed")).rejects.toThrow("unavailable");
   expect(cloudUsage.errors).toBe(2); expect(cloudUsage.minimumReadEstimate).toBe(3);
@@ -1179,6 +1185,25 @@ test("legacy unreserved sessions do not disconnect or retry forever during accou
   await establish("legacy", rejected);
   expect(lifecycle.has("legacy")).toBe(false);
   expect(rejected).not.toHaveBeenCalled();
+  expect(vi.getTimerCount()).toBe(0);
+});
+
+test.each(["ended", "blocked", "cleanup"])("business authorization events replace heartbeats and close cleanly: %s", async mode => {
+  vi.useFakeTimers();
+  const lifecycle = new Map(), rejected = vi.fn(), close = vi.fn(), reserved = new Set(["session"]);
+  let onStatus!: (status: string) => void, onRejected!: () => void;
+  const request = vi.fn(async () => ({ status: "RESERVED", eventDriven: true, liveAuthorization: true }));
+  const context = { exports: {}, licenseConfigured: () => true, lifecycle, reserved, offlineReserved: new Set(), LicenseError, setTimeout, clearTimeout,
+    request, Event, window: { dispatchEvent: vi.fn() }, subscribeCloudSessionAuthorization: (_id: string, status: any, denied: any) => { onStatus = status; onRejected = denied; return { close }; } };
+  const establish = uiFunction("licenseEstablished", context, "apps/desktop/src/core/licensing.ts");
+  await establish("session", rejected);
+  onStatus("ESTABLISHED"); await vi.advanceTimersByTimeAsync(30 * 60_000);
+  expect(request).toHaveBeenCalledOnce(); expect(rejected).not.toHaveBeenCalled();
+  if (mode === "ended") onStatus("ENDED");
+  else if (mode === "blocked") onRejected();
+  else uiFunction("licenseEnded", context, "apps/desktop/src/core/licensing.ts")("session");
+  expect(close).toHaveBeenCalledOnce(); expect(lifecycle.size).toBe(0);
+  expect(rejected.mock.calls).toEqual(mode === "cleanup" ? [] : [[mode === "blocked" ? "DEVICE_REVOKED" : "SESSION_EXPIRED"]]);
   expect(vi.getTimerCount()).toBe(0);
 });
 
@@ -1343,7 +1368,7 @@ test("admin loads only the active view and reports timeouts in Portuguese", asyn
   const setDashboard = vi.fn(), setFeedback = vi.fn(), setVerified = vi.fn();
   const reload = uiFunction("reload", { view: "dashboard", auth: { currentUser: { uid: "owner" } }, api, loadDevicePage: async () => { await api("/admin/devices?paged=1"); return { items: [], nextCursor: null }; }, setDeviceNextCursor: vi.fn(), setDashboard, setFeedback, setVerified, setUpdatedAt: vi.fn(), setOrganizations: vi.fn(), setAccessRequests: vi.fn(), setDevices: vi.fn() }, "apps/admin/src/App.tsx");
   await reload();
-  expect(api.mock.calls.map(([path]) => path)).toEqual(["/admin/dashboard", "/admin/organizations", "/admin/access-requests", "/admin/devices"]);
+  expect(api.mock.calls.map(([path]) => path)).toEqual(["/admin/dashboard", "/admin/organizations?recent=1", "/admin/access-requests?recent=1", "/admin/devices?recent=1"]);
   expect(setDashboard).toHaveBeenCalledExactlyOnceWith({ devices: 2 });
   expect(setFeedback).toHaveBeenCalledExactlyOnceWith("");
   expect(setVerified).toHaveBeenCalledExactlyOnceWith(true);
@@ -1400,7 +1425,7 @@ test("Admin polls only the lightweight dashboard and uses live coordination pres
   expect(admin).toContain('view !== "dashboard"');
   expect(admin).toContain('reload("dashboard", true)');
   expect(admin).not.toContain("window.setInterval(refresh, 30_000)");
-  expect(server).toContain('db.collection("devices").where("updatedAt", ">=", onlineSince)');
+  expect(server).toContain('db.collection("devices").where("status", "==", "online").where("updatedAt", ">=", onlineSince).count().get()');
   expect(server).toContain("return publicDevices(db, rows.docs);");
   expect(readFileSync("services/licensing/src/devices.ts", "utf8")).toContain("const presence = rows.length ? await db.getAll");
 });
@@ -1620,6 +1645,7 @@ test("receiver recovery retains the degraded network profile until its gradual s
 });
 
 test("input rate limiting never strands Ctrl or a held mouse button", () => {
+  vi.useFakeTimers();
   const apply = vi.fn(), channel: any = {}, updateRuntime = vi.fn();
   const attach = uiFunction("attachHostControl", { controlChannelsRef: { current: new Map() }, hostInputRateRef: { current: new Map([["s", { at: Date.now(), count: 500 }]]) },
     sessionsRef: { current: [{ session: { sessionId: "s", permissions: ["keyboard:control", "mouse:control"] } }] }, settings: { allowRemoteControl: true }, window: { nodusDesktop: { applyRemoteInput: apply } }, updateRuntime, acceptPointerSequence: () => true });
@@ -1628,6 +1654,35 @@ test("input rate limiting never strands Ctrl or a held mouse button", () => {
   send("keyDown"); expect(apply).not.toHaveBeenCalled();
   send("keyUp"); send("mouseUp"); expect(apply.mock.calls.map(([input]) => input.type)).toEqual(["keyUp", "mouseUp"]);
   expect(updateRuntime).not.toHaveBeenCalled();
+});
+
+test.each(["recovered", "replaced", "still-disconnected"])("ICE recovery discards stale asynchronous work: %s", async mode => {
+  vi.useFakeTimers();
+  const peer: any = { connectionState: "disconnected", iceConnectionState: "disconnected", signalingState: "stable", createOffer: vi.fn(async () => ({})), setLocalDescription: vi.fn(async () => {}) };
+  const peers = new Map([["s", peer]]), timers = new Map(), attempts = new Map(), send = vi.fn(async () => {});
+  let finish!: (servers: unknown[]) => void;
+  const fetchIceServers = vi.fn(() => new Promise(resolve => { finish = resolve; }));
+  const context: any = { peersRef: { current: peers }, reconnectTimersRef: { current: timers }, reconnectAttemptsRef: { current: attempts }, iceRestartHistoryRef: { current: new Map() },
+    settings: {}, window: { setTimeout, clearTimeout }, fetchIceServers, updateRuntime: vi.fn(), logDiagnostic: vi.fn(), logIceEvent: vi.fn(), sendReliableSignal: send };
+  context.scheduleIceRestart = uiFunction("scheduleIceRestart", context);
+  context.scheduleIceRestart("s", peer, "123456789", "987654321", 0, "disconnected");
+  await vi.advanceTimersByTimeAsync(0);
+  expect(fetchIceServers).toHaveBeenCalledOnce();
+  if (mode === "recovered") peer.iceConnectionState = "connected";
+  if (mode === "replaced") peers.set("s", {});
+  finish([]); await vi.advanceTimersByTimeAsync(0);
+  expect(peer.createOffer).toHaveBeenCalledTimes(mode === "still-disconnected" ? 1 : 0);
+  expect(send).toHaveBeenCalledTimes(mode === "still-disconnected" ? 1 : 0);
+  expect(timers.size).toBe(mode === "still-disconnected" ? 1 : 0);
+});
+
+test("closing a host control channel releases the exact held input once", () => {
+  const held = new RemoteInputState(), apply = vi.fn(), channel: any = {};
+  held.record("s", { type: "keyDown", keyCode: 162, code: "ControlLeft", location: 1, repeat: false });
+  const releaseHostInput = uiFunction("releaseHostInput", { hostHeldInputRef: { current: held }, window: { nodusDesktop: { applyRemoteInput: apply } } });
+  uiFunction("attachHostControl", { controlChannelsRef: { current: new Map() }, releaseHostInput, updateRuntime: vi.fn() })("s", channel);
+  channel.onclose(); channel.onclose();
+  expect(apply).toHaveBeenCalledExactlyOnceWith({ type: "keyUp", keyCode: 162, code: "ControlLeft", location: 1, repeat: false });
 });
 
 test("licensing loading belongs only to the clicked action and cannot submit a second request", async () => {

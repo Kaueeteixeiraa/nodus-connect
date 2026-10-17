@@ -1,6 +1,6 @@
 {
   "name": "nodus-connect",
-  "version": "1.1.27",
+  "version": "1.1.28",
   "description": "Acesso remoto seguro, rapido e gratuito.",
   "author": "Nodus Connect",
   "private": true,
@@ -22,13 +22,15 @@
     "desktop:start": "node scripts/desktop-runner.mjs start",
     "desktop:pack": "pnpm icons && pnpm native:capture && pnpm native:media && pnpm native:media:runtime && pnpm build && electron-builder --win --x64 --dir",
     "desktop:build": "pnpm icons && pnpm native:capture && pnpm native:media && pnpm native:media:runtime && pnpm build && electron-builder --win --x64",
-    "installer:build": "pnpm icons && pnpm native:capture && pnpm native:media && pnpm native:media:runtime && pnpm native:service && pnpm build && electron-builder --win --x64 --dir --config installer-builder.json && node scripts/build-quick-support.mjs && electron-builder --win portable --x64 --config quick-support-builder.cjs && node scripts/make-installer.mjs",
+    "installer:build": "pnpm icons && pnpm native:capture && pnpm native:media && pnpm native:media:runtime && pnpm native:service && pnpm build && electron-builder --win --x64 --dir --config installer-builder.json && node scripts/build-quick-support.mjs && electron-builder --win portable --x64 --config quick-support-builder.cjs && node scripts/make-installer.mjs --compact --canonical",
     "perf:local": "pnpm build && pnpm exec electron scripts/local-performance-lab.cjs",
     "build": "node scripts/build-quick-support.mjs --prepare && tsc --noEmit && vite build --config apps/desktop/vite.config.ts",
     "quick-support:build": "node scripts/build-quick-support.mjs && pnpm build && electron-builder --win portable --x64 --config quick-support-builder.cjs",
     "build:admin": "tsc --noEmit && vite build --config apps/admin/vite.config.ts",
     "build:licensing": "npm --prefix services/licensing run build",
     "test": "vitest run",
+    "test:rules": "npx --yes firebase-tools@15.34.0 emulators:exec --project demo-nodus-licensing --only firestore --config services/licensing/firebase.emulator.json \"pnpm exec vitest run services/licensing/src/firestore.rules.test.ts --maxWorkers=1\"",
+    "release:check": "node scripts/verify-release.mjs --extract --init-validation",
     "firebase:login": "npx firebase-tools login",
     "firebase:deploy:rules": "npx firebase-tools deploy --only firestore:rules"
   },
@@ -64,6 +66,7 @@
       "output": "outputs/desktop"
     },
     "afterPack": "scripts/prune-electron-output.cjs",
+    "afterSign": "scripts/release-integrity.cjs",
     "files": [
       "dist/desktop/**/*",
       "apps/desktop/electron/**/*",

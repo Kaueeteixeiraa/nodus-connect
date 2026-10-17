@@ -11,7 +11,7 @@ import type { PaymentProvider } from "./payments";
 import { RelayLicenseGate } from "../../coordination/src/license-gate";
 import { createRelayServer } from "../../coordination/src/relay";
 import { OfflineLeaseAnchor, verifyBrowserLease } from "../../../packages/licensing/src/offline";
-import { FIRESTORE_CLIENT_CONFIG } from "./firestore-store";
+import { FIRESTORE_CLIENT_CONFIG, firestoreLicenseStore } from "./firestore-store";
 import support from "../../../apps/desktop/electron/quick-support.cjs";
 import desktopUpdates from "../../../apps/desktop/electron/desktop-update.cjs";
 import type { SupportDraft } from "../../../packages/common/src/quick-support";
@@ -199,6 +199,11 @@ describe("hardware licensing identity", () => {
     await f.engine.deviceStatus(admin, f.credentials.deviceId, "BLOCKED");
     expect((await f.engine.info(installed.actor, installed.credentials)).code).toBe("DEVICE_REVOKED");
     await expect(reinstall(f, hardware, "fresh-blocked", "222333444")).rejects.toMatchObject({ code: "DEVICE_REVOKED" });
+    const policy = f.store.data.get("license_policy/current")!;
+    f.store.data.set("license_policy/current", { ...policy, identityEnabled: false, identityEnrollmentEnabled: false });
+    await expect(f.engine.enroll(installed.actor, { deviceId: "reinstall", nodusId: "111222333", deviceName: "Alias", deviceClaim: "claim-reinstall" })).rejects.toMatchObject({ code: "DEVICE_REVOKED" });
+    expect(f.store.data.get(`license_session_controls/hw-${installed.device.deviceIdentityId}`)).toMatchObject({ blocked: true, ownerUid: installed.actor.uid });
+    f.store.data.set("license_policy/current", policy);
     await f.engine.deviceStatus(admin, f.credentials.deviceId, "ACTIVE");
     expect((await f.engine.info(installed.actor, installed.credentials)).allowed).toBe(true);
   });
@@ -284,6 +289,17 @@ describe("hardware licensing identity", () => {
     expect((await f.engine.info(f.actor, f.credentials)).trialUsed).toBe(1);
     f.advance(FREE_SESSION_LIMIT_MS); await expect(f.engine.lifecycle(f.actor, "event-session", "establish")).rejects.toMatchObject({ code: "SESSION_EXPIRED" });
   });
+  test("live business slots survive lost cleanups without allocating excess capacity and remain admin-releasable", async () => {
+    const f = await fixture(), company = await f.business();
+    (f.store.data.get(`license_licenses/${company.licenseId}`) as License).maxConcurrentSessions = 1;
+    Object.assign(f.store.data.get("devices/987654321")!, { capabilities: ["license-events-v1"] });
+    await f.engine.reserve(f.actor, f.credentials, { sessionId: "live", targetNodusId: "987654321", liveAuthorization: true });
+    await f.establish("live"); f.advance(3_600_000);
+    await expect(f.reserve("excess")).rejects.toMatchObject({ code: "CONCURRENT_LIMIT_REACHED" });
+    await expect(f.engine.releaseSession(f.actor, "live", "Recover lost cleanup")).rejects.toMatchObject({ code: "FORBIDDEN" });
+    await f.engine.releaseSession(admin, "live", "Confirmed both PCs shut down");
+    await expect(f.reserve("recovered")).resolves.toMatchObject({ sessionId: "recovered" });
+  });
   test("measures database operations for a ten-minute session, excluding transport and enrollment", async () => {
     for (const eventDriven of [false, true]) {
       const f = await fixture(); if (eventDriven) await migrate(f);
@@ -306,6 +322,7 @@ describe("desktop update distribution", () => {
     const f = await fixture(), transaction = vi.spyOn(f.store, "transaction");
     const older = JSON.parse(JSON.stringify(release).replaceAll(version, "1.1.9"));
     const newer = JSON.parse(JSON.stringify(release).replaceAll(version, "1.1.100"));
+    for (const name of ["Nodus-QuickSupport-1.1.100.exe", "Nodus-Connect-Setup-1.1.100.json"]) newer.assets.push({ name, browser_download_url: `https://github.com/Kaueeteixeiraa/nodus-connect/releases/download/v1.1.100/${name}`, digest: `sha256:${"b".repeat(64)}`, size: 100 });
     const network = vi.fn<typeof fetch>(async () => new Response(JSON.stringify([older, { ...release, draft: true }, { ...release, prerelease: true }, { ...release, assets: [] }, null, release, newer, release])));
     await expect(f.engine.desktopReleases(f.actor, network)).rejects.toMatchObject({ code: "FORBIDDEN" });
     expect(network).not.toHaveBeenCalled();
@@ -357,6 +374,36 @@ describe("desktop update distribution", () => {
     expect(() => desktopUpdates.verifyPolicy(token, keys.publicKey, -60_000)).toThrow();
     const unrelated = desktopUpdates.signPolicy({ ...policy, kind: "nodus-support" } as any, keys.privateKey, 1000);
     expect(() => desktopUpdates.verifyPolicy(unrelated, keys.publicKey, 1000)).toThrow();
+  });
+  test("pilot distribution hides target IDs, excludes legacy clients and preserves pause and promotion", async () => {
+    const f = await fixture(), network = fetchRelease();
+    const selected = ["123456789", "987654321"];
+    await f.engine.publishDesktopUpdate(admin, true, version, network, selected);
+    const read = async (id = "") => desktopUpdates.verifyPolicy((await f.engine.signedDesktopUpdate(id)).token, keys.publicKey, f.time());
+    expect((await read()).enabled).toBe(false);
+    expect((await read("111222333")).enabled).toBe(false);
+    expect(await read(selected[0])).toMatchObject({ enabled: true, release });
+    expect(await read(selected[0])).not.toHaveProperty("targetNodusIds");
+    await f.engine.publishDesktopUpdate(admin, false, undefined, network);
+    expect((await read(selected[0])).enabled).toBe(false);
+    await f.engine.publishDesktopUpdate(admin, true, version, network);
+    expect((await read()).enabled).toBe(true);
+    expect((await read("111222333")).enabled).toBe(true);
+    await expect(f.engine.publishDesktopUpdate(admin, true, version, network, ["invalid"])).rejects.toMatchObject({ code: "INVALID_INPUT" });
+    await expect(f.engine.signedDesktopUpdate("invalid")).rejects.toMatchObject({ code: "INVALID_INPUT" });
+  });
+  test("new releases require the matching QuickSupport and API template before distribution", async () => {
+    const f = await fixture(), published = JSON.parse(JSON.stringify(release).replaceAll(version, "1.1.28"));
+    const network = vi.fn<typeof fetch>(async () => new Response(JSON.stringify(published)));
+    await expect(f.engine.publishDesktopUpdate(admin, true, "1.1.28", network)).rejects.toMatchObject({ code: "ROLLOUT_NOT_READY" });
+    for (const name of ["Nodus-QuickSupport-1.1.28.exe", "Nodus-Connect-Setup-1.1.28.json"]) published.assets.push({ name, browser_download_url: `https://github.com/Kaueeteixeiraa/nodus-connect/releases/download/v1.1.28/${name}`, digest: `sha256:${"b".repeat(64)}`, size: 100 });
+    vi.stubEnv("NODUS_SUPPORT_TEMPLATE_VERSION", "1.1.27");
+    vi.stubEnv("NODUS_SUPPORT_TEMPLATE_SHA256", "b".repeat(64));
+    try {
+      await expect(f.engine.publishDesktopUpdate(admin, true, "1.1.28", network)).rejects.toMatchObject({ code: "ROLLOUT_NOT_READY" });
+      vi.stubEnv("NODUS_SUPPORT_TEMPLATE_VERSION", "1.1.28");
+      expect(await f.engine.publishDesktopUpdate(admin, true, "1.1.28", network)).toMatchObject({ enabled: true });
+    } finally { vi.unstubAllEnvs(); }
   });
   test("cached reads refresh after one minute and recover after database failures", async () => {
     const f = await fixture(), transaction = vi.spyOn(f.store, "transaction");
@@ -682,11 +729,11 @@ describe("cancelled organization removal", () => {
   });
 });
 
-async function httpFixture() {
+async function httpFixture(businessEventsReady = false) {
   const f = await fixture();
   const providers = new Map<string, PaymentProvider>();
   const notifyAccessRequest = vi.fn(async () => true);
-  const server = createServer(createLicenseHandler({ engine: f.engine, store: f.store, origins: ["http://localhost:5190"], providers,
+  const server = createServer(createLicenseHandler({ engine: f.engine, store: f.store, origins: ["http://localhost:5190"], providers, businessEventsReady,
     authenticate: async token => {
       if (token === "source-token") return f.actor;
       if (token === "host-token") return f.host;
@@ -702,6 +749,66 @@ async function httpFixture() {
   return { ...f, base, post, providers, notifyAccessRequest, close: () => new Promise<void>((resolve, reject) => { server.closeAllConnections(); server.close(error => error ? reject(error) : resolve()); }) };
 }
 describe("licensing HTTP and relay enforcement", () => {
+  test.each([false, true])("business events require rollout approval and a capable receiver: ready=%s", async ready => {
+    const f = await httpFixture(ready);
+    try {
+      f.store.data.set("license_policy/current", { ...LICENSE_DEFAULTS, enforced: true, identityEnabled: true });
+      Object.assign(f.credentials, await f.engine.enroll(f.actor, { deviceId: "device-source", nodusId: "123456789", deviceName: "Source", deviceClaim: "claim-source", licenseIdentity: { version: 1, anchors: { system: "a".repeat(64), board: "b".repeat(64) }, virtual: false } }));
+      await f.business();
+      const reserve = (sessionId: string) => f.post("/license/sessions/reserve", { ...f.credentials, sessionId, targetNodusId: "987654321", eventDriven: true, liveAuthorization: true });
+      expect((await reserve("old-host")).status).toBe(200);
+      expect(f.store.data.get("license_sessions/old-host")).not.toHaveProperty("liveAuthorization");
+      await f.engine.lifecycle(f.actor, "old-host", "end");
+      Object.assign(f.store.data.get("devices/987654321")!, { capabilities: ["license-events-v1"] });
+      f.store.reads = 0; f.store.writes = 0;
+      expect((await reserve("events-cost")).status).toBe(200);
+      for (const token of ["source-token", "host-token"]) expect(await (await f.post("/license/sessions/establish", { sessionId: "events-cost" }, token)).json()).toMatchObject({ liveAuthorization: ready, eventDriven: ready });
+      f.advance(30 * 60_000);
+      if (ready) {
+        expect(f.store.data.get("license_sessions/events-cost")).toMatchObject({ status: "ESTABLISHED", expiresAt: Number.MAX_SAFE_INTEGER });
+        const license = [...f.store.data.values()].find((row: any) => row.plan === "business") as License;
+        expect(Object.keys(license.slots)).toEqual(["events-cost"]);
+      }
+      for (const token of ["source-token", "host-token"]) expect((await f.post("/license/sessions/end", { sessionId: "events-cost" }, token)).status).toBe(200);
+      console.info(JSON.stringify({ event: "BUSINESS_EVENTS_COST_LAB", ready, reads: f.store.reads, writes: f.store.writes, calls: 5, excludesAuthorizationListenersAndTransport: true }));
+      expect(f.store.reads).toBe(ready ? 26 : 25); expect(f.store.writes).toBe(18);
+    } finally { await f.close(); }
+  });
+  test.each([false, true])("measures 30-minute business HTTP usage including both peers with hardware=%s", async hardwareEnabled => {
+    const f = await httpFixture();
+    try {
+      if (hardwareEnabled) {
+        f.store.data.set("license_policy/current", { ...LICENSE_DEFAULTS, enforced: true, identityEnabled: true });
+        Object.assign(f.credentials, await f.engine.enroll(f.actor, { deviceId: "device-source", nodusId: "123456789", deviceName: "Source", deviceClaim: "claim-source", licenseIdentity: { version: 1, anchors: { system: "a".repeat(64), board: "b".repeat(64) }, virtual: false } }));
+      }
+      await f.business(); f.store.reads = 0; f.store.writes = 0;
+      expect((await f.post("/license/sessions/reserve", { ...f.credentials, sessionId: "business-cost", targetNodusId: "987654321" })).status).toBe(200);
+      for (const token of ["source-token", "host-token"]) expect((await f.post("/license/sessions/establish", { sessionId: "business-cost" }, token)).status).toBe(200);
+      const grant = structuredClone(f.store.data.get("license_session_grants/business-cost"));
+      for (let index = 0; index < 59; index++) {
+        f.advance(30_000);
+        for (const token of ["source-token", "host-token"]) expect((await f.post("/license/sessions/heartbeat", { sessionId: "business-cost" }, token)).status).toBe(200);
+      }
+      expect(f.store.data.get("license_session_grants/business-cost")).toEqual(grant);
+      for (const token of ["source-token", "host-token"]) expect((await f.post("/license/sessions/end", { sessionId: "business-cost" }, token)).status).toBe(200);
+      console.info(JSON.stringify({ event: "BUSINESS_30_MIN_COST_LAB", hardwareEnabled, reads: f.store.reads, writes: f.store.writes, calls: 123, excludesSecurityRulesAndTransport: true }));
+      expect(f.store.reads).toBe(hardwareEnabled ? 733 : 612); expect(f.store.writes).toBe(254);
+    } finally { await f.close(); }
+  });
+  test("transaction-local read reuse preserves clones, pending writes and missing documents", async () => {
+    const get = vi.fn(async (ref: string) => ({ exists: ref !== "missing", data: () => ({ value: 1 }) })), set = vi.fn();
+    const db = { doc: (path: string) => path, runTransaction: async (operation: any) => operation({ get, set }) };
+    const store = firestoreLicenseStore(db as any);
+    await store.transaction(async tx => {
+      const first = await tx.get<any>("one"); first.value = 9;
+      expect(await tx.get("one")).toEqual({ value: 1 });
+      expect(await tx.get("missing")).toBeNull(); expect(await tx.get("missing")).toBeNull();
+      tx.set("one", { value: 2 }); expect(await tx.get("one")).toEqual({ value: 2 });
+    });
+    expect(get).toHaveBeenCalledTimes(2);
+    await store.transaction(async tx => { expect(await tx.get("one")).toEqual({ value: 1 }); });
+    expect(get).toHaveBeenCalledTimes(3);
+  });
   test("measures complete licensing HTTP mutations including rate limits and both peer cleanups", async () => {
     const f = await httpFixture();
     try {
@@ -712,7 +819,7 @@ describe("licensing HTTP and relay enforcement", () => {
       for (const token of ["source-token", "host-token"]) expect((await f.post("/license/sessions/establish", { sessionId: "cost-http" }, token)).status).toBe(200);
       for (const token of ["source-token", "host-token"]) expect((await f.post("/license/sessions/end", { sessionId: "cost-http" }, token)).status).toBe(200);
       console.info(JSON.stringify({ event: "LICENSE_HTTP_COST_LAB", reads: f.store.reads, writes: f.store.writes, calls: 5 }));
-      expect(f.store.reads).toBe(27); expect(f.store.writes).toBe(18);
+      expect(f.store.reads).toBe(25); expect(f.store.writes).toBe(18);
     } finally { await f.close(); }
   });
   test("public startup update checks coalesce reads and bypass authentication and writes", async () => {

@@ -6,6 +6,7 @@ import { ArrowLeft, ArrowRight, Ban, Building2, Check, ChevronDown, ChevronLeft,
 import { LICENSE_MESSAGES, type DesktopUpdatePolicy, type License, type LicenseAccessRequest, type LicenseDevice } from "../../../packages/licensing/src/index";
 import logo from "../../desktop/src/assets/nodus-logo-icon.png";
 import "./styles.css";
+import { UpdateInventory } from "./UpdateInventory";
 
 const base = String(import.meta.env.VITE_NODUS_LICENSE_API ?? "").replace(/\/$/, "");
 const configured = Boolean(base && import.meta.env.VITE_FIREBASE_API_KEY && import.meta.env.VITE_FIREBASE_PROJECT_ID);
@@ -16,7 +17,9 @@ type Organization = { id: string; name: string; email: string; licenseId: string
 type Details = { devices: { id: string; deviceName: string; nodusId: string; status: string }[]; payments: { paymentId: string; amountCents: number; paidAt: number; status: string }[]; audits: { action: string; adminUserId: string; timestamp: number }[] };
 type Dashboard = { active: number; suspended: number; trials: number; devices: number; online: number; pendingRequests: number; organizations: number; mrrCents: number };
 type PublicDevice = Omit<LicenseDevice, "claimHash" | "tokenHash"> & { online: boolean; plan?: "free" | "business"; licenseStatus?: string; trialUsed?: number; trialLimit?: number; firstRegisteredAt?: number };
-type DevicePage = { items: PublicDevice[]; nextCursor: string | null };
+type UpdatePublicDevice = PublicDevice & { appVersion?: string | null; updateState?: string | null; activeSessions?: number | null };
+type AdminUpdatePolicy = DesktopUpdatePolicy & { pilotSupported?: boolean };
+type DevicePage = { items: UpdatePublicDevice[]; nextCursor: string | null };
 type DeviceDetails = { review: { status: string; reason: string; createdAt: number } | null; sessions: { id: string; status: string; establishedAt: number; expiresAt: number }[]; audits: { action: string; timestamp: number; adminUserId: string }[] };
 const ADMIN_VIEWS = [{ id: "dashboard", label: "Visão geral", icon: LayoutDashboard }, { id: "access", label: "Solicitações", icon: KeyRound }, { id: "devices", label: "Dispositivos", icon: Laptop }, { id: "organizations", label: "Empresas", icon: Building2 }, { id: "updates", label: "Atualizações", icon: Download }] as const;
 type AdminView = typeof ADMIN_VIEWS[number]["id"];
@@ -50,7 +53,7 @@ async function api<T>(path: string, body?: object): Promise<T> {
   try {
     const response = await fetch(`${base}${path}`, { method: body ? "POST" : "GET", headers: { authorization: `Bearer ${await user.getIdToken()}`, ...(body ? { "content-type": "application/json" } : {}) }, ...(body ? { body: JSON.stringify(body) } : {}), cache: "no-store", signal: AbortSignal.timeout(12_000) });
     const result = await response.json().catch(() => ({ code: "SERVER_UNAVAILABLE" }));
-    if (!response.ok) throw new Error(LICENSE_MESSAGES[result.code as keyof typeof LICENSE_MESSAGES] ?? "Serviço indisponível.");
+    if (!response.ok) throw new Error(path === "/admin/desktop-update" && result.code === "ROLLOUT_NOT_READY" ? "Publicacao incompleta. Confira o setup, o QuickSupport e o template da API desta versao." : LICENSE_MESSAGES[result.code as keyof typeof LICENSE_MESSAGES] ?? "Serviço indisponível.");
     return result as T;
   } catch (error) {
     if (error instanceof Error && (error.name === "TimeoutError" || error.name === "AbortError" || /signal timed out/i.test(error.message))) throw new Error("O serviço de administração demorou para responder. Tente novamente.");
@@ -101,7 +104,7 @@ function Admin() {
   const [user, setUser] = useState<User | null>(null), [verified, setVerified] = useState(false), [busy, setBusy] = useState(false), [feedback, setFeedback] = useState("");
   const [view, setView] = useState<AdminView>(new URLSearchParams(location.search).has("request") ? "access" : "dashboard"), [tab, setTab] = useState<"license" | "devices" | "payments" | "audit">("license");
   const [organizations, setOrganizations] = useState<Organization[]>([]), [dashboard, setDashboard] = useState<Dashboard | null>(null), [selected, setSelected] = useState<string>(""), [details, setDetails] = useState<Details | null>(null);
-  const [accessRequests, setAccessRequests] = useState<LicenseAccessRequest[]>([]), [devices, setDevices] = useState<PublicDevice[]>([]);
+  const [accessRequests, setAccessRequests] = useState<LicenseAccessRequest[]>([]), [devices, setDevices] = useState<UpdatePublicDevice[]>([]);
   const [create, setCreate] = useState(false), [name, setName] = useState(""), [email, setEmail] = useState(""), [secret, setSecret] = useState("");
   const [query, setQuery] = useState(""), [filter, setFilter] = useState("all"), [page, setPage] = useState(1), [updatedAt, setUpdatedAt] = useState(0);
   const [confirmation, setConfirmation] = useState<{ title: string; message: string; action: (reason?: string) => Promise<void>; requiresReason?: boolean } | null>(null);
@@ -110,8 +113,9 @@ function Admin() {
   const [deviceHistory, setDeviceHistory] = useState<string[]>([]), [devicesLoading, setDevicesLoading] = useState(false);
   const deviceRequest = useRef<{ key: string; promise: Promise<DevicePage> } | null>(null);
   const [selectedDevice, setSelectedDevice] = useState<PublicDevice | null>(null), [deviceDetails, setDeviceDetails] = useState<DeviceDetails | null>(null);
-  const [desktopUpdate, setDesktopUpdate] = useState<DesktopUpdatePolicy | null>(null), [updateVersion, setUpdateVersion] = useState("");
+  const [desktopUpdate, setDesktopUpdate] = useState<AdminUpdatePolicy | null>(null), [updateVersion, setUpdateVersion] = useState("");
   const [updateVersions, setUpdateVersions] = useState<string[]>([]);
+  const [updatePilot, setUpdatePilot] = useState(false), [updateTargets, setUpdateTargets] = useState<string[]>([]);
   const paymentAttempts = useRef(new Map<string, string>());
   const grantAttempts = useRef(new Map<string, string>());
   const organization = organizations.find(item => item.licenseId === selected);
@@ -125,6 +129,7 @@ function Admin() {
   function updateFilter(value: string) { setFilter(value); setPage(1); setDeviceCursor(""); setDeviceHistory([]); }
   function loadDevicePage() {
     const params = new URLSearchParams({ paged: "1", query, filter, cursor: deviceCursor });
+    if (view === "updates") params.set("runtimeOnly", "1");
     const key = `${auth?.currentUser?.uid}:${params}`;
     if (deviceRequest.current?.key === key) return deviceRequest.current.promise;
     const promise = api<DevicePage>(`/admin/devices?${params}`).finally(() => { if (deviceRequest.current?.key === key) deviceRequest.current = null; });
@@ -144,14 +149,14 @@ function Admin() {
     const uid = auth?.currentUser?.uid;
     const [summary, rows, requests, deviceRows, update, releases] = await Promise.all([
       !only || only === "dashboard" ? api<Dashboard>("/admin/dashboard") : null,
-      !only || (only === "dashboard" && !summaryOnly) || only === "organizations" ? api<Organization[]>("/admin/organizations") : null,
-      !only || (only === "dashboard" && !summaryOnly) || only === "access" ? api<LicenseAccessRequest[]>("/admin/access-requests") : null,
-      only === "devices" ? loadDevicePage() : !only || (only === "dashboard" && !summaryOnly) ? api<PublicDevice[]>("/admin/devices") : null,
-      only === "updates" ? api<DesktopUpdatePolicy>("/admin/desktop-update") : null,
+      !only || (only === "dashboard" && !summaryOnly) || only === "organizations" ? api<Organization[]>(`/admin/organizations${only === "dashboard" ? "?recent=1" : ""}`) : null,
+      !only || (only === "dashboard" && !summaryOnly) || only === "access" ? api<LicenseAccessRequest[]>(`/admin/access-requests${only === "dashboard" ? "?recent=1" : ""}`) : null,
+      only === "devices" || only === "updates" && !summaryOnly ? loadDevicePage() : !only || (only === "dashboard" && !summaryOnly) ? api<UpdatePublicDevice[]>("/admin/devices?recent=1") : null,
+      only === "updates" ? api<AdminUpdatePolicy>("/admin/desktop-update") : null,
       only === "updates" ? api<string[]>("/admin/desktop-releases").then(versions => ({ versions, error: "" }), error => ({ versions: [] as string[], error: error.message as string })) : null,
     ]);
     if (!uid || auth?.currentUser?.uid !== uid) return;
-    if (update && releases) { const version = update.release?.tag_name.replace(/^v/, "") ?? ""; setDesktopUpdate(update); setUpdateVersions(releases.versions); setUpdateVersion(releases.versions.includes(version) ? version : ""); }
+    if (update && releases) { const version = update.release?.tag_name.replace(/^v/, "") ?? ""; setDesktopUpdate(update); setUpdateVersions(releases.versions); setUpdateVersion(releases.versions.includes(version) ? version : ""); setUpdateTargets(update.targetNodusIds ?? []); setUpdatePilot(Boolean(update.targetNodusIds?.length)); }
     if (summary) setDashboard(summary); if (rows) setOrganizations(rows); if (requests) setAccessRequests(requests); if (deviceRows) {
       if (Array.isArray(deviceRows)) setDevices(deviceRows);
       else { setDevices(deviceRows.items); setDeviceNextCursor(deviceRows.nextCursor); }
@@ -164,6 +169,7 @@ function Admin() {
       const current = ++revision;
       setUser(next); setVerified(false); setSecret(""); setDetails(null); setOrganizations([]); setDashboard(null); setSelected(""); setDevices([]); setAccessRequests([]); setConfirmation(null); setUpdatedAt(0);
       setDesktopUpdate(null); setUpdateVersion(""); setUpdateVersions([]);
+      setUpdateTargets([]); setUpdatePilot(false);
       setSelectedDevice(null); setDeviceDetails(null);
       if (next) reload().catch(error => { if (current === revision) setFeedback(error.message); });
     });
@@ -172,7 +178,7 @@ function Admin() {
   useEffect(() => { if (!verified || busy || view !== "dashboard") return; const timer = window.setInterval(() => { if (document.visibilityState === "visible") reload("dashboard", true).catch(error => setFeedback(error.message)); }, 60_000); return () => window.clearInterval(timer); }, [verified, busy, view]);
   useEffect(() => { if (selected) document.getElementById("company-heading")?.focus(); }, [selected]);
   useEffect(() => {
-    if (!verified || view !== "devices") { setDevicesLoading(false); return; }
+    if (!verified || !["devices", "updates"].includes(view)) { setDevicesLoading(false); return; }
     let active = true;
     setDevicesLoading(true);
     const timer = window.setTimeout(() => {
@@ -183,6 +189,17 @@ function Admin() {
     }, 350);
     return () => { active = false; window.clearTimeout(timer); };
   }, [verified, view, query, filter, deviceCursor]);
+  useEffect(() => {
+    if (!verified || busy || view !== "updates" || !desktopUpdate?.enabled) return;
+    let active = true;
+    const timer = window.setInterval(() => {
+      if (document.visibilityState !== "visible") return;
+      loadDevicePage().then(result => {
+        if (active) { setDevices(result.items); setDeviceNextCursor(result.nextCursor); setUpdatedAt(Date.now()); }
+      }).catch(error => { if (active) setFeedback(error.message); });
+    }, 60_000);
+    return () => { active = false; window.clearInterval(timer); };
+  }, [verified, busy, view, query, filter, deviceCursor, desktopUpdate?.enabled]);
   async function run(action: () => Promise<void>, critical = false) {
     if (busy) return; setBusy(true); setFeedback(""); setSecret("");
     try { if (critical) await recentLogin(); await action(); } catch (error) { setFeedback(error instanceof Error ? error.message : "Operação não concluída."); } finally { setBusy(false); }
@@ -201,7 +218,7 @@ function Admin() {
     await mutate("/admin/free-accesses", { licenseId, operationId, reason });
     grantAttempts.current.delete(licenseId);
   }
-  function navigate(next: AdminView) { if (busy || next === view && !selected) return; setView(next); setSelected(""); setDetails(null); setCreate(false); updateQuery(""); updateFilter("all"); if (next === "devices") { setDevices([]); setDeviceNextCursor(null); return; } run(() => reload(next)); }
+  function navigate(next: AdminView) { if (busy || next === view && !selected) return; setView(next); setSelected(""); setDetails(null); setCreate(false); updateQuery(""); updateFilter("all"); if (next === "devices") { setDevices([]); setDeviceNextCursor(null); return; } run(() => reload(next, next === "updates")); }
   async function refresh() { setRefreshing(true); try { await reload(view); if (view === "organizations" && selected) setDetails(await api<Details>("/admin/details", { licenseId: selected })); } finally { setRefreshing(false); } }
   async function openOrganization(item: Organization) {
     if (view !== "organizations") { updateQuery(""); updateFilter("all"); }
@@ -239,12 +256,17 @@ function Admin() {
       <main className="admin-main" aria-busy={busy}><div className="page-title"><div>{view === "organizations" && organization && <button className="text-action back-action" disabled={busy} onClick={() => { setSelected(""); setDetails(null); setSecret(""); setPage(1); }}><ArrowLeft size={16} />Empresas</button>}<h1 id="company-heading" tabIndex={-1}>{view === "organizations" && organization ? organization.name : { dashboard: "Visão geral", access: "Solicitações", devices: "Dispositivos", organizations: "Empresas", updates: "Atualizações" }[view]}</h1><p>{view === "organizations" && organization ? organization.email : { dashboard: "Resumo do ambiente Nodus Connect", access: "Pedidos de acessos adicionais e histórico de decisões", devices: "Disponibilidade e permissões dos dispositivos registrados", organizations: "Licenças, dispositivos e assinaturas empresariais", updates: "Distribuição do Nodus Connect" }[view]}</p></div><div className="refresh-tools">{updatedAt > 0 && <small>Última consulta {new Date(updatedAt).toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" })}</small>}<button className="icon-button" title="Atualizar" aria-label="Atualizar" disabled={busy} onClick={() => run(refresh)}><RefreshCw size={17} className={refreshing ? "spinning" : ""} /></button></div></div>
         {feedback && <p className="admin-feedback" role="status">{feedback}</p>}
         {view === "updates" && <section className="data-section"><div className="section-heading"><h2>Atualização na próxima abertura</h2><span className={`status ${desktopUpdate?.enabled ? "status-active" : "status-suspended"}`}><i aria-hidden="true" />{desktopUpdate?.enabled ? "Liberada" : "Pausada"}</span></div>{desktopUpdate ? <>
-          <dl className="company-summary"><div><dt>Destino</dt><dd>Todos os usuários</dd></div><div><dt>Versão liberada</dt><dd>{desktopUpdate.release?.tag_name.replace(/^v/, "") ?? "Nenhuma"}</dd></div><div><dt>Última alteração</dt><dd>{desktopUpdate.updatedAt ? date(desktopUpdate.updatedAt) : "Nenhuma"}</dd></div></dl>
-          <form className="license-form" onSubmit={event => { event.preventDefault(); confirmAction("Liberar atualização", `Instalar a versão ${updateVersion.trim()} na próxima abertura do Nodus de todos os usuários?`, () => mutate("/admin/desktop-update", { enabled: true, version: updateVersion.trim() })); }}>
+          <dl className="company-summary"><div><dt>Destino</dt><dd>{desktopUpdate.targetNodusIds?.length ? `Piloto · ${desktopUpdate.targetNodusIds.length} dispositivos` : "Todos os usuarios"}</dd></div><div><dt>Versão liberada</dt><dd>{desktopUpdate.release?.tag_name.replace(/^v/, "") ?? "Nenhuma"}</dd></div><div><dt>Última alteração</dt><dd>{desktopUpdate.updatedAt ? date(desktopUpdate.updatedAt) : "Nenhuma"}</dd></div></dl>
+          <form className="license-form" onSubmit={event => { event.preventDefault(); if (updatePilot && (!updateTargets.length || !desktopUpdate.pilotSupported)) return; confirmAction("Liberar atualizacao", `Instalar a versao ${updateVersion.trim()} na proxima abertura ${updatePilot ? `dos ${updateTargets.length} dispositivos selecionados` : "de todos os usuarios"}?`, () => mutate("/admin/desktop-update", { enabled: true, version: updateVersion.trim(), targetNodusIds: updatePilot ? updateTargets : [] })); }}>
+            <label>Destino<select aria-label="Destino da atualizacao" disabled={busy} value={updatePilot ? "pilot" : "all"} onChange={event => setUpdatePilot(event.target.value === "pilot")}><option value="all">Todos os usuarios</option><option value="pilot" disabled={!desktopUpdate.pilotSupported}>Grupo piloto</option></select></label>
             <label>Versão publicada<select required value={updateVersion} disabled={busy || !updateVersions.length} onChange={event => setUpdateVersion(event.target.value)}><option value="">{updateVersions.length ? "Selecione uma versão" : "Nenhuma versão disponível"}</option>{updateVersions.map(version => <option key={version} value={version}>{version}</option>)}</select></label>
-            <button type="submit" disabled={busy || !updateVersions.includes(updateVersion)}><Download size={16} />Liberar para todos</button>
+            <button type="submit" disabled={busy || !updateVersions.includes(updateVersion) || updatePilot && (!updateTargets.length || !desktopUpdate.pilotSupported)}><Download size={16} />{updatePilot ? "Liberar para o piloto" : "Liberar para todos"}</button>
             <button type="button" className="danger" disabled={busy || !desktopUpdate.enabled} onClick={() => confirmAction("Pausar atualização", "Suspender novas instalações automáticas desta versão?", () => mutate("/admin/desktop-update", { enabled: false }))}><Ban size={16} />Pausar distribuição</button>
           </form>
+          {updatePilot && <p className="muted">{updateTargets.length} selecionados · Piloto disponivel em clientes 1.1.28 ou superior.</p>}
+          <ListTools query={query} filter={filter} options={[["online", "Online"], ["offline", "Offline"]]} onQuery={updateQuery} onFilter={updateFilter} />
+          <UpdateInventory devices={filteredDevices} version={desktopUpdate.release?.tag_name.replace(/^v/, "") ?? ""} pilot={updatePilot} selected={updateTargets} disabled={busy || devicesLoading} onSelect={setUpdateTargets} />
+          <Pagination total={devices.length} page={page} onPage={devicePage} hasNext={Boolean(deviceNextCursor)} busy={busy || devicesLoading} />
         </> : <p className="empty-state">{busy ? "Carregando atualização..." : "Atualização indisponível. Tente atualizar a consulta."}</p>}</section>}
         {view === "dashboard" && dashboard && <>
           <dl className="summary-grid">{[{ label: "Empresas", value: dashboard.organizations, icon: Building2 }, { label: "Licenças ativas", value: dashboard.active, icon: Users }, { label: "Dispositivos", value: dashboard.devices, icon: Laptop }, { label: "Receita mensal", value: money(dashboard.mrrCents), icon: DollarSign }].map(({ label, value, icon: Icon }) => <div key={label}><dt>{label}</dt><dd><span className={`summary-icon${label === "Receita mensal" ? " revenue" : ""}`}><Icon size={30} /></span>{value}</dd></div>)}</dl>

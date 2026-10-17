@@ -2,6 +2,36 @@ export type PipelineBottleneck = "CAPTURE" | "ENCODER" | "NETWORK" | "DECODER" |
 export type EncoderKind = "hardware" | "software" | "unknown";
 export type EncoderVendor = "intel" | "nvidia" | "amd" | "media-foundation" | "apple" | "unknown";
 
+export class LatencyWindow {
+  private values: { at: number; value: number }[] = [];
+  constructor(private readonly durationMs = 60_000, private readonly capacity = 120) {}
+  add(now: number, value: number | null | undefined) {
+    this.values = this.values.filter(item => item.at <= now && now - item.at < this.durationMs);
+    if (typeof value === "number" && Number.isFinite(value) && value >= 0) this.values.push({ at: now, value });
+    if (this.values.length > this.capacity) this.values.splice(0, this.values.length - this.capacity);
+    const sorted = this.values.map(item => item.value).sort((a, b) => a - b);
+    const percentile = (point: number) => sorted[Math.max(0, Math.ceil(sorted.length * point) - 1)] ?? null;
+    return { samples: sorted.length, p50: percentile(0.5), p95: percentile(0.95), max: sorted.at(-1) ?? null };
+  }
+}
+
+export class VideoProgressWatchdog {
+  private previous?: { bytes: number; frames: number; at: number };
+  private stalledAt?: number;
+  inspect(now: number, bytes: number, frames: number, connected: boolean) {
+    const previous = this.previous;
+    this.previous = { at: now, bytes, frames };
+    if (!connected || !previous || now < previous.at || frames !== previous.frames || bytes < previous.bytes) {
+      this.stalledAt = undefined;
+      return false;
+    }
+    // A static desktop without incoming video is not evidence of a frozen decoder.
+    if (bytes > previous.bytes) this.stalledAt ??= previous.at;
+    else this.stalledAt = undefined;
+    return this.stalledAt !== undefined && now - this.stalledAt >= 8_000;
+  }
+}
+
 export function receiverPacketLoss(feedback: { receivedAt: number; packetLossPct?: number; packetLossPctValid?: boolean } | undefined, now: number): number | null {
   if (!feedback || !Number.isFinite(feedback.receivedAt) || now < feedback.receivedAt || now - feedback.receivedAt >= 3000
     || feedback.packetLossPctValid === false || typeof feedback.packetLossPct !== "number"

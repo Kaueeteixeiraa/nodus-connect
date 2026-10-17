@@ -17,6 +17,7 @@ const { RemoteCursorVisibility } = require("./remote-cursor-visibility.cjs");
 const { RemoteWindowsKeys } = require("./remote-windows-keys.cjs");
 const supportPackages = require("./quick-support.cjs");
 const desktopUpdates = require("./desktop-update.cjs");
+const { supportReport, readPerformanceTail } = require("./support-report.cjs");
 const supportTrustPath = app.isPackaged ? path.join(process.resourcesPath, "quick-support-trust.json") : path.join(__dirname, "../../../build/quick-support-trust.json");
 let supportKey = "";
 try { supportKey = JSON.parse(fs.readFileSync(supportTrustPath, "utf8")).publicKey; } catch {}
@@ -649,6 +650,16 @@ function setupIpc() {
   });
   ipcMain.handle("nodus:wake-on-lan", (_event, macAddress) => wakeOnLan(macAddress));
   ipcMain.handle("nodus:open-diagnostics", () => shell.showItemInFolder(path.join(app.getPath("userData"), "logs", "desktop.log")));
+  ipcMain.handle("nodus:export-diagnostics", async (event, snapshot) => {
+    if (!isMainAppSender(event)) throw new Error("UNAUTHORIZED");
+    const report = supportReport({ version: app.getVersion(), platform: process.platform, arch: process.arch,
+      mode: portableSupport ? "quicksupport" : "desktop", usage: snapshot?.usage, sessions: snapshot?.sessions,
+      processes: app.getAppMetrics(), samples: await readPerformanceTail(path.join(app.getPath("userData"), "logs", "performance.log")) });
+    const result = await dialog.showSaveDialog(BrowserWindow.fromWebContents(event.sender), { defaultPath: `Nodus-Suporte-${app.getVersion()}.json`, filters: [{ name: "JSON", extensions: ["json"] }] });
+    if (result.canceled || !result.filePath) return { canceled: true };
+    await fs.promises.writeFile(result.filePath, JSON.stringify(report, null, 2), { encoding: "utf8", mode: 0o600 });
+    return { canceled: false };
+  });
   ipcMain.handle("nodus:write-diagnostic", (_event, message) => appendLog(String(message || "").slice(0, 2000)));
   ipcMain.handle("nodus:write-performance", (_event, message) => appendLog(String(message || "").slice(0, 16_000), "performance.log"));
   ipcMain.handle("nodus:get-gpu-diagnostics", () => getGpuDiagnostics());
@@ -697,7 +708,9 @@ function updateRelease(release, currentVersion) {
 }
 
 async function releasedStartupUpdate() {
-  const response = await fetch("https://nodus-connect-license.vercel.app/license/desktop-update", { cache: "no-store", signal: AbortSignal.timeout(8000) });
+  const url = new URL("https://nodus-connect-license.vercel.app/license/desktop-update");
+  url.searchParams.set("nodusId", String(identityStore().loadOrCreate().nodusId).replace(/\D/g, ""));
+  const response = await fetch(url, { cache: "no-store", signal: AbortSignal.timeout(8000) });
   if (!response.ok) throw new Error("UPDATE_CHECK_FAILED");
   const body = await response.text();
   if (body.length > 10_000) throw new Error("INVALID_UPDATE_POLICY");
@@ -720,7 +733,7 @@ async function checkAndInstallUpdate(sender, automatic = false) {
       if (!response.ok) throw new Error("UPDATE_CHECK_FAILED");
       update = updateRelease(await response.json(), app.getVersion());
     }
-    if (!update.available) return { ok: true, version: app.getVersion(), available: false };
+    if (!update.available) { progress("current"); return { ok: true, version: app.getVersion(), available: false }; }
     if (activeSessionCount) return { ok: false, error: "Encerre as sessões remotas antes de atualizar." };
     const installDir = path.dirname(process.execPath);
     if (path.basename(installDir).toLowerCase() !== "nodus connect") throw new Error("INVALID_INSTALL_TARGET");
@@ -730,7 +743,7 @@ async function checkAndInstallUpdate(sender, automatic = false) {
     if (automatic) {
       let attempt;
       try { attempt = JSON.parse(fs.readFileSync(attemptFile, "utf8")); } catch {}
-      if (attempt?.sha256 === update.sha256 && Number.isSafeInteger(attempt.at) && Date.now() - attempt.at < 3_600_000) return { ok: true, available: true, deferred: true };
+      if (attempt?.sha256 === update.sha256 && Number.isSafeInteger(attempt.at) && Date.now() - attempt.at < 3_600_000) { progress("deferred"); return { ok: true, available: true, deferred: true }; }
     }
     const setup = path.join(cache, `${update.sha256}.exe`);
     if (!fs.existsSync(setup) || await hashFile(setup) !== update.sha256) {
@@ -740,7 +753,7 @@ async function checkAndInstallUpdate(sender, automatic = false) {
     if (activeSessionCount) return { ok: false, error: "Encerre as sessões remotas antes de atualizar." };
     if (automatic) {
       const approved = await releasedStartupUpdate();
-      if (!approved.available || approved.sha256 !== update.sha256) return { ok: true, available: false };
+      if (!approved.available || approved.sha256 !== update.sha256) { progress("deferred"); return { ok: true, available: false }; }
     }
     if (activeSessionCount || isQuitting || sender.isDestroyed()) return { ok: false, error: "Atualização adiada para a próxima abertura." };
     const optionsFile = path.join(cache, `${crypto.randomUUID()}.json`);
@@ -755,6 +768,7 @@ async function checkAndInstallUpdate(sender, automatic = false) {
     return { ok: true, version: update.version, available: true, installing: true };
   } catch (error) {
     appendLog(`update-failed reason=${String(error?.message || "UNKNOWN").slice(0, 200)}`);
+    progress("failed");
     return { ok: false, error: "Não foi possível atualizar. Tente novamente." };
   } finally { if (!installing) updateInProgress = false; }
 }

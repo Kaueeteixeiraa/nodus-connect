@@ -98,11 +98,12 @@ import {
   signInFirebaseWithGoogle,
   signOutFirebaseAccount,
   syncCloudUser,
-  subscribeCloudDevicePresence,
+  subscribeCloudVisiblePresence,
   subscribeCloudAccessBlock,
   subscribeCloudSignals,
   subscribeCloudRequest,
   getCloudUsageDiagnostics,
+  setCloudRuntimeStatus,
   PENDING_REQUEST_TTL_MS,
 } from "./core/firebase";
 import { connectRealtime } from "./core/realtime";
@@ -144,7 +145,9 @@ import { checkLicense, licenseConfigured, licenseEstablished, licenseEnded, lice
 import { LicenseError } from "../../../packages/licensing/src/index";
 import nodusIcon from "./assets/nodus-logo-icon.png";
 import { advanceStage, assessQuality, DESKTOP_VIDEO_POLICY, nativeVideoBitrate, nextBitrate, STAGE_LIMITS, type AdaptiveStage, type AdaptiveState, type QualitySample } from "./core/adaptive-quality";
-import { classifyDecoderImplementation, contentMotion, counterDelta, cumulativeMeanMs, diagnosePipeline, encoderFallbackReason, InputLatencyDiagnostic, receiverPacketLoss, rtpJitterMs, smoothPipelineSample, videoFrameTiming, type InputDiagnosticAck, type EncoderKind, type EncoderVendor, type PipelineBottleneck, type PipelineSample } from "./core/performance-monitor";
+import { classifyDecoderImplementation, contentMotion, counterDelta, cumulativeMeanMs, diagnosePipeline, encoderFallbackReason, InputLatencyDiagnostic, LatencyWindow, VideoProgressWatchdog, receiverPacketLoss, rtpJitterMs, smoothPipelineSample, videoFrameTiming, type InputDiagnosticAck, type EncoderKind, type EncoderVendor, type PipelineBottleneck, type PipelineSample } from "./core/performance-monitor";
+import { RemoteInputState } from "./core/remote-input-state";
+import { SupportReportButton } from "./SupportReportButton";
 
 const LicensePanel = lazy(() => import("./LicensePanel"));
 const QuickSupportView = lazy(() => import("./QuickSupport").then(module => ({ default: module.QuickSupportView })));
@@ -381,11 +384,11 @@ export function App({ initialIdentity, supportProfile = null }: { initialIdentit
   const [standby, setStandby] = useState(false);
   const recentPresenceIds = useMemo(() => {
     if (!currentUser || supportProfile) return "";
-    const views = [activeView, ...workspaceWindows.map(item => item.view)];
+    const views = [...(selectedSessionId ? [] : [activeView]), ...workspaceWindows.map(item => item.view)];
     const visible = views.includes("devices") ? recents.filter(item => !hiddenCatalogDevices.includes(item.nodusId))
       : [...(views.includes("connection") ? recents.slice(0, 3) : []), ...(views.includes("favorites") ? recents.filter(item => favorites.includes(item.nodusId)) : [])];
     return [...new Set(visible.map(item => item.nodusId))].sort().join(",");
-  }, [recents, favorites, activeView, workspaceWindows, hiddenCatalogDevices, currentUser, supportProfile]);
+  }, [recents, favorites, activeView, selectedSessionId, workspaceWindows, hiddenCatalogDevices, currentUser, supportProfile]);
   const peersRef = useRef(new Map<string, RTCPeerConnection>());
   const connectionTimingsRef = useRef(new Map<string, { start: number; phases: Set<string> }>());
   const nativeVideoPeersRef = useRef(new Map<string, RTCPeerConnection>());
@@ -471,6 +474,7 @@ export function App({ initialIdentity, supportProfile = null }: { initialIdentit
   const smoothedPipelineRef = useRef(new Map<string, PipelineSample>());
   const lastMetricsUiAtRef = useRef(new Map<string, number>());
   const performanceEventStateRef = useRef(new Map<string, { bottleneck: PipelineBottleneck; quality: SessionMetrics["quality"]; route: SessionMetrics["route"]; encoder: string }>());
+  const hostHeldInputRef = useRef(new RemoteInputState());
   const requestedResolutionsRef = useRef(new Map<string, RemoteResolution>());
   const requestedQualitiesRef = useRef(new Map<string, LocalSettings["connectionQuality"]>());
   const requestedFpsRef = useRef(new Map<string, RemoteFrameRate>());
@@ -645,6 +649,7 @@ export function App({ initialIdentity, supportProfile = null }: { initialIdentit
   useEffect(() => {
     window.nodusDesktop?.getAppInfo().then((info) => {
       setAppVersion(info.version);
+      setCloudRuntimeStatus({ appVersion: info.version, updateState: "idle" });
       setNativeGoogleClient(Boolean(info.googleClientConfigured));
     }).catch(() => undefined);
     let frame = window.requestAnimationFrame(() => {
@@ -668,6 +673,9 @@ export function App({ initialIdentity, supportProfile = null }: { initialIdentit
   useEffect(() => {
     configureApiBase(settings.coordinationUrl);
   }, [settings.coordinationUrl]);
+
+  useEffect(() => window.nodusDesktop?.onUpdateProgress?.(({ phase }) => setCloudRuntimeStatus({ updateState: phase })), []);
+  useEffect(() => { setCloudRuntimeStatus({ activeSessions: sessionRuntimes.length }); }, [sessionRuntimes.length]);
 
   useEffect(() => {
     const onResult = (event: Event) => applyGoogleLoginResult((event as CustomEvent).detail);
@@ -773,8 +781,8 @@ export function App({ initialIdentity, supportProfile = null }: { initialIdentit
 
     const applyPresence = (nodusId: string, device: Awaited<ReturnType<typeof lookupDevice>>) => setRecents(updateDevicePresence(nodusId, device));
     if (firebaseConfigured()) {
-      const subscriptions = nodusIds.map((nodusId) => subscribeCloudDevicePresence(nodusId, (device) => applyPresence(nodusId, device)));
-      return () => subscriptions.forEach((subscription) => subscription.close());
+      const watch = subscribeCloudVisiblePresence(nodusIds, applyPresence, [document, ...workspaceWindows.map(item => item.window.document)]);
+      return () => watch.close();
     }
 
     let disposed = false;
@@ -788,7 +796,7 @@ export function App({ initialIdentity, supportProfile = null }: { initialIdentit
       disposed = true;
       window.clearInterval(timer);
     };
-  }, [recentPresenceIds, settings.coordinationUrl]);
+  }, [recentPresenceIds, settings.coordinationUrl, workspaceWindows]);
 
   useEffect(() => {
     if (!identity.deviceNameConfirmed) return;
@@ -809,6 +817,19 @@ export function App({ initialIdentity, supportProfile = null }: { initialIdentit
     });
     return () => realtime.close();
   }, [identity.deviceNameConfirmed, identity.nodusId, settings.coordinationUrl]);
+
+  useEffect(() => {
+    const recover = () => {
+      for (const runtime of sessionsRef.current) {
+        const session = runtime.session, peer = peersRef.current.get(session.sessionId);
+        if (session.role === "viewer" && peer && ["disconnected", "failed"].includes(peer.iceConnectionState)) {
+          scheduleIceRestart(session.sessionId, peer, identity.nodusId, session.remoteNodusId, 1000, peer.iceConnectionState as "failed" | "disconnected");
+        }
+      }
+    };
+    window.addEventListener("online", recover);
+    return () => window.removeEventListener("online", recover);
+  }, [identity.nodusId]);
 
   useEffect(() => {
     if (!identity.deviceNameConfirmed) return;
@@ -884,9 +905,9 @@ export function App({ initialIdentity, supportProfile = null }: { initialIdentit
     let previous = getCloudUsageDiagnostics();
     const timer = window.setInterval(() => {
       const current = getCloudUsageDiagnostics();
-      const delta = Object.fromEntries(Object.entries(current).filter(([key, value]) => key !== "measuredAt" && typeof value === "number")
+      const delta = Object.fromEntries(Object.entries(current).filter(([key, value]) => key !== "measuredAt" && key !== "activeListeners" && typeof value === "number")
         .map(([key, value]) => [key, Number(value) - Number(previous[key as keyof typeof previous])]));
-      logDiagnostic(`cloud-usage ${JSON.stringify({ intervalMs: current.measuredAt - previous.measuredAt, ...delta, approximate: true, includesSecurityRuleReads: false, includesLicenseServerOperations: false })}`);
+      logDiagnostic(`cloud-usage ${JSON.stringify({ intervalMs: current.measuredAt - previous.measuredAt, ...delta, activeListeners: current.activeListeners, activeSessions: sessionsRef.current.length, approximate: true, includesSecurityRuleReads: false, includesLicenseServerOperations: false })}`);
       previous = current;
     }, 60_000);
     return () => window.clearInterval(timer);
@@ -1619,6 +1640,7 @@ export function App({ initialIdentity, supportProfile = null }: { initialIdentit
       logDiagnostic(`ice-state id=${sessionId} role=${role} state=${peer.iceConnectionState}`);
       logIceEvent(sessionId, role, "ice-connection-state", { state: peer.iceConnectionState });
       if (peer.iceConnectionState === "failed" || peer.iceConnectionState === "disconnected") {
+        if (role === "host") releaseHostInput(sessionId);
         updateRuntime(sessionId, { error: "Reconectando..." });
         if (role === "viewer") scheduleIceRestart(sessionId, peer, from, to, peer.iceConnectionState === "failed" ? 0 : 5000, peer.iceConnectionState);
       }
@@ -1636,7 +1658,8 @@ export function App({ initialIdentity, supportProfile = null }: { initialIdentit
   }
 
   function scheduleIceRestart(sessionId: string, peer: RTCPeerConnection, from: string, to: string, delayMs: number, reason: "failed" | "disconnected") {
-    if (reconnectTimersRef.current.has(sessionId)) return;
+    const canRestart = () => peersRef.current.get(sessionId) === peer && peer.connectionState !== "closed" && ["failed", "disconnected"].includes(peer.iceConnectionState);
+    if (!canRestart() || reconnectTimersRef.current.has(sessionId)) return;
     const attempt = (reconnectAttemptsRef.current.get(sessionId) ?? 0) + 1;
     if (attempt > 5) {
       logDiagnostic(`ice-restart-failed id=${sessionId} attempts=5`);
@@ -1646,17 +1669,20 @@ export function App({ initialIdentity, supportProfile = null }: { initialIdentit
     reconnectAttemptsRef.current.set(sessionId, attempt);
     const timer = window.setTimeout(async () => {
       reconnectTimersRef.current.delete(sessionId);
-      if (peer.connectionState === "closed" || peer.iceConnectionState === "connected" || peer.iceConnectionState === "completed") return;
+      if (!canRestart()) return;
       try {
         if (peer.signalingState !== "stable") throw new Error("Aguardando resposta");
         const freshIceServers = await fetchIceServers(settings.coordinationUrl);
+        if (!canRestart()) return;
         if (freshIceServers.length) {
           const configuration = peer.getConfiguration();
           configuration.iceServers = withConfiguredStun(freshIceServers, parseIceServers(settings.iceServersJson));
           peer.setConfiguration(configuration);
           setServerIceServers(configuration.iceServers);
         }
-        await peer.setLocalDescription(await peer.createOffer({ iceRestart: true }));
+        const offer = await peer.createOffer({ iceRestart: true });
+        if (!canRestart() || peer.signalingState !== "stable") return;
+        await peer.setLocalDescription(offer);
         const history = iceRestartHistoryRef.current.get(sessionId);
         iceRestartHistoryRef.current.set(sessionId, { count: (history?.count ?? 0) + 1, at: performance.now(), reason });
         logIceEvent(sessionId, "viewer", "ice-restart", { attempt, reason, count: (history?.count ?? 0) + 1 });
@@ -1664,7 +1690,7 @@ export function App({ initialIdentity, supportProfile = null }: { initialIdentit
       } catch {
         updateRuntime(sessionId, { error: `Reconectando... tentativa ${attempt} de 5` });
       } finally {
-        if (!["connected", "closed"].includes(peer.connectionState)) {
+        if (canRestart()) {
           scheduleIceRestart(sessionId, peer, from, to, Math.min(10_000, 1200 * 2 ** attempt), reason);
         }
       }
@@ -1677,6 +1703,9 @@ export function App({ initialIdentity, supportProfile = null }: { initialIdentit
     if (current) window.clearInterval(current);
     let inspecting = false;
     let lastDetailedLogAt = -Infinity;
+    const latencyWindows = { rttMs: new LatencyWindow(), encodeMs: new LatencyWindow(), decodeMs: new LatencyWindow(), queueMs: new LatencyWindow(), frameAgeMs: new LatencyWindow() };
+    const watchdog = new VideoProgressWatchdog();
+    let stalled = false;
     const inspect = async () => {
       if (peer.connectionState === "closed" || inspecting) return;
       inspecting = true;
@@ -1852,6 +1881,18 @@ export function App({ initialIdentity, supportProfile = null }: { initialIdentit
         const targetFps = native ? appliedVideoRef.current.get(sessionId)?.fps ?? 60 : requestedFpsRef.current.get(sessionId) ?? settings.maxFps;
         const senderFeedback = senderFeedbackRef.current.get(sessionId);
         const render = renderStatsRef.current.get(sessionId);
+        const latencyWindow = {
+          rttMs: latencyWindows.rttMs.add(now, latencyMs > 0 ? latencyMs : null),
+          encodeMs: latencyWindows.encodeMs.add(now, role === "host" && encodedFps > 0 ? encodeMs : null),
+          decodeMs: latencyWindows.decodeMs.add(now, role === "viewer" && decodedFps > 0 ? decodeMs : null),
+          queueMs: latencyWindows.queueMs.add(now, measuredJitterBufferMs),
+          frameAgeMs: latencyWindows.frameAgeMs.add(now, render && now - render.at < 2000 ? render.timing?.frameAgeMs : null),
+        };
+        if (role === "viewer") {
+          const nextStalled = watchdog.inspect(now, bytes, decoded, peer.connectionState === "connected");
+          if (nextStalled !== stalled) logDiagnostic(`video-progress id=${sessionId} stalled=${nextStalled}`);
+          stalled = nextStalled;
+        }
         const renderFps = role === "host" ? receiverFeedback?.renderFps ?? 0 : render?.fps ?? 0;
         const motion = contentMotion(role === "host" ? captureFps : senderFeedback?.captureFps || receivedFps, targetFps);
         const activePicture = motion !== "LOW" && bitrateKbps >= 200 || limitation === "cpu";
@@ -1944,7 +1985,7 @@ export function App({ initialIdentity, supportProfile = null }: { initialIdentit
         const cursorCapture = role === "host" ? captureCursorInfo(videoSender?.track) : null;
         const viewerSurface = role === "viewer" ? remoteVideoRef.current?.parentElement : null;
         const iceRestart = iceRestartHistoryRef.current.get(sessionId);
-        window.nodusDesktop?.writePerformance?.(JSON.stringify({ at: new Date().toISOString(), sessionId, role, ...metrics,
+        window.nodusDesktop?.writePerformance?.(JSON.stringify({ at: new Date().toISOString(), sessionId, role, ...metrics, latencyWindow, videoProgressStalled: stalled,
           targetFps, activePicture, transport, lightweightMode: settings.lightweightMode, diagnosticLabel: diagnostic?.label ?? null,
           packetLossPctValid: measuredLossPct !== null,
           packetLossSource: measuredLossPct === null ? "unavailable" : role === "host" ? "receiver-feedback" : "inbound-rtp",
@@ -2163,7 +2204,7 @@ export function App({ initialIdentity, supportProfile = null }: { initialIdentit
       if (inputDiagnosticEnabledRef.current) channel.send(JSON.stringify({ type: "input-diagnostic-capability" } satisfies RemoteInputMessage));
       if (captureSources.length) channel.send(JSON.stringify({ type: "screen-options", displays: captureSources } satisfies RemoteInputMessage));
     };
-    channel.onclose = () => { if (!auxiliary) updateRuntime(sessionId, { controlReady: false }); };
+    channel.onclose = () => { if (!auxiliary) { releaseHostInput(sessionId); updateRuntime(sessionId, { controlReady: false }); } };
     channel.onmessage = (event) => {
       try {
         if (typeof event.data !== "string" || event.data.length > 1_000_000) return;
@@ -2236,6 +2277,7 @@ export function App({ initialIdentity, supportProfile = null }: { initialIdentit
           if (settings.allowRemoteControl && allowed) {
             if (message.type === "mouseMove" && !acceptPointerSequence(sessionId, message.sequence)) return;
             if (message.type === "mouseDown" || message.type === "mouseUp") acceptPointerSequence(sessionId, message.sequence, false);
+            hostHeldInputRef.current.record(sessionId, message);
             window.nodusDesktop?.applyRemoteInput(message);
           }
         }
@@ -2879,6 +2921,7 @@ export function App({ initialIdentity, supportProfile = null }: { initialIdentit
   }
 
   function cleanupSession(sessionId: string, stopShare: boolean) {
+    releaseHostInput(sessionId);
     if (stopShare) licenseEnded(sessionId);
     syncHostCursorVisibility(sessionId);
     window.nodusDesktop?.setHostInputLock({ sessionId, mouse: false, keyboard: false }).catch(() => undefined);
@@ -3062,6 +3105,15 @@ export function App({ initialIdentity, supportProfile = null }: { initialIdentit
     if (("connectionQuality" in patch || "maxFps" in patch) && activeSession?.role === "viewer") {
       sendRemoteInputToSession(activeSession.sessionId, { type: "quality", quality: next.connectionQuality, maxFps: next.maxFps });
     }
+  }
+
+  function releaseHostInput(sessionId: string) {
+    for (const input of hostHeldInputRef.current.release(sessionId)) window.nodusDesktop?.applyRemoteInput(input);
+  }
+
+  async function exportSupportReport() {
+    if (!window.nodusDesktop?.exportDiagnostics) throw new Error("Disponivel no aplicativo instalado.");
+    return window.nodusDesktop.exportDiagnostics({ usage: getCloudUsageDiagnostics(), sessions: sessionsRef.current.map(item => ({ role: item.session.role, ...item.metrics })) });
   }
 
   function exportLocalSettings(): string {
@@ -3685,6 +3737,7 @@ export function App({ initialIdentity, supportProfile = null }: { initialIdentit
   }
 
   if (supportProfile) return <Suspense fallback={null}><QuickSupportView profile={supportProfile} nodusId={identity.nodusId} deviceName={identity.deviceName} onRename={updateDeviceName} ready={serviceState === "online" && signalingState === "online"}
+    onExportDiagnostics={exportSupportReport}
     sessions={sessionRuntimes.map(item => ({ id: item.session.sessionId, name: item.session.remoteName, status: item.session.status, error: item.error, connected: peersRef.current.get(item.session.sessionId)?.connectionState === "connected" }))} error={feedback || (signalingState === "offline" ? "Nao foi possivel receber pedidos de suporte. Verifique a conexao e abra o cliente novamente." : "")}
     onEnd={id => endSession(id, true)} onQuit={async () => { await Promise.all(sessionsRef.current.map(item => endSession(item.session.sessionId, true))); await unregisterPresence(identity).catch(() => undefined); await window.nodusDesktop?.quit(); }}>
     {supportProfile.confirmation && incomingRequests[0] && <IncomingRequest request={{ ...incomingRequests[0], requestedPermissions: supportProfile.permissions.filter(p => incomingRequests[0].requestedPermissions?.includes(p)) }} onAccept={acceptIncoming} onDeny={denyIncoming} />}
@@ -3866,6 +3919,7 @@ export function App({ initialIdentity, supportProfile = null }: { initialIdentit
               initialSection={settingsSection}
               onThemePreview={setThemePreview}
               onExportSettings={exportLocalSettings}
+              onExportDiagnostics={exportSupportReport}
               onImportSettings={importLocalSettings}
               onUpdateLocalUserName={(name) => {
                 if (!currentUser || currentUser.provider === "google") return;
@@ -5270,6 +5324,7 @@ function Settings({
   initialSection,
   onThemePreview,
   onExportSettings,
+  onExportDiagnostics,
   onImportSettings,
   onUpdateLocalUserName,
   settings,
@@ -5282,6 +5337,7 @@ function Settings({
   initialSection: SettingsSection;
   onThemePreview: (theme: LocalSettings["theme"] | null) => void;
   onExportSettings: () => string;
+  onExportDiagnostics: () => Promise<{ canceled: boolean }>;
   onImportSettings: (file: File) => Promise<string>;
   onUpdateLocalUserName: (name: string) => void;
   settings: LocalSettings;
@@ -5295,7 +5351,7 @@ function Settings({
   const [checkingUpdates, setCheckingUpdates] = useState(false);
   const [backupStatus, setBackupStatus] = useState("");
   useEffect(() => window.nodusDesktop?.onUpdateProgress?.(({ phase, percent }) => {
-    setUpdateStatus(phase === "downloading" ? `Baixando atualização: ${percent}%` : phase === "installing" ? "Instalando atualização..." : "Buscando atualizações...");
+    setUpdateStatus(({ downloading: `Baixando atualizacao: ${percent}%`, installing: "Instalando atualizacao...", checking: "Buscando atualizacoes...", current: "Verificacao concluida.", deferred: "Atualizacao adiada.", failed: "Falha ao atualizar." })[phase]);
   }), []);
   async function checkForUpdates() {
     if (checkingUpdates) return;
@@ -5386,6 +5442,9 @@ function Settings({
                 <button aria-busy={checkingUpdates} className="update-check" disabled={checkingUpdates} onClick={checkForUpdates} type="button"><RefreshCw aria-hidden="true" className={checkingUpdates ? "is-checking" : undefined} size={15} /> <span>Buscar atualizações</span></button>
                 <span aria-live="polite" className="update-status" role="status">{updateStatus}</span>
               </div>
+            </SettingsGroup>
+            <SettingsGroup icon={Activity} title="Diagnostico" description="">
+              <SupportReportButton onExport={onExportDiagnostics} />
             </SettingsGroup>
           </div>
         </>}

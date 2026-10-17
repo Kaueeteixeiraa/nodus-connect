@@ -2,9 +2,10 @@ import { copyFileSync, cpSync, existsSync, mkdirSync, readFileSync, readdirSync,
 import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
-import { join, resolve } from "node:path";
+import { basename, join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { finished } from "node:stream/promises";
+import { prepareSolidPayload } from "./solid-payload.mjs";
 
 const root = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const cache = join(process.env.LOCALAPPDATA || "", "electron-builder", "Cache");
@@ -12,8 +13,10 @@ const script = join(root, "scripts", "custom-installer.nsi");
 const makensis = find(cache, "makensis.exe");
 const version = JSON.parse(readFileSync(join(root, "package.json"), "utf8")).version;
 const productVersion = `${version.split("-")[0]}.0`;
-const setup = join(root, "outputs", "installer", "Nodus-Connect-Setup.exe");
+const compact = process.argv.includes("--compact"), suffix = compact && !process.argv.includes("--canonical") ? "-Compact" : "";
+const setup = join(root, "outputs", "installer", `Nodus-Connect-Setup${suffix}.exe`);
 const require = createRequire(import.meta.url);
+const { payloadManifest, signArtifact, artifactSignature } = require("./release-integrity.cjs");
 const builderRequire = createRequire(require.resolve("electron-builder"));
 const asar = createRequire(builderRequire.resolve("app-builder-lib"))("@electron/asar");
 const archive = join(root, "outputs", "installer", "win-unpacked", "resources", "app.asar");
@@ -22,7 +25,7 @@ if (packaged.version !== version) throw new Error("Versao empacotada desatualiza
 const hash = (data) => createHash("sha256").update(data).digest("hex");
 const mainPath = join("apps", "desktop", "electron", "main.cjs");
 if (hash(asar.extractFile(archive, mainPath)) !== hash(readFileSync(join(root, mainPath)))) throw new Error("Electron empacotado desatualizado.");
-for (const name of ["preload.cjs", "quick-support.cjs", "desktop-update.cjs"]) {
+for (const name of ["preload.cjs", "quick-support.cjs", "desktop-update.cjs", "support-report.cjs"]) {
   const relative = join("apps", "desktop", "electron", name);
   if (hash(asar.extractFile(archive, relative)) !== hash(readFileSync(join(root, relative)))) throw new Error(`Modulo Electron desatualizado: ${name}`);
 }
@@ -44,7 +47,7 @@ const supportResources = join(root, "outputs", "quick-support", "win-unpacked", 
 const supportArchive = join(supportResources, "app.asar");
 if (!existsSync(supportExe) || !existsSync(supportArchive)) throw new Error("QuickSupport desta versao ausente. Use pnpm installer:build para gerar os dois pacotes juntos.");
 if (JSON.parse(asar.extractFile(supportArchive, "package.json").toString()).version !== version) throw new Error("Versao QuickSupport desatualizada.");
-for (const name of ["main.cjs", "preload.cjs", "quick-support.cjs", "desktop-update.cjs"]) {
+for (const name of ["main.cjs", "preload.cjs", "quick-support.cjs", "desktop-update.cjs", "support-report.cjs"]) {
   const relative = join("apps", "desktop", "electron", name);
   if (hash(asar.extractFile(supportArchive, relative)) !== hash(asar.extractFile(archive, relative))) throw new Error(`QuickSupport desatualizado: ${name}`);
 }
@@ -52,6 +55,7 @@ for (const [name, expected] of Object.entries(nativeHashes)) {
   if (hash(readFileSync(join(supportResources, "native", name))) !== expected) throw new Error(`Binario QuickSupport desatualizado: ${name}`);
 }
 if (hash(readFileSync(join(supportResources, trustName))) !== hash(readFileSync(join(root, "build", trustName)))) throw new Error("Chave publica QuickSupport desatualizada.");
+if (!process.argv.includes("--check")) signArtifact(supportExe);
 const quickSupport = { fileName: supportName, sha256: hash(readFileSync(supportExe)) };
 writeFileSync(`${supportExe}.sha256`, `${quickSupport.sha256}  ${supportName}\n`);
 if (process.argv.includes("--check")) {
@@ -70,7 +74,7 @@ mkdirSync(join(bootstrapSource, "build"), { recursive: true });
 for (const name of ["icon.ico", "icon.svg"]) copyFileSync(join(root, "build", name), join(bootstrapSource, "build", name));
 const payloadRoot = join(root, "outputs", "installer", "win-unpacked");
 const payloadFiles = inventory(payloadRoot);
-writeFileSync(join(bootstrapSource, "payload-metadata.json"), JSON.stringify({ version, bytes: payloadFiles.reduce((total, item) => total + item.bytes, 0), fileCount: payloadFiles.length, appAsarSha256: hash(readFileSync(archive)) }));
+writeFileSync(join(bootstrapSource, "payload-metadata.json"), JSON.stringify({ version, bytes: payloadFiles.reduce((total, item) => total + item.bytes, 0), fileCount: payloadFiles.length, files: payloadManifest(payloadRoot), appAsarSha256: hash(readFileSync(archive)) }));
 writeFileSync(join(bootstrapSource, "package.json"), JSON.stringify({ name: "nodus-connect-setup", version, main: "apps/installer/main.cjs" }));
 const bootstrapArchive = join(bootstrap, "app.asar");
 const bootstrapCandidate = `${bootstrapArchive}.next`;
@@ -83,15 +87,21 @@ else {
   renameSync(bootstrapCandidate, bootstrapArchive);
 }
 rmSync(setup, { force: true });
-const result = spawnSync(makensis, [`/DPRODUCT_VERSION=${productVersion}`, script], { cwd: root, stdio: "inherit" });
+const solidPayload = compact ? await prepareSolidPayload(payloadRoot, bootstrapArchive, bootstrap) : "";
+const plugin = compact ? find(join(cache, "nsis-resources-3.4.1"), "nsis7z.dll", "x86-unicode") : "";
+const compressionLicense = compact ? find(join(cache, "7zip@1.0.0"), "LICENSE.txt") : "";
+if (compact && (!plugin || !compressionLicense || statSync(solidPayload).size > 125_000_000)) throw new Error("COMPACT_PAYLOAD_INVALID");
+const result = spawnSync(makensis, [`/DPRODUCT_VERSION=${productVersion}`, `/DSETUP_OUTPUT=${setup}`, ...(compact ? ["/DCOMPACT_INSTALLER", `/DSOLID_PAYLOAD=${solidPayload}`, `/DSEVEN_ZIP_PLUGIN=${resolve(plugin, "..")}`, `/DCOMPRESSION_LICENSE=${compressionLicense}`] : []), script], { cwd: root, stdio: "inherit" });
 if (result.status === 0) {
-  const versionedSetup = join(root, "outputs", "installer", `Nodus-Connect-Setup-${version}.exe`);
+  signArtifact(setup);
+  const versionedName = `Nodus-Connect-Setup-${version}${suffix}.exe`;
+  const versionedSetup = join(root, "outputs", "installer", versionedName);
   rmSync(versionedSetup, { force: true });
   copyFileSync(setup, versionedSetup);
   const setupSha256 = hash(readFileSync(versionedSetup));
   const git = (...args) => spawnSync("git", args, { cwd: root, encoding: "utf8", windowsHide: true }).stdout?.trim() || "";
-  writeFileSync(`${versionedSetup}.sha256`, `${setupSha256}  Nodus-Connect-Setup-${version}.exe\n`);
-  writeFileSync(join(root, "outputs", "installer", `Nodus-Connect-Setup-${version}.json`), JSON.stringify({ version, builtAt: new Date().toISOString(), gitHead: git("rev-parse", "HEAD"), dirty: Boolean(git("status", "--porcelain")), setupSha256, quickSupport, appAsarSha256: hash(readFileSync(archive)), lockfileSha256: hash(readFileSync(join(root, "pnpm-lock.yaml"))), nativeHashes, realTwoPcValidation: "PENDING" }, null, 2));
+  writeFileSync(`${versionedSetup}.sha256`, `${setupSha256}  ${versionedName}\n`);
+  writeFileSync(join(root, "outputs", "installer", `Nodus-Connect-Setup-${version}${suffix}.json`), JSON.stringify({ version, compression: compact ? "7z-lzma2-solid" : "zlib", builtAt: new Date().toISOString(), gitHead: git("rev-parse", "HEAD"), dirty: Boolean(git("status", "--porcelain")), setupSha256, quickSupport, signature: artifactSignature(versionedSetup), appAsarSha256: hash(readFileSync(archive)), lockfileSha256: hash(readFileSync(join(root, "pnpm-lock.yaml"))), nativeHashes, realTwoPcValidation: "PENDING" }, null, 2));
 }
 process.exit(result.status ?? 1);
 
@@ -102,13 +112,13 @@ function inventory(dir) {
   });
 }
 
-function find(dir, name) {
+function find(dir, name, parent = "") {
   if (!dir || !existsSync(dir)) return "";
   for (const entry of readdirSync(dir, { withFileTypes: true })) {
     const full = join(dir, entry.name);
-    if (entry.isFile() && entry.name.toLowerCase() === name.toLowerCase()) return full;
+    if (entry.isFile() && entry.name.toLowerCase() === name.toLowerCase() && (!parent || basename(dir) === parent)) return full;
     if (entry.isDirectory()) {
-      const found = find(full, name);
+      const found = find(full, name, parent);
       if (found) return found;
     }
   }

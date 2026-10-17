@@ -1,6 +1,37 @@
 import { describe, expect, it } from "vitest";
-import { classifyDecoderImplementation, classifyEncoderImplementation, contentMotion, counterDelta, cumulativeMeanMs, diagnosePipeline, encoderFallbackReason, InputLatencyDiagnostic, receiverPacketLoss, rtpJitterMs, smoothPipelineSample, videoFrameTiming, type PipelineSample } from "./performance-monitor";
+import { classifyDecoderImplementation, classifyEncoderImplementation, contentMotion, counterDelta, cumulativeMeanMs, diagnosePipeline, encoderFallbackReason, InputLatencyDiagnostic, LatencyWindow, VideoProgressWatchdog, receiverPacketLoss, rtpJitterMs, smoothPipelineSample, videoFrameTiming, type PipelineSample } from "./performance-monitor";
 import { assessQuality } from "./adaptive-quality";
+
+describe("bounded latency windows", () => {
+  it("calculates p50 and p95 without inventing missing or expired measurements", () => {
+    const window = new LatencyWindow(60_000, 100);
+    expect(window.add(0, null)).toEqual({ samples: 0, p50: null, p95: null, max: null });
+    for (let i = 1; i <= 100; i++) window.add(i, i);
+    expect(window.add(101, NaN)).toEqual({ samples: 100, p50: 50, p95: 95, max: 100 });
+    expect(window.add(60_101, undefined).samples).toBe(0);
+  });
+  it("bounds storage and resets on clock regression", () => {
+    const window = new LatencyWindow(60_000, 2);
+    window.add(1, 1); window.add(2, 2);
+    expect(window.add(3, 3)).toEqual({ samples: 2, p50: 2, p95: 3, max: 3 });
+    expect(window.add(0, -1).samples).toBe(0);
+  });
+});
+describe("video progress watchdog", () => {
+  it("does not classify static desktops, disconnections or counter resets as decoder stalls", () => {
+    const watch = new VideoProgressWatchdog();
+    for (let now = 0; now < 60_000; now += 500) expect(watch.inspect(now, 1000, 30, true)).toBe(false);
+    expect(watch.inspect(60_000, 20, 2, true)).toBe(false);
+    expect(watch.inspect(70_000, 40, 2, false)).toBe(false);
+  });
+  it("detects sustained video arrival without decoding and clears when progress resumes", () => {
+    const watch = new VideoProgressWatchdog();
+    expect(watch.inspect(0, 10, 1, true)).toBe(false);
+    for (let now = 500; now < 8000; now += 500) expect(watch.inspect(now, 10 + now, 1, true)).toBe(false);
+    expect(watch.inspect(8000, 8010, 1, true)).toBe(true);
+    expect(watch.inspect(8500, 8510, 2, true)).toBe(false);
+  });
+});
 
 describe("receiver packet loss", () => {
   it("does not invent 100 percent loss when remote-inbound lacks packetsReceived", () => {

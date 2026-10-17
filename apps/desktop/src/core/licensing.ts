@@ -1,6 +1,6 @@
 import { LICENSE_MESSAGES, LicenseError, type LicenseInfo, type LicensePolicy } from "../../../../packages/licensing/src/index";
 import { OfflineLeaseAnchor, verifyBrowserLease } from "../../../../packages/licensing/src/offline";
-import { getDeviceAuthToken } from "./firebase";
+import { getDeviceAuthToken, subscribeCloudSessionAuthorization } from "./firebase";
 import type { LocalIdentity } from "./identity";
 import type { SupportDraft, SupportPermission } from "../../../../packages/common/src/quick-support";
 
@@ -10,7 +10,7 @@ type Credentials = { deviceId: string; deviceToken: string; identityVersion?: nu
 let credentials: Credentials | null = null;
 let credentialPromise: Promise<Credentials> | null = null;
 const prepared = new Map<string, { sessionId: string; anchor: OfflineLeaseAnchor; deviceId: string }>();
-type SessionLifecycle = { stopped: boolean; connected: boolean; enforced: boolean; timer?: ReturnType<typeof setTimeout>; confirmationTimer?: ReturnType<typeof setTimeout>; limitTimer?: ReturnType<typeof setTimeout>; deadline?: number };
+type SessionLifecycle = { stopped: boolean; connected: boolean; enforced: boolean; timer?: ReturnType<typeof setTimeout>; confirmationTimer?: ReturnType<typeof setTimeout>; limitTimer?: ReturnType<typeof setTimeout>; deadline?: number; authorizationWatch?: { close(): void } };
 const lifecycle = new Map<string, SessionLifecycle>();
 const reserved = new Set<string>();
 const offlineReserved = new Set<string>();
@@ -84,7 +84,7 @@ export async function reserveLicense(identity: LocalIdentity, targetNodusId: str
   if (!supportProfileId && offline?.anchor.valid(offline.sessionId, identity.deviceId)) { prepared.delete(targetNodusId); reserved.add(offline.sessionId); offlineReserved.add(offline.sessionId); return offline.sessionId; }
   prepared.delete(targetNodusId);
   const sessionId = crypto.randomUUID();
-  const reservation = await deviceRequest<{ sessionId: string }>(identity, "/license/sessions/reserve", { sessionId, targetNodusId, eventDriven: true, ...(supportProfileId ? { supportProfileId, supportPassword } : {}) });
+  const reservation = await deviceRequest<{ sessionId: string }>(identity, "/license/sessions/reserve", { sessionId, targetNodusId, eventDriven: true, ...(supportProfileId ? { supportProfileId, supportPassword } : { liveAuthorization: true }) });
   if (reservation.sessionId !== sessionId) throw new LicenseError("SERVER_UNAVAILABLE"); reserved.add(sessionId); return sessionId;
 }
 export async function licenseEstablished(sessionId: string, onRejected?: (code: string) => void) {
@@ -95,6 +95,7 @@ export async function licenseEstablished(sessionId: string, onRejected?: (code: 
     if (state.stopped) return;
     state.stopped = true;
     clearTimeout(state.timer); clearTimeout(state.confirmationTimer); clearTimeout(state.limitTimer);
+    state.authorizationWatch?.close();
     onRejected?.(code);
     lifecycle.delete(sessionId);
   }
@@ -104,9 +105,9 @@ export async function licenseEstablished(sessionId: string, onRejected?: (code: 
     try {
       const establishing = !state.connected;
       const started = performance.now();
-      const result = await request<{ status: string; endsAt?: number; serverTime?: number; eventDriven?: boolean }>(`/license/sessions/${establishing ? "establish" : "heartbeat"}`, { sessionId });
+      const result = await request<{ status: string; endsAt?: number; serverTime?: number; eventDriven?: boolean; liveAuthorization?: boolean }>(`/license/sessions/${establishing ? "establish" : "heartbeat"}`, { sessionId });
       if (state.stopped) return;
-      clearTimeout(state.confirmationTimer);
+      if (!result.liveAuthorization || result.status === "ESTABLISHED") clearTimeout(state.confirmationTimer);
       state.enforced = true;
       state.connected = result.status === "ESTABLISHED";
       if (Number.isSafeInteger(result.endsAt) && result.endsAt! > 0 && Number.isSafeInteger(result.serverTime)) {
@@ -118,6 +119,11 @@ export async function licenseEstablished(sessionId: string, onRejected?: (code: 
         }
       }
       if (establishing) window.dispatchEvent(new Event("nodus:license-changed"));
+      if (result.liveAuthorization && !state.authorizationWatch) state.authorizationWatch = subscribeCloudSessionAuthorization(sessionId, status => {
+        if (state.stopped) return;
+        if (status === "ENDED") reject("SESSION_EXPIRED");
+        if (status === "ESTABLISHED") { state.connected = true; clearTimeout(state.confirmationTimer); }
+      }, () => reject("DEVICE_REVOKED"));
       if (result.eventDriven) delay = 0;
     } catch (error) {
       if (!state.enforced && error instanceof LicenseError && error.code === "FORBIDDEN") { state.stopped = true; lifecycle.delete(sessionId); return; }
@@ -132,7 +138,7 @@ export async function licenseEstablished(sessionId: string, onRejected?: (code: 
 }
 export function licenseEnded(sessionId: string) {
   const state = lifecycle.get(sessionId);
-  if (state) { state.stopped = true; clearTimeout(state.timer); clearTimeout(state.confirmationTimer); clearTimeout(state.limitTimer); lifecycle.delete(sessionId); }
+  if (state) { state.stopped = true; clearTimeout(state.timer); clearTimeout(state.confirmationTimer); clearTimeout(state.limitTimer); state.authorizationWatch?.close(); lifecycle.delete(sessionId); }
   offlineReserved.delete(sessionId);
   const wasReserved = reserved.delete(sessionId);
   if (licenseConfigured() && (state?.enforced || wasReserved)) request("/license/sessions/end", { sessionId }).catch(() => undefined);

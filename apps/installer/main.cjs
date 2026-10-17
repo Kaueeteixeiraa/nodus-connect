@@ -245,6 +245,17 @@ async function extractPayload(target, send) {
   const digest = crypto.createHash("sha256");
   for await (const chunk of fs.createReadStream(path.join(target, "resources", "app.asar"))) digest.update(chunk);
   if (digest.digest("hex") !== payloadMetadata.appAsarSha256) throw new Error("PAYLOAD_HASH_MISMATCH");
+  if (Array.isArray(payloadMetadata.files)) {
+    const expected = new Map(payloadMetadata.files.map(file => [file.path, file]));
+    for (const file of extracted) {
+      throwIfCancelled();
+      const relative = path.relative(target, file).replaceAll("\\", "/"), original = expected.get(relative);
+      if (!original || original.bytes !== fs.statSync(file).size) throw new Error("INCOMPLETE_PAYLOAD");
+      const hash = crypto.createHash("sha256");
+      for await (const chunk of fs.createReadStream(file)) hash.update(chunk);
+      if (hash.digest("hex") !== original.sha256) throw new Error("PAYLOAD_HASH_MISMATCH");
+    }
+  }
   send("Arquivos extraidos e verificados.", 78, "copy");
 }
 

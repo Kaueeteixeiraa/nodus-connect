@@ -80,6 +80,9 @@ export interface SignalMessage {
 }
 
 export interface CoordinationDevice {
+  appVersion?: string;
+  updateState?: "idle" | "checking" | "downloading" | "installing" | "current" | "deferred" | "failed";
+  activeSessions?: number;
   supportProfileId?: string;
   nodusId: string;
   deviceId?: string;

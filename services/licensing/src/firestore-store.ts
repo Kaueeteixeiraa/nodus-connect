@@ -16,11 +16,13 @@ export function configureFirestore(db: Firestore): Firestore {
 export function firestoreLicenseStore(db: Firestore): LicenseStore {
   return { transaction: (operation, options) => db.runTransaction(async (transaction: Transaction) => {
     const writes = new Map<string, object>();
+    const reads = new Map<string, Promise<object | null>>();
     const result = await operation({
       async get<T>(path: string) {
         if (writes.has(path)) return structuredClone(writes.get(path)) as T;
-        const document = await transaction.get(db.doc(path));
-        return document.exists ? document.data() as T : null;
+        let pending = reads.get(path);
+        if (!pending) { pending = transaction.get(db.doc(path)).then(document => document.exists ? document.data()! : null); reads.set(path, pending); }
+        return structuredClone(await pending) as T | null;
       },
       async find<T>(collection: string, field: string, value: string) {
         const documents = await transaction.get(db.collection(collection).where(field, "==", value).limit(1001));
