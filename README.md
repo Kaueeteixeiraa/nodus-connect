@@ -2,7 +2,7 @@
 
 Distribuicao oficial do Nodus Connect para Windows.
 
-- [Baixar pelo site oficial](https://nodus-connect-download.vercel.app/)
+- [Baixar pelo site oficial](https://nodusconnect.com.br/)
 - [Versao mais recente](https://github.com/Kaueeteixeiraa/nodus-connect/releases/latest)
 - [Todas as versoes](https://github.com/Kaueeteixeiraa/nodus-connect/releases)
 
